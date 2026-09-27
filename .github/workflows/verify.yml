@@ -10,6 +10,23 @@ permissions:
   contents: read
 
 jobs:
+  certificate-proofs:
+    name: Certificate proof (${{ matrix.shell }}, ${{ matrix.proof }})
+    runs-on: windows-latest
+    timeout-minutes: 3
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+        proof: [cryptui, leaf]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ${{ matrix.proof }} certificate proof
+        run: ./test/${{ matrix.proof }}-proof.ps1
+
   powershell-tests:
     name: Tests (${{ matrix.label }}, ${{ matrix.suite }})
     runs-on: windows-latest
