@@ -123,27 +123,41 @@ function Start-Issue3UiEdge {
     return [pscustomobject]@{ Process = $process; Socket = $socket; NextId = 0; ProfilePath = $ProfilePath }
 }
 
+function Get-Issue3UiEdgeProcesses {
+    param([Parameter(Mandatory = $true)][string]$ProfilePath)
+    return @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'msedge.exe'" |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.CommandLine) -and
+            ([string]$_.CommandLine).IndexOf($ProfilePath, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+}
+
 function Stop-Issue3UiEdgeProfile {
     param([string]$ProfilePath)
     if ([string]::IsNullOrWhiteSpace($ProfilePath)) { return }
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
-        $matches = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'msedge.exe'" |
-            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.CommandLine) -and
-                ([string]$_.CommandLine).IndexOf($ProfilePath, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+        $matches = @(Get-Issue3UiEdgeProcesses -ProfilePath $ProfilePath)
         foreach ($item in $matches) {
             try { Stop-Process -Id ([int]$item.ProcessId) -Force -ErrorAction Stop }
-            catch [System.ArgumentException] { $null = $_ }
-            catch [System.InvalidOperationException] { $null = $_ }
+            catch {
+                # Edge may exit after the CIM snapshot. Only a surviving
+                # process with this unique profile needs another attempt.
+                $survivors = @(Get-Issue3UiEdgeProcesses -ProfilePath $ProfilePath |
+                    Where-Object { [int]$_.ProcessId -eq [int]$item.ProcessId })
+                if ($survivors.Count -gt 0) {
+                    Write-Verbose ('Retrying cleanup of Edge process {0}.' -f $item.ProcessId)
+                }
+            }
         }
         if ($matches.Count -eq 0) { break }
         Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $deadline)
-    if (@(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'msedge.exe'" |
-        Where-Object { ([string]$_.CommandLine).IndexOf($ProfilePath, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -gt 0) {
+    if (@(Get-Issue3UiEdgeProcesses -ProfilePath $ProfilePath).Count -gt 0) {
         throw 'Edge processes retained the test profile after cleanup.'
     }
-    if (Test-Path -LiteralPath $ProfilePath) { Remove-Item -LiteralPath $ProfilePath -Recurse -Force }
+    if (Test-Path -LiteralPath $ProfilePath) {
+        Remove-Item -LiteralPath $ProfilePath -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $ProfilePath) { throw 'The Edge test profile remained after removal.' }
+    }
 }
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('mihari-issue3-ui-' + [guid]::NewGuid().ToString('N'))
