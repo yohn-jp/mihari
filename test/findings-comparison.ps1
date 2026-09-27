@@ -37,6 +37,7 @@ $finding = @($findings | Where-Object { $_.code -eq 'upstream_proxy_auth_require
 Assert-MihariTest -Condition ($null -ne $finding) -Message 'Repeated proxy failures must produce a grouped finding.'
 Assert-MihariTest -Condition ($finding.occurrenceCount -eq 220 -and $finding.evidenceRefs.Count -eq 220) -Message 'Session findings must preserve all occurrences and references beyond the UI hot window.'
 Assert-MihariTest -Condition ($finding.ruleVersion -eq 'mihari-diagnosis/1' -and $finding.findingId -match '^finding-[0-9a-f]{32}$') -Message 'Grouped findings must have a stable rule version and identity.'
+Assert-MihariTest -Condition ($finding.sessionId -eq 'findings-session' -and $finding.trialId -eq $null -and $finding.caseId -eq $null) -Message 'Findings must expose their explicit scope identity fields.'
 Assert-MihariTest -Condition ($finding.evidenceRefs[0].sessionId -eq 'findings-session' -and $finding.evidenceRefs[0].eventId -like 'proxy-407-*') -Message 'Evidence references must include both session and event identity.'
 Assert-MihariTest -Condition ($finding.classification -eq 'proxy_authentication' -and $finding.evidenceStrength -eq 'direct_observation' -and -not [string]::IsNullOrWhiteSpace($finding.nextCheck)) -Message 'Findings must expose classification, evidence strength, and a next check.'
 Assert-MihariTest -Condition (-not ($finding | ConvertTo-Json -Depth 20 -Compress).Contains('secret-value')) -Message 'Finding evidence must redact query values.'
@@ -59,6 +60,22 @@ Assert-MihariTest -Condition ($retained.occurrenceCount -eq 221 -and $retained.e
 $agedOut = @(Get-MihariSessionFindings -Events @() -PreviousFindings @($incremented))
 $stillOpen = @($agedOut | Where-Object { $_.findingId -eq $finding.findingId }) | Select-Object -First 1
 Assert-MihariTest -Condition ($null -ne $stillOpen -and $stillOpen.resolutionState -eq 'open' -and $stillOpen.occurrenceCount -eq 221) -Message 'An absent finding in a later event window must remain open and retain its evidence.'
+
+$snapshotOne = Update-MihariFindingSnapshot -Events @($repeatedEvents.ToArray()) -SessionId 'findings-session' -FileGeneration 'events-generation-1' -Coverage observed
+$snapshotTwo = Update-MihariFindingSnapshot -Events @($nextEvent) -PreviousSnapshot $snapshotOne -SessionId 'findings-session' -FileGeneration 'events-generation-1' -Coverage observed
+Assert-MihariTest -Condition (-not $snapshotTwo.historyGap -and $snapshotTwo.lastSequence -eq 221 -and $snapshotTwo.findings[0].count -eq 221) -Message 'A contiguous event projection must advance the persistent finding snapshot.'
+$missedEvent = [pscustomobject][ordered]@{
+    eventId = 'proxy-407-225'; sequence = 225; timestamp = ([DateTimeOffset]::UtcNow.AddMinutes(4)).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    sessionId = 'findings-session'; connectionId = 'connection-225'; requestId = 'request-225'; source = 'proxy'; mode = 'Tunnel'
+    stage = 'upstream.proxy.connect'; outcome = 'rejected'; coverage = 'observed'
+    data = [pscustomobject]@{ routeKind = 'ExplicitProxy'; host = 'blocked.test'; port = 443; path = '/upload?token=gap-secret'; proxyStatus = 407 }
+}
+$snapshotWithGap = Update-MihariFindingSnapshot -Events @($missedEvent) -PreviousSnapshot $snapshotTwo -SessionId 'findings-session' -FileGeneration 'events-generation-1' -Coverage observed
+Assert-MihariTest -Condition ($snapshotWithGap.historyGap -and $snapshotWithGap.sequenceGap -and $snapshotWithGap.coverage -eq 'truncated' -and $snapshotWithGap.findings[0].count -eq 222) -Message 'A sequence gap must remain visible while retaining the prior finding history.'
+$snapshotAfterRotation = Update-MihariFindingSnapshot -Events @() -PreviousSnapshot $snapshotWithGap -SessionId 'findings-session' -FileGeneration 'events-generation-2' -Coverage observed
+Assert-MihariTest -Condition ($snapshotAfterRotation.rotationDetected -and $snapshotAfterRotation.historyGap -and $snapshotAfterRotation.findings[0].resolutionState -eq 'open' -and $snapshotAfterRotation.findings[0].evidenceAvailability -eq 'possibly_rotated') -Message 'File generation changes must retain open findings and mark old evidence as possibly rotated.'
+$newSessionSnapshot = Update-MihariFindingSnapshot -Events @() -PreviousSnapshot $snapshotAfterRotation -SessionId 'another-session' -FileGeneration 'another-generation'
+Assert-MihariTest -Condition ($newSessionSnapshot.previousSnapshotIgnored -and $newSessionSnapshot.findings.Count -eq 0) -Message 'A previous snapshot from another session must not mix findings.'
 
 $resolution = [pscustomobject]@{
     positive = $true

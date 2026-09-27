@@ -714,6 +714,9 @@ function Merge-MihariFindingGroups {
                 code = $finding.code
                 summary = $finding.summary
                 scope = $finding.scope
+                sessionId = $parts.SessionId
+                trialId = $parts.TrialId
+                caseId = $parts.CaseId
                 ruleVersion = 'mihari-diagnosis/1'
                 evidenceRefs = @()
                 evidenceIds = @()
@@ -846,6 +849,131 @@ function Get-MihariSessionFindings {
         [Parameter(Mandatory = $false)][AllowEmptyCollection()][object[]] $PreviousFindings = @()
     )
     return @(Get-MihariDiagnosis -Events $Events -PreviousFindings $PreviousFindings)
+}
+
+function Update-MihariFindingSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)][AllowEmptyCollection()][object[]] $Events = @(),
+        [Parameter(Mandatory = $false)][AllowNull()][object] $PreviousSnapshot,
+        [Parameter(Mandatory = $true)][string] $SessionId,
+        [Parameter(Mandatory = $false)][AllowNull()][string] $FileGeneration,
+        [Parameter(Mandatory = $false)][long] $FirstSequence = 0,
+        [Parameter(Mandatory = $false)][long] $LastSequence = 0,
+        [Parameter(Mandatory = $false)][ValidateSet('observed', 'unknown', 'unsupported', 'permission_denied', 'truncated', 'lost')][string] $Coverage = 'unknown',
+        [Parameter(Mandatory = $false)][ValidateRange(0, 1000000)][int] $MalformedLineCount = 0,
+        [Parameter(Mandatory = $false)][AllowNull()][string] $ReadError,
+        [Parameter(Mandatory = $false)][switch] $RebuiltFromCanonicalHistory
+    )
+
+    $safeSessionId = ConvertTo-MihariDiagnosisSafeText -Value $SessionId
+    if ($null -eq $safeSessionId) { throw 'A session ID is required for a persistent finding snapshot.' }
+    $previousSessionId = $null
+    $previousGeneration = $null
+    $previousLastSequence = 0L
+    $previousCoverage = 'unknown'
+    $previousHistoryGap = $false
+    $previousFindings = @()
+    $previousSnapshotIgnored = $false
+    if ($null -ne $PreviousSnapshot) {
+        $previousSessionId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $PreviousSnapshot -Names @('sessionId'))
+        if ([string]::Equals($previousSessionId, $safeSessionId, [System.StringComparison]::Ordinal)) {
+            $previousGeneration = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $PreviousSnapshot -Names @('fileGeneration', 'generation'))
+            $previousLastSequenceValue = Get-MihariMemberValue -InputObject $PreviousSnapshot -Names @('lastSequence')
+            if ($null -ne $previousLastSequenceValue) { [long]::TryParse([string]$previousLastSequenceValue, [ref]$previousLastSequence) | Out-Null }
+            $previousCoverageValue = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $PreviousSnapshot -Names @('coverage'))
+            if ($null -ne $previousCoverageValue) { $previousCoverage = $previousCoverageValue }
+            $previousHistoryGap = ([string](Get-MihariMemberValue -InputObject $PreviousSnapshot -Names @('historyGap'))).ToLowerInvariant() -eq 'true'
+            $previousFindings = @(Get-MihariMemberValue -InputObject $PreviousSnapshot -Names @('findings'))
+        }
+        else { $previousSnapshotIgnored = $true }
+    }
+
+    $eventSequences = New-Object 'System.Collections.Generic.List[long]'
+    foreach ($event in $Events) {
+        if ($null -eq $event) { continue }
+        $eventSessionId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $event -Data (Get-MihariEventData -Event $event) -Names @('sessionId'))
+        if ($null -ne $eventSessionId -and -not [string]::Equals($eventSessionId, $safeSessionId, [System.StringComparison]::Ordinal)) {
+            throw 'Finding snapshot events must belong to the requested session.'
+        }
+        $sequenceValue = Get-MihariEventValue -Event $event -Data (Get-MihariEventData -Event $event) -Names @('sequence')
+        $sequence = 0L
+        if ($null -ne $sequenceValue -and [long]::TryParse([string]$sequenceValue, [ref]$sequence) -and $sequence -gt 0) { $eventSequences.Add($sequence) }
+    }
+    if ($FirstSequence -le 0 -and $eventSequences.Count -gt 0) { $FirstSequence = [long](($eventSequences.ToArray() | Measure-Object -Minimum).Minimum) }
+    if ($LastSequence -le 0 -and $eventSequences.Count -gt 0) { $LastSequence = [long](($eventSequences.ToArray() | Measure-Object -Maximum).Maximum) }
+
+    $currentGeneration = ConvertTo-MihariDiagnosisSafeText -Value $FileGeneration
+    $rotationDetected = ($null -ne $previousGeneration -and $null -ne $currentGeneration -and
+        -not [string]::Equals($previousGeneration, $currentGeneration, [System.StringComparison]::Ordinal))
+    $sequenceGap = $false
+    if ($previousLastSequence -gt 0 -and -not $RebuiltFromCanonicalHistory) {
+        if ($FirstSequence -gt 0 -and $FirstSequence -gt ($previousLastSequence + 1)) { $sequenceGap = $true }
+        elseif ($FirstSequence -eq 0 -and $LastSequence -gt ($previousLastSequence + 1)) { $sequenceGap = $true }
+    }
+    $historyGap = $rotationDetected -or $sequenceGap -or $MalformedLineCount -gt 0 -or -not [string]::IsNullOrWhiteSpace($ReadError)
+    if ($previousHistoryGap -and -not $RebuiltFromCanonicalHistory) { $historyGap = $true }
+    if ($RebuiltFromCanonicalHistory -and $MalformedLineCount -eq 0 -and [string]::IsNullOrWhiteSpace($ReadError) -and -not $sequenceGap) { $historyGap = $false }
+
+    $effectiveCoverage = $Coverage
+    if ($historyGap) { $effectiveCoverage = 'truncated' }
+    elseif ($effectiveCoverage -eq 'unknown' -and $Events.Count -gt 0) {
+        $allObserved = $true
+        foreach ($event in $Events) {
+            $eventCoverage = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $event -Data (Get-MihariEventData -Event $event) -Names @('coverage'))
+            if ($eventCoverage -ne 'observed') { $allObserved = $false; break }
+        }
+        if ($allObserved) { $effectiveCoverage = 'observed' }
+    }
+    elseif ($Events.Count -eq 0 -and $Coverage -eq 'unknown' -and $previousCoverage -ne 'unknown') {
+        $effectiveCoverage = $previousCoverage
+    }
+
+    $findings = @(Get-MihariSessionFindings -Events $Events -PreviousFindings $previousFindings)
+    if ($rotationDetected -or $sequenceGap -or $RebuiltFromCanonicalHistory) {
+        $evidenceAvailable = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        if ($RebuiltFromCanonicalHistory) {
+            foreach ($event in $Events) {
+                $eventId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $event -Data (Get-MihariEventData -Event $event) -Names @('eventId', 'id'))
+                if ($null -ne $eventId) { $evidenceAvailable.Add((Get-MihariFindingReferenceKey -Reference ([pscustomobject]@{ sessionId = $safeSessionId; eventId = $eventId }))) | Out-Null }
+            }
+        }
+        $findingCopies = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($finding in $findings) {
+            $copy = [ordered]@{}
+            foreach ($property in $finding.PSObject.Properties) { $copy[$property.Name] = $property.Value }
+            if ($RebuiltFromCanonicalHistory) {
+                $allEvidenceAvailable = $true
+                foreach ($reference in @($finding.evidenceRefs)) {
+                    if (-not $evidenceAvailable.Contains((Get-MihariFindingReferenceKey -Reference $reference))) { $allEvidenceAvailable = $false; break }
+                }
+                if ($allEvidenceAvailable) { $copy['evidenceAvailability'] = 'verified_in_replay' }
+                else { $copy['evidenceAvailability'] = 'unverified' }
+            }
+            elseif ($rotationDetected -or $sequenceGap) { $copy['evidenceAvailability'] = 'possibly_rotated' }
+            $findingCopies.Add([pscustomobject]$copy)
+        }
+        $findings = @($findingCopies.ToArray())
+    }
+    $snapshotGeneration = $currentGeneration
+    if ($null -eq $snapshotGeneration) { $snapshotGeneration = $previousGeneration }
+    $snapshotLastSequence = $LastSequence
+    if ($snapshotLastSequence -lt $previousLastSequence) { $snapshotLastSequence = $previousLastSequence }
+    return [pscustomobject][ordered]@{
+        schemaVersion = 1
+        sessionId = $safeSessionId
+        fileGeneration = $snapshotGeneration
+        firstSequence = $FirstSequence
+        lastSequence = $snapshotLastSequence
+        historyGap = [bool]$historyGap
+        rotationDetected = [bool]$rotationDetected
+        sequenceGap = [bool]$sequenceGap
+        previousSnapshotIgnored = [bool]$previousSnapshotIgnored
+        coverage = $effectiveCoverage
+        malformedLineCount = $MalformedLineCount
+        readError = (ConvertTo-MihariDiagnosisSafeText -Value $ReadError)
+        findings = @($findings)
+    }
 }
 
 function Set-MihariFindingResolution {
