@@ -103,25 +103,53 @@ function Start-Issue3UiEdge {
     if ($null -eq $process) { throw 'Could not start headless Edge for the management UI smoke test.' }
     $portFile = Join-Path $ProfilePath 'DevToolsActivePort'
     $deadline = [DateTime]::UtcNow.AddSeconds(25)
+    $port = 0
+    $portReadError = $null
     do {
         if ($process.HasExited) { throw ('Headless Edge exited before exposing DevTools: ' + $process.ExitCode) }
-        if ([IO.File]::Exists($portFile)) { break }
+        if ([IO.File]::Exists($portFile)) {
+            try {
+                $portLines = [IO.File]::ReadAllLines($portFile)
+                $candidatePort = 0
+                if ($portLines.Length -gt 0 -and [int]::TryParse($portLines[0], [ref]$candidatePort) -and
+                    $candidatePort -gt 0 -and $candidatePort -le 65535) {
+                    $port = $candidatePort
+                    break
+                }
+            }
+            catch {
+                $isSharingRace = ($_.Exception -is [IO.IOException] -or $_.Exception.InnerException -is [IO.IOException])
+                if (-not $isSharingRace) { throw }
+                $portReadError = $_.Exception.GetType().FullName
+            }
+        }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
-    if (-not [IO.File]::Exists($portFile)) { throw 'Headless Edge did not expose DevToolsActivePort.' }
-    $port = [int](([IO.File]::ReadAllLines($portFile))[0])
+    if ($port -le 0) {
+        if (-not [IO.File]::Exists($portFile)) { throw 'Headless Edge did not expose DevToolsActivePort.' }
+        throw ('Headless Edge did not publish a readable positive DevTools port before startup deadline. Last read error type: ' + [string]$portReadError)
+    }
     $target = $null
+    $targetProbeError = $null
     do {
-        foreach ($candidate in @(Get-Issue3UiHttpJson -Uri ('http://127.0.0.1:{0}/json/list' -f $port))) {
-            if ($candidate.type -eq 'page' -and ([string]$candidate.url).StartsWith($Uri, [System.StringComparison]::OrdinalIgnoreCase)) {
-                $target = $candidate
-                break
+        if ($process.HasExited) { throw ('Headless Edge exited before exposing its management page: ' + $process.ExitCode) }
+        try {
+            foreach ($candidate in @(Get-Issue3UiHttpJson -Uri ('http://127.0.0.1:{0}/json/list' -f $port))) {
+                if ($candidate.type -eq 'page' -and ([string]$candidate.url).StartsWith($Uri, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $target = $candidate
+                    break
+                }
             }
+        }
+        catch {
+            $isStartupNetworkRace = ($_.Exception -is [System.Net.WebException] -or $_.Exception.InnerException -is [System.Net.WebException])
+            if (-not $isStartupNetworkRace) { throw }
+            $targetProbeError = $_.Exception.GetType().FullName
         }
         if ($null -ne $target) { break }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
-    if ($null -eq $target) { throw 'Headless Edge did not navigate to the Mihari management page.' }
+    if ($null -eq $target) { throw ('Headless Edge did not navigate to the Mihari management page before startup deadline. Last probe error type: ' + [string]$targetProbeError) }
     $socket = New-Object System.Net.WebSockets.ClientWebSocket
     $cancel = [System.Threading.CancellationTokenSource]::new(10000)
     try { [void]$socket.ConnectAsync([Uri]$target.webSocketDebuggerUrl, $cancel.Token).GetAwaiter().GetResult() }
