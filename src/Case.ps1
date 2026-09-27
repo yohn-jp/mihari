@@ -44,7 +44,8 @@ function ConvertTo-MihariCaseSafeText {
     }
     $text = [regex]::Replace($text, '([?&])([^=&#\s]+)=([^&#\s]*)', '$1$2=[REDACTED]')
     $text = [regex]::Replace($text, '([?&])([^=&#\s]+)(?=(&|#|\s|$))', '$1[REDACTED]')
-    $text = [regex]::Replace($text, '(?i)(["'']?(?:authorization|proxy-authorization|cookie|set-cookie|password|token|secret|client_secret)["'']?\s*[:=]\s*["'']?)[^,\s}"'']+', '$1[REDACTED]')
+    $text = [regex]::Replace($text, '(?i)(["'']?(?:authorization|proxy-authorization|cookie|set-cookie|password|token|secret|client_secret|username|user_name)["'']?\s*[:=]\s*["'']?)[^,\s}"'']+', '$1[REDACTED]')
+    $text = [regex]::Replace($text, '(?i)(?<![A-Za-z0-9])(?:[A-Z]:\\|\\\\)[^\s,;"<>]+|(?<![A-Za-z0-9/:])/(?:home|users|tmp|private|mnt)/[^\s,;"<>]*', '[REDACTED: local path]')
     if ($AllowLineBreaks) {
         $text = [regex]::Replace($text, '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ')
     }
@@ -105,7 +106,7 @@ function ConvertTo-MihariCaseSafeValue {
             $name = [regex]::Replace([string]$pair.Name, '[^A-Za-z0-9_.-]', '')
             if ($name.Length -eq 0) { continue }
             if ($name.Length -gt 64) { $name = $name.Substring(0, 64) }
-            if ($name -match '(?i)(authorization|cookie|password|secret|token|credential|private.?key|debugger|control.?url|headers?|body|client.?cert)' ) {
+            if ($name -match '(?i)(authorization|cookie|password|secret|token|credential|user.?name|private.?key|debugger|control.?url|headers?|body|client.?cert|profile.?path|profile.?directory|home.?path|user.?path|local.?path)' ) {
                 $RedactedCount.Value = [int]$RedactedCount.Value + 1
                 continue
             }
@@ -162,7 +163,7 @@ function Write-MihariCaseStoreJsonAtomic {
     $temporaryPath = $Path + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
     $backupPath = $Path + '.' + [Guid]::NewGuid().ToString('N') + '.bak'
     $json = ConvertTo-Json -InputObject $Value -Depth 8 -Compress -ErrorAction Stop
-    $encoding = New-Object System.Text.UTF8Encoding($false)
+    $encoding = [System.Text.UTF8Encoding]::new($false)
     try {
         [System.IO.File]::WriteAllText($temporaryPath, $json + [Environment]::NewLine, $encoding)
         if ([System.IO.File]::Exists($Path)) { [System.IO.File]::Replace($temporaryPath, $Path, $backupPath) }
@@ -222,7 +223,7 @@ function Read-MihariCaseJournalUnlocked {
     try {
         $file = [System.IO.File]::Open($journalPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
         if ($file.Length -gt 33554432) { throw 'The Mihari case journal exceeds its 32 MiB read limit.' }
-        $reader = New-Object System.IO.StreamReader($file, [System.Text.Encoding]::UTF8, $true)
+        $reader = [System.IO.StreamReader]::new($file, [System.Text.Encoding]::UTF8, $true)
         $text = $reader.ReadToEnd()
         $lastNewline = $text.LastIndexOf("`n")
         if ($lastNewline -lt 0 -and $text.Length -gt 0) {
@@ -303,12 +304,15 @@ function Add-MihariCaseJournalRecordUnlocked {
 
     $path = Join-Path ([System.IO.Path]::GetFullPath($CaseRoot)) 'operator.jsonl'
     $json = ConvertTo-Json -InputObject $Record -Depth 8 -Compress -ErrorAction Stop
-    $encoding = New-Object System.Text.UTF8Encoding($false)
+    $encoding = [System.Text.UTF8Encoding]::new($false)
     $bytes = $encoding.GetBytes($json + [Environment]::NewLine)
     $stream = $null
     try {
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Append,
             [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+        if (($stream.Length + $bytes.Length) -gt 33554432) {
+            throw 'The Mihari case journal has reached its 32 MiB write limit.'
+        }
         $stream.Write($bytes, 0, $bytes.Length)
         $stream.Flush()
     }
@@ -850,6 +854,9 @@ function Set-MihariDependencyNecessity {
     if ($null -eq $dependencyId -or $dependencyId -notmatch '^dep-[0-9a-f]{24}$') { throw 'A valid projected dependency is required.' }
     if ($State -eq 'business_required_confirmed' -and -not $ConfirmBusinessRequired) {
         throw 'Explicit business necessity confirmation is required for this state change.'
+    }
+    if ($State -ne 'business_required_confirmed' -and $ConfirmBusinessRequired) {
+        throw 'Business necessity confirmation can only accompany the business-required state.'
     }
     $evidence = Get-MihariCaseField -InputObject $Dependency -Names @('evidenceReferences', 'evidence')
     $safeEvidence = New-Object 'System.Collections.Generic.List[object]'
