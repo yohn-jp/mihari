@@ -350,6 +350,15 @@ function Invoke-MihariHttp2Frame {
             $State.GoAway = $true
             $last = [int]((Get-MihariHttp2UInt32 -Bytes $bytes -Offset 9) -band 0x7fffffff)
             Write-MihariHttp2Fact -Context $Context -State $State -StreamId 0 -Stage 'http2.goaway' -Outcome 'observed' -Data @{ lastStreamId = $last; errorCode = ('0x{0:x8}' -f (Get-MihariHttp2UInt32 -Bytes $bytes -Offset 13)); direction = $State.Leg }
+            if ($State.Leg -eq 'upstream') {
+                foreach ($activeId in @($Context.Streams.Keys)) {
+                    if ([int]$activeId -gt $last) {
+                        # The origin says it did not process IDs above this
+                        # value. Do not infer whether a retry will succeed.
+                        Write-MihariHttp2Fact -Context $Context -State $State -StreamId ([int]$activeId) -Stage 'http2.goaway_affected' -Outcome 'observed' -Data @{ lastStreamId = $last; direction = $State.Leg }
+                    }
+                }
+            }
         }
         8 {
             if ($len -ne 4) { throw [System.IO.InvalidDataException]::new('Invalid HTTP/2 WINDOW_UPDATE size.') }
