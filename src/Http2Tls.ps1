@@ -101,6 +101,7 @@ function Invoke-MihariHttp2Inspect {
         }
         $longLivedSlot = $true
         $stage = 'client.tls'
+        $clock.Restart()
         $leaf = Get-MihariLeaf -Session $Session -DestinationHost $ConnectHost
         $clientTls = [System.Net.Security.SslStream]::new($ClientStream, $true)
         $clientTls.ReadTimeout = 30000
@@ -123,6 +124,7 @@ function Invoke-MihariHttp2Inspect {
         $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -Mode $ConnectionMode -ConfigurationRevision $AcceptedConfigurationRevision -TransportLeg 'client' -Stage 'client.tls' -Outcome 'succeeded' -ElapsedMs $clock.ElapsedMilliseconds -Data $clientFacts
 
         $stage = 'upstream.resolve'
+        $clock.Restart()
         $uri = [UriBuilder]::new('https', $ConnectHost, $ConnectPort, '/')
         $route = Resolve-MihariRoute -Uri $uri.Uri -Override $Session.UpstreamProxy -PlatformSnapshot $Session.PlatformProxySnapshot -MihariProxyPort $Session.ActualPort
         $routeFacts = @{ host = $ConnectHost; port = $ConnectPort; routeKind = $route.Kind; routeSource = $route.Source }
@@ -136,6 +138,7 @@ function Invoke-MihariHttp2Inspect {
         $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -Mode $ConnectionMode -ConfigurationRevision $AcceptedConfigurationRevision -Stage $stage -Outcome 'succeeded' -ElapsedMs $clock.ElapsedMilliseconds -Data $routeFacts
 
         $stage = 'upstream.tcp'
+        $clock.Restart()
         $upstreamConnectionId = [guid]::NewGuid().ToString('N')
         $upstream = Open-MihariUpstream -Route $route -TargetHost $ConnectHost -TargetPort $ConnectPort -Tunnel:$true -ProxyAuthorization $ProxyAuthorization
         if ($null -eq $upstream -or $null -eq $upstream.Stream) { throw [IO.IOException]::new('Upstream connection returned no stream.') }
@@ -145,11 +148,12 @@ function Invoke-MihariHttp2Inspect {
             $stage = 'upstream.proxy.connect'
             $proxyFacts = @{ host = $ConnectHost; port = $ConnectPort; routeKind = $route.Kind; proxyStatus = [int]$upstream.ProxyStatus.StatusCode; proxyHost = $route.Host; proxyPort = $route.Port }
             $outcome = $(if ($proxyFacts.proxyStatus -eq 200) { 'succeeded' } else { 'failed' })
-            $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -UpstreamConnectionId $upstreamConnectionId -Mode $ConnectionMode -ConfigurationRevision $AcceptedConfigurationRevision -TransportLeg 'upstream' -Stage $stage -Outcome $outcome -ElapsedMs $clock.ElapsedMilliseconds -Data $proxyFacts
+            $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -UpstreamConnectionId $upstreamConnectionId -Mode $ConnectionMode -ConfigurationRevision $AcceptedConfigurationRevision -TransportLeg 'upstream' -Stage $stage -Outcome $outcome -ElapsedMs $null -Data $proxyFacts
             if ($proxyFacts.proxyStatus -ne 200) { return }
         }
 
         $stage = 'upstream.tls'
+        $clock.Restart()
         $validationCapture = New-MihariTlsValidationCapture
         $callback = New-MihariTlsValidationCallback -Capture $validationCapture
         $upstreamTls = [System.Net.Security.SslStream]::new($upstream.Stream, $true, $callback)
@@ -167,6 +171,7 @@ function Invoke-MihariHttp2Inspect {
         if ($upstreamFacts.tlsAlpn -ne 'h2') { throw [System.NotSupportedException]::new('The upstream TLS leg did not negotiate h2; protocol conversion is unavailable.') }
 
         $stage = 'http2.relay'
+        $clock.Restart()
         Invoke-MihariHttp2Relay -Session $Session -ClientTls $clientTls -UpstreamTls $upstreamTls -ConnectionId $ConnectionId -UpstreamConnectionId $upstreamConnectionId -ConnectHost $ConnectHost -ConnectPort $ConnectPort -ConnectionMode $ConnectionMode -AcceptedConfigurationRevision $AcceptedConfigurationRevision
     }
     catch {
