@@ -747,6 +747,7 @@ function Merge-MihariFindingGroups {
                 resolutionState = 'open'
                 resolvedAt = $null
                 resolutionEvidence = @()
+                evidenceAvailability = $null
             }
             $groups.Add($group)
             $groupIndex[$findingId] = $group
