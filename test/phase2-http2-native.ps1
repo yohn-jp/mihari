@@ -147,6 +147,25 @@ try {
     $frame = (Add-MihariHttp2Input -State $upstream -Bytes $wire -Count $wire.Length).Items[0]
     $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
     Assert-MihariTest -Condition ($ctx.Streams.Count -eq 0) -Message 'RST_STREAM must cancel just its stream.'
+
+    $requestBlock = Encode-MihariHpackBlock -Context $requestEncoder -Headers $requestHeaders
+    $wire = New-MihariTestH2Frame -Type 1 -Flags 4 -StreamId 9 -Payload $requestBlock
+    $frame = (Add-MihariHttp2Input -State $client -Bytes $wire -Count $wire.Length).Items[0]
+    $null = Invoke-MihariHttp2Frame -Context $ctx -State $client -Opposite $upstream -Frame $frame
+    $client.ConnectionWindow = [long]4
+    $wire = New-MihariTestH2Frame -Type 0 -Flags 1 -StreamId 9 -Payload ([byte[]]@(1,2,3,4))
+    $frame = (Add-MihariHttp2Input -State $client -Bytes $wire -Count $wire.Length).Items[0]
+    $null = Invoke-MihariHttp2Frame -Context $ctx -State $client -Opposite $upstream -Frame $frame
+    $wire = New-MihariTestH2Frame -Type 8 -Flags 0 -StreamId 0 -Payload ([byte[]]@(0,0,0,4))
+    $frame = (Add-MihariHttp2Input -State $upstream -Bytes $wire -Count $wire.Length).Items[0]
+    $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
+    $responseBlock = Encode-MihariHpackBlock -Context $responseEncoder -Headers $responseHeaders
+    $wire = New-MihariTestH2Frame -Type 1 -Flags 5 -StreamId 9 -Payload $responseBlock
+    $frame = (Add-MihariHttp2Input -State $upstream -Bytes $wire -Count $wire.Length).Items[0]
+    $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
+    $goaway = New-MihariTestH2Frame -Type 7 -Flags 0 -StreamId 0 -Payload ([byte[]]@(0,0,0,9,0,0,0,0))
+    $frame = (Add-MihariHttp2Input -State $upstream -Bytes $goaway -Count $goaway.Length).Items[0]
+    $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
     $broken = New-MihariHttp2Direction -Leg client
     $broken.FirstSettings = $false
     $continuation = New-MihariTestH2Frame -Type 9 -Flags 4 -StreamId 1
@@ -158,6 +177,7 @@ finally {
     $events = [IO.File]::ReadAllText((Join-Path $temporary 'events.jsonl'))
     Assert-MihariTest -Condition ($events.Contains('/one?token=REDACTED') -and -not $events.Contains('topsecret')) -Message 'HTTP/2 path evidence must redact query values.'
     Assert-MihariTest -Condition ($events.Contains('http2.grpc_status') -and $events.Contains('http2.reset')) -Message 'RPC trailer and reset facts must remain distinct.'
+    Assert-MihariTest -Condition ($events.Contains('http2.flow_wait') -and $events.Contains('http2.goaway')) -Message 'Measured flow wait and GOAWAY direction must remain distinct facts.'
     [IO.Directory]::Delete($temporary,$true)
 }
 Write-Host 'PASS phase2-http2-native: bounded frame parser, concurrent streams, safe path evidence'
