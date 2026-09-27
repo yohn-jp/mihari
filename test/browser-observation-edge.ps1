@@ -124,6 +124,7 @@ function Wait-MihariBrowserH2Event {
         [Parameter(Mandatory = $true)][string] $EventsPath,
         [Parameter(Mandatory = $true)][int] $OriginPort,
         [Parameter(Mandatory = $true)][string] $TransactionsPath,
+        [Parameter(Mandatory = $true)][string] $ErrorPath,
         [AllowNull()][string] $ObservationStatus,
         [int] $TimeoutSeconds = 30
     )
@@ -142,7 +143,8 @@ function Wait-MihariBrowserH2Event {
         }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
-    $diagnostics = Get-MihariBrowserH2TimeoutDiagnostics -EventsPath $EventsPath -TransactionsPath $TransactionsPath -OriginPort $OriginPort -ObservationStatus $ObservationStatus
+    $diagnostics = Get-MihariBrowserH2TimeoutDiagnostics -EventsPath $EventsPath -TransactionsPath $TransactionsPath `
+        -ErrorPath $ErrorPath -OriginPort $OriginPort -ObservationStatus $ObservationStatus
     $diagnosticJson = ConvertTo-Json -InputObject $diagnostics -Depth 6 -Compress
     if ($diagnosticJson.Length -gt 6000) { $diagnosticJson = $diagnosticJson.Substring(0, 6000) }
     Write-Warning ('Safe local h2 observation timeout summary: ' + $diagnosticJson)
@@ -153,11 +155,15 @@ function Get-MihariBrowserH2TimeoutDiagnostics {
     param(
         [Parameter(Mandatory = $true)][string] $EventsPath,
         [Parameter(Mandatory = $true)][string] $TransactionsPath,
+        [Parameter(Mandatory = $true)][string] $ErrorPath,
         [Parameter(Mandatory = $true)][int] $OriginPort,
         [AllowNull()][string] $ObservationStatus
     )
 
-    $eventSummary = New-Object 'System.Collections.Generic.List[object]'
+    $browserFailures = New-Object 'System.Collections.Generic.List[object]'
+    $browserRequests = New-Object 'System.Collections.Generic.List[object]'
+    $proxyFailures = New-Object 'System.Collections.Generic.List[object]'
+    $proxyTraffic = New-Object 'System.Collections.Generic.List[object]'
     if ([IO.File]::Exists($EventsPath)) {
         foreach ($line in (Read-MihariTestCompleteLiveLines -Path $EventsPath | Select-Object -Last 512)) {
             try { $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop }
@@ -175,8 +181,26 @@ function Get-MihariBrowserH2TimeoutDiagnostics {
                 bytesClientToUpstream = $data.bytesClientToUpstream
                 bytesUpstreamToClient = $data.bytesUpstreamToClient
             }
-            if ($eventSummary.Count -ge 24) { $eventSummary.RemoveAt(0) }
-            [void]$eventSummary.Add($summary)
+            if ([string]$event.source -eq 'browser' -and $stage -eq 'browser.network.request') {
+                if ($event.outcome -ne 'completed' -or $data.browserError -or $data.errorCode -or $data.statusCode -ne 200) {
+                    if ($browserFailures.Count -ge 8) { $browserFailures.RemoveAt(0) }
+                    [void]$browserFailures.Add($summary)
+                }
+                elseif ($browserRequests.Count -ge 4) { $browserRequests.RemoveAt(0); [void]$browserRequests.Add($summary) }
+                else { [void]$browserRequests.Add($summary) }
+            }
+            elseif ($originTraffic -and [string]$event.source -eq 'proxy') {
+                if ($event.outcome -eq 'failed' -or $data.errorCode) {
+                    if ($proxyFailures.Count -ge 8) { $proxyFailures.RemoveAt(0) }
+                    [void]$proxyFailures.Add($summary)
+                }
+                elseif ($proxyTraffic.Count -ge 8) { $proxyTraffic.RemoveAt(0); [void]$proxyTraffic.Add($summary) }
+                else { [void]$proxyTraffic.Add($summary) }
+            }
+            elseif ($browserHealth) {
+                if ($browserFailures.Count -ge 8) { $browserFailures.RemoveAt(0) }
+                [void]$browserFailures.Add($summary)
+            }
         }
     }
     $transactions = New-Object 'System.Collections.Generic.List[object]'
@@ -191,9 +215,33 @@ function Get-MihariBrowserH2TimeoutDiagnostics {
             })
         }
     }
+    $fixtureError = $null
+    if ([IO.File]::Exists($ErrorPath)) {
+        try {
+            $errorRecord = ConvertFrom-Json -InputObject (Read-MihariTestLiveText -Path $ErrorPath) -ErrorAction Stop
+            $errorType = [string]$errorRecord.errorType
+            if ($errorType -notmatch '^[A-Za-z_][A-Za-z0-9_.+`]*$') { $errorType = 'unknown' }
+            $errorCode = 'fixture_error'
+            switch -Regex ($errorType) {
+                '(^|\.)SocketException$' { $errorCode = 'fixture_socket_error'; break }
+                '(^|\.)TimeoutException$' { $errorCode = 'fixture_timeout'; break }
+                '(^|\.)AuthenticationException$' { $errorCode = 'fixture_tls_error'; break }
+                '(^|\.)IOException$' { $errorCode = 'fixture_io_error'; break }
+            }
+            $fixtureError = [pscustomobject][ordered]@{
+                errorCode = $errorCode
+                errorType = $errorType
+            }
+        }
+        catch {
+            $fixtureError = [pscustomobject][ordered]@{ errorCode = 'fixture_error_record_invalid'; errorType = 'unknown' }
+        }
+    }
     return [pscustomobject][ordered]@{
-        observationStatus = $ObservationStatus; originPort = $OriginPort
-        events = [object[]]$eventSummary.ToArray(); fixtureTransactions = [object[]]$transactions.ToArray()
+        observationStatus = $ObservationStatus; originPort = $OriginPort; fixtureError = $fixtureError
+        fixtureTransactions = [object[]]$transactions.ToArray()
+        browserFailures = [object[]]$browserFailures.ToArray(); browserRequests = [object[]]$browserRequests.ToArray()
+        proxyFailures = [object[]]$proxyFailures.ToArray(); proxyTraffic = [object[]]$proxyTraffic.ToArray()
     }
 }
 
@@ -202,6 +250,7 @@ function Wait-MihariBrowserH2TunnelEvidence {
         [Parameter(Mandatory = $true)][string] $EventsPath,
         [Parameter(Mandatory = $true)][int] $OriginPort,
         [Parameter(Mandatory = $true)][string] $TransactionsPath,
+        [Parameter(Mandatory = $true)][string] $ErrorPath,
         [AllowNull()][string] $ObservationStatus,
         [int] $TimeoutSeconds = 20
     )
@@ -231,7 +280,7 @@ function Wait-MihariBrowserH2TunnelEvidence {
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
     $diagnostics = Get-MihariBrowserH2TimeoutDiagnostics -EventsPath $EventsPath -TransactionsPath $TransactionsPath `
-        -OriginPort $OriginPort -ObservationStatus $ObservationStatus
+        -ErrorPath $ErrorPath -OriginPort $OriginPort -ObservationStatus $ObservationStatus
     $diagnosticJson = ConvertTo-Json -InputObject $diagnostics -Depth 6 -Compress
     if ($diagnosticJson.Length -gt 6000) { $diagnosticJson = $diagnosticJson.Substring(0, 6000) }
     Write-Warning ('Safe local h2 tunnel summary: ' + $diagnosticJson)
@@ -334,13 +383,15 @@ try {
         $safeCode = [string]$browserLaunch.observationErrorCode
         if ($safeStatus -notmatch '^[a-z_]{1,80}$') { $safeStatus = 'unknown' }
         if ($safeCode -notmatch '^[a-z_]{1,80}$') { $safeCode = 'unknown' }
-        $safeSummary = Get-MihariBrowserH2TimeoutDiagnostics -EventsPath ([string]$sessionMetadata.eventsPath) -TransactionsPath $transactionsPath -OriginPort ([int]$fixtureReady.port) -ObservationStatus $safeStatus
+        $safeSummary = Get-MihariBrowserH2TimeoutDiagnostics -EventsPath ([string]$sessionMetadata.eventsPath) -TransactionsPath $transactionsPath `
+            -ErrorPath $fixtureErrorPath -OriginPort ([int]$fixtureReady.port) -ObservationStatus $safeStatus
         $summaryJson = ConvertTo-Json -InputObject $safeSummary -Depth 5 -Compress
         if ($summaryJson.Length -gt 5000) { $summaryJson = $summaryJson.Substring(0, 5000) }
         throw ('The live Management browser action did not launch the Mihari-owned diagnostic Edge profile through Mihari (observationStatus={0}; observationErrorCode={1}). Safe summary: {2}' -f $safeStatus, $safeCode, $summaryJson)
     }
     $browserEvent = Wait-MihariBrowserH2Event -EventsPath ([string]$sessionMetadata.eventsPath) `
-        -OriginPort ([int]$fixtureReady.port) -TransactionsPath $transactionsPath -ObservationStatus ([string]$browserLaunch.observationStatus)
+        -OriginPort ([int]$fixtureReady.port) -TransactionsPath $transactionsPath -ErrorPath $fixtureErrorPath `
+        -ObservationStatus ([string]$browserLaunch.observationStatus)
 
     $launchPath = Join-Path ([string]$sessionMetadata.outputDirectory) 'browser-launch.json'
     Assert-MihariTest -Condition ([IO.File]::Exists($launchPath)) -Message 'The diagnostic browser launch profile must be persisted.'
@@ -369,7 +420,8 @@ try {
     Assert-MihariTest -Condition (@($transactions | Where-Object { $_.alpnProtocol -eq 'h2' -and $_.requestPathRootObserved -and $_.responseStatus -eq 200 -and $_.responseHeadersSent }).Count -ge 2) -Message 'The local TLS endpoint must receive real h2 HEADERS for `/` and send h2 200 responses through the opaque CONNECT tunnel.'
 
     $tunnelEvidence = Wait-MihariBrowserH2TunnelEvidence -EventsPath ([string]$sessionMetadata.eventsPath) `
-        -OriginPort ([int]$fixtureReady.port) -TransactionsPath $transactionsPath -ObservationStatus ([string]$browserLaunch.observationStatus)
+        -OriginPort ([int]$fixtureReady.port) -TransactionsPath $transactionsPath -ErrorPath $fixtureErrorPath `
+        -ObservationStatus ([string]$browserLaunch.observationStatus)
     Assert-MihariTest -Condition ($tunnelEvidence.Connect.data.method -eq 'CONNECT' -and
         $tunnelEvidence.Connect.data.host -eq 'localhost' -and [int]$tunnelEvidence.Connect.data.port -eq [int]$fixtureReady.port -and
         $tunnelEvidence.Relay.outcome -eq 'success' -and [long]$tunnelEvidence.Relay.data.bytesClientToUpstream -gt 0 -and
