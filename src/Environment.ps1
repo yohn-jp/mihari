@@ -216,6 +216,13 @@ function Get-MihariEnvironmentSnapshot {
             }
         }
     }
+    $pacRetrieval = 'not_performed'
+    if ($resolution.Count -gt 0 -and $null -ne $platform -and
+        $null -ne $platform.Configuration -and $platform.Configuration.PacConfigured) {
+        # The platform may download/evaluate PAC internally. Its retrieval
+        # status and content are not exposed by the managed resolver API.
+        $pacRetrieval = 'unknown'
+    }
     return [pscustomobject]@{
         schemaVersion = 1
         snapshotId = [Guid]::NewGuid().ToString('N')
@@ -228,7 +235,7 @@ function Get-MihariEnvironmentSnapshot {
             browserPolicyMachine = $browserMachine
             mihariOverride = [pscustomobject]@{ source = 'mihari.session'; coverage = $(if ($null -eq $Session) { 'unknown' } else { 'observed' }); endpoint = ConvertTo-MihariSafeConfigurationEndpoint -Value $override; configured = (-not [string]::IsNullOrWhiteSpace($override)) }
             platformResolver = [pscustomobject]@{ source = 'dotnet.default_web_proxy'; coverage = $(if ($null -eq $platform) { 'unknown' } elseif ($platform.ErrorType) { 'unknown' } else { 'observed' }); capturedAtUtc = $(if ($null -ne $platform) { $platform.CapturedAtUtc } else { $null }); pacConfigured = $(if ($null -ne $platform) { $platform.Configuration.PacConfigured } else { $null }); errorType = $(if ($null -ne $platform) { $platform.ErrorType } else { $null }) }
-            pacResolution = [pscustomobject]@{ source = 'dotnet.default_web_proxy'; retrieval = 'not_performed'; resolver = 'Resolve-MihariRoute'; evaluations = $resolution.ToArray() }
+            pacResolution = [pscustomobject]@{ source = 'dotnet.default_web_proxy'; retrieval = $pacRetrieval; retrievedAtUtc = $null; contentSha256 = $null; resolver = 'Resolve-MihariRoute'; evaluations = $resolution.ToArray() }
             networkInterfaces = Get-MihariEnvironmentNetworkInterfaces
             routes = [pscustomobject]@{ source = 'windows.route_table'; coverage = 'unavailable'; reason = 'No managed route-table reader is available in the supported runtime.' }
             vpn = [pscustomobject]@{ source = 'windows.network_interfaces'; coverage = 'partial'; reason = 'Only PPP and tunnel interface types are visible; other VPN implementations may not be identifiable.' }
