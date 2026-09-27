@@ -65,6 +65,7 @@ try {
             'phase2-transport' {
                 & (Join-Path $PSScriptRoot 'phase2-streaming.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-tls-environment.ps1')
+                & (Join-Path $PSScriptRoot 'phase2-inspect-streaming.ps1')
             }
         }
     }
