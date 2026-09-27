@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('all', 'certificate', 'contracts', 'browser', 'stale-cleanup', 'integration')]
+    [ValidateSet('all', 'certificate', 'contracts', 'browser', 'stale-cleanup', 'runtime-basic', 'integration')]
     [string] $Suite = 'all'
 )
 
@@ -39,13 +39,13 @@ try {
     Write-Host ("PASS parse: {0} PowerShell files" -f $sourceFiles.Count)
 
     if ($Suite -eq 'all') {
-        $selectedSuites = @('certificate', 'contracts', 'browser', 'stale-cleanup', 'integration')
+        $selectedSuites = @('certificate', 'contracts', 'browser', 'stale-cleanup', 'runtime-basic', 'integration')
     }
     else {
         $selectedSuites = @($Suite)
     }
     foreach ($selectedSuite in $selectedSuites) {
-        if ($env:OS -ne 'Windows_NT' -and $selectedSuite -in @('certificate', 'stale-cleanup', 'integration')) {
+        if ($env:OS -ne 'Windows_NT' -and $selectedSuite -in @('certificate', 'stale-cleanup', 'runtime-basic', 'integration')) {
             Write-Warning ("Skipping suite '{0}': Windows certificate/runtime integration is required." -f $selectedSuite)
             continue
         }
@@ -55,6 +55,7 @@ try {
             'contracts' { & (Join-Path $PSScriptRoot 'contracts.ps1') }
             'browser' { & (Join-Path $PSScriptRoot 'browser.ps1') }
             'stale-cleanup' { & (Join-Path $PSScriptRoot 'stale-cleanup.ps1') }
+            'runtime-basic' { & (Join-Path $PSScriptRoot 'runtime-basic.ps1') }
             'integration' { & (Join-Path $PSScriptRoot 'integration.ps1') }
         }
     }
