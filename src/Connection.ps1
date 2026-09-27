@@ -163,6 +163,7 @@ function Handle-MihariConnection {
     $upstream = $null
     $clientStream = $null
     $requestId = $null
+    $eventWriterFailed = $false
     try {
         $clientStream = $Client.GetStream()
         $clientStream.ReadTimeout = 30000
@@ -327,6 +328,7 @@ function Handle-MihariConnection {
         } catch {
             # Event storage failed. Preserve the original failure for the worker
             # boundary rather than recursively attempting another event write.
+            $eventWriterFailed = $true
             throw (New-Object System.AggregateException -ArgumentList 'Connection handling and event writing both failed.', @($failure, $_.Exception))
         }
         if (-not $responseStarted -and $null -ne $clientStream) {
@@ -335,10 +337,31 @@ function Handle-MihariConnection {
             catch [System.ObjectDisposedException] { $null = $_ } # Stop may have closed the socket.
         }
     } finally {
+        $cleanupError = $null
         if ($null -ne $upstream) {
-            if ($null -ne $upstream.Client) { $upstream.Client.Dispose() }
+            if ($null -ne $upstream.Client) {
+                try { $upstream.Client.Dispose() }
+                catch { $cleanupError = $_.Exception }
+            }
         }
-        $Client.Dispose()
+        try { $Client.Dispose() }
+        catch { if ($null -eq $cleanupError) { $cleanupError = $_.Exception } }
         $timer.Stop()
+
+        $cleanupOutcome = 'success'
+        if ($null -ne $cleanupError) { $cleanupOutcome = 'failed' }
+        $cleanupData = @{ host = $hostName; routeKind = $routeKind; exception = $cleanupError }
+        if ($targetPort -gt 0) { $cleanupData.port = $targetPort }
+        $writer = $Session.Writer
+        if (-not $eventWriterFailed -and $null -ne $writer -and -not $writer.Closed) {
+            try {
+                $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage 'connection.cleanup' -Outcome $cleanupOutcome -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data $cleanupData
+            }
+            catch {
+                # Stop may close the writer after the open check. Other writer
+                # failures reach the worker boundary as observable failures.
+                if (-not $writer.Closed) { throw }
+            }
+        }
     }
 }
