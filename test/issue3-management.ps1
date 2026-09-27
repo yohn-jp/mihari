@@ -376,7 +376,9 @@ try {
 
     $findingsResponse = Invoke-Issue3ManagementRequest -Endpoint ($managementEndpoint + 'api/findings') -Method GET -Body $null
     $findingError = $(if ($null -ne $findingsResponse.Json) { [string]$findingsResponse.Json.error } else { '[no-json]' })
-    Assert-MihariTest -Condition ($findingsResponse.StatusCode -eq 200 -and $null -ne $findingsResponse.Json.findings) -Message ('The management findings endpoint must return canonical findings (HTTP {0}, error {1}).' -f $findingsResponse.StatusCode, $findingError)
+    $findingCode = $(if ($null -ne $findingsResponse.Json) { [string]$findingsResponse.Json.projectionCode } else { '' })
+    $findingType = $(if ($null -ne $findingsResponse.Json) { [string]$findingsResponse.Json.errorType } else { '' })
+    Assert-MihariTest -Condition ($findingsResponse.StatusCode -eq 200 -and $null -ne $findingsResponse.Json.findings) -Message ('The management findings endpoint must return canonical findings (HTTP {0}, error {1}, projection {2}, type {3}).' -f $findingsResponse.StatusCode, $findingError, $findingCode, $findingType)
     $findingJson = ConvertTo-Json -InputObject $findingsResponse.Json.findings -Depth 12 -Compress
     foreach ($secret in @('issue3-query-secret', 'issue3-auth-secret', 'issue3-cookie-secret', 'issue3-setcookie-secret', 'issue3-body-secret')) {
         Assert-MihariTest -Condition (-not $findingJson.Contains($secret)) -Message 'Management findings must preserve the event privacy boundary.'

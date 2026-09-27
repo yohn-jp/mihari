@@ -631,7 +631,16 @@ function Invoke-MihariManagementApiRequest {
                     coverage = $page.coverage; freshnessUtc = $page.freshnessUtc
                 }))
             }
-            catch { return (New-MihariManagementErrorResponse -StatusCode 503 -Code 'finding_projection_failed' -Message 'The canonical finding history could not be projected.') }
+            catch {
+                $projectionType = $_.Exception.GetType().FullName
+                $projectionCode = [string]$_.Exception.Data['mihariCode']
+                return (New-MihariManagementJsonResponse -StatusCode 503 -Value ([pscustomobject]@{
+                    error = 'finding_projection_failed'
+                    message = 'The canonical finding history could not be projected.'
+                    errorType = $projectionType
+                    projectionCode = $projectionCode
+                }))
+            }
         }
         $projection = Get-MihariManagementProjection -Session $Session -MaximumEvents 200
         return (New-MihariManagementJsonResponse -StatusCode 200 -Value ([pscustomobject]@{ findings = @($projection.findings) }))

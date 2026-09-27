@@ -182,7 +182,7 @@ function Get-MihariPersistentFindings {
 
     $safeSessionId = ConvertTo-MihariDiagnosisSafeText -Value $SessionId
     if ($null -eq $safeSessionId) { throw [System.ArgumentException]::new('A session ID is required to load persistent findings.') }
-    $storeSessionId = ConvertTo-MihariFindingProjectionValue -InputObject $ProjectionStore -Name 'SessionId'
+    $storeSessionId = Get-MihariFindingProjectionValue -InputObject $ProjectionStore -Name 'SessionId'
     if ($null -ne $storeSessionId -and -not [string]::Equals([string]$storeSessionId, $safeSessionId, [StringComparison]::Ordinal)) {
         throw [System.ArgumentException]::new('The projection store belongs to a different session.')
     }
@@ -211,7 +211,7 @@ function Get-MihariPersistentFindings {
         $forceHistoryGap = $false
         $startOffset = 0L
         $startOrdinal = 0L
-        $expectedGeneration = ConvertTo-MihariFindingProjectionValue -InputObject $ProjectionStore -Name 'GenerationId'
+        $expectedGeneration = Get-MihariFindingProjectionValue -InputObject $ProjectionStore -Name 'GenerationId'
         $coverageState = 'unknown'
         $coverageBeforePending = $null
         $coverageCanStartObserved = $true
@@ -263,7 +263,7 @@ function Get-MihariPersistentFindings {
                 $failure = $_.Exception
                 $mihariCode = [string]$failure.Data['mihariCode']
                 if ($mihariCode -ne 'cursor_invalidated' -or $cursorReset) { throw }
-                $currentGeneration = ConvertTo-MihariFindingProjectionValue -InputObject $ProjectionStore -Name 'GenerationId'
+                $currentGeneration = Get-MihariFindingProjectionValue -InputObject $ProjectionStore -Name 'GenerationId'
                 if ([string]::Equals([string]$currentGeneration, [string]$expectedGeneration, [StringComparison]::Ordinal)) { $forceHistoryGap = $true }
                 $expectedGeneration = [string]$currentGeneration
                 $offset = 0L
@@ -297,7 +297,7 @@ function Get-MihariPersistentFindings {
                 }
             }
             $coverage = 'unknown'
-            $storeCounters = ConvertTo-MihariFindingProjectionValue -InputObject $ProjectionStore -Name 'Counters'
+            $storeCounters = Get-MihariFindingProjectionValue -InputObject $ProjectionStore -Name 'Counters'
             $lostPartial = [long](Get-MihariFindingProjectionValue -InputObject $storeCounters -Name 'LostPartialLineCount')
             $unprojectable = [long](Get-MihariFindingProjectionValue -InputObject $storeCounters -Name 'UnprojectableLineCount')
             $sequenceViolations = [long](Get-MihariFindingProjectionValue -InputObject $storeCounters -Name 'SequenceViolationCount')
@@ -351,7 +351,7 @@ function Get-MihariPersistentFindings {
         }
 
         if (-not $anyBatch) {
-            $currentGeneration = ConvertTo-MihariFindingProjectionValue -InputObject $ProjectionStore -Name 'GenerationId'
+            $currentGeneration = Get-MihariFindingProjectionValue -InputObject $ProjectionStore -Name 'GenerationId'
             $workingSnapshot = Update-MihariFindingSnapshot -Events @() -PreviousSnapshot $previousSnapshot -SessionId $safeSessionId `
                 -FileGeneration ([string]$currentGeneration) -Coverage $(if ($forceHistoryGap) { 'truncated' } else { 'unknown' }) `
                 -HistoryGapDetected:($forceHistoryGap)
@@ -429,7 +429,7 @@ function Get-MihariPersistentFindings {
             if ([string]$finding.classification -in @('observer_health', 'cleanup')) { $toolFailureCount++ }
             if ([string]$finding.evidenceAvailability -in @('unverified', 'possibly_rotated', 'possibly_missing')) { $missingEvidenceCount++ }
         }
-        $freshnessUtc = ConvertTo-MihariFindingProjectionValue -InputObject $ProjectionStore -Name 'FreshnessUtc'
+        $freshnessUtc = Get-MihariFindingProjectionValue -InputObject $ProjectionStore -Name 'FreshnessUtc'
         return [pscustomobject][ordered]@{
             items = @($items)
             nextCursor = $nextCursor
