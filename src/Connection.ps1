@@ -368,6 +368,11 @@ function Handle-MihariConnection {
         if ($routeKind -eq 'ExplicitProxy') { $currentKey += '|' + $route.Host + ':' + $route.Port }
         $reused = ($null -ne $upstream -and $upstreamKey -eq $currentKey -and
             -not $hasCredentials -and -not $webSocket)
+        if ($reused -and $upstream.Client.Client.Poll(0, [System.Net.Sockets.SelectMode]::SelectRead)) {
+            # EOF or unexpected unread bytes make reuse ambiguous. Open a new
+            # leg rather than binding the next request to stale response data.
+            $reused = $false
+        }
         if ($null -ne $upstream -and -not $reused) {
             Unregister-MihariActiveUpstream -Session $Session -ConnectionId $connectionId
             $upstream.Client.Dispose()
