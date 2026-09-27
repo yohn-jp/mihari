@@ -104,8 +104,9 @@ function Invoke-MihariManagementV2Request {
         $inspect = Test-MihariCapability -Mode Inspect
         $nativeH2 = 'not_verified_on_this_host'
         if (-not $environment.tlsAlpnProperty) { $nativeH2 = 'unavailable_managed_alpn' }
-        elseif (Get-Command Test-MihariHttp2NativeCapability -ErrorAction SilentlyContinue) {
-            $nativeH2 = Test-MihariHttp2NativeCapability
+        elseif (Get-Command Test-MihariHttp2RuntimeCapability -ErrorAction SilentlyContinue) {
+            $nativeProbe = Test-MihariHttp2RuntimeCapability
+            if (-not $nativeProbe.Available) { $nativeH2 = 'unavailable_managed_alpn' }
         }
         return (New-MihariManagementJsonResponse -StatusCode 200 -Value ([pscustomobject][ordered]@{
             schemaVersion = 2

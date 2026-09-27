@@ -101,6 +101,10 @@ function Write-MihariEvent {
     )
 
     if (-not $PSBoundParameters.ContainsKey('Mode')) { $Mode = [string]$Session.Mode }
+    if ($Source -eq 'proxy' -and -not $PSBoundParameters.ContainsKey('MonotonicTicks')) {
+        $MonotonicTicks = [System.Diagnostics.Stopwatch]::GetTimestamp()
+        $ClockId = 'mihari-process:' + [string]$Session.Id
+    }
     $safeData = ConvertTo-MihariSafeEventData -Data $Data
     $elapsed = $null
     if ($null -ne $ElapsedMs) {
@@ -134,7 +138,10 @@ function Write-MihariEvent {
         }
     }
     if ($PSBoundParameters.ContainsKey('ConfigurationRevision')) { $event['configurationRevision'] = $ConfigurationRevision }
-    if ($PSBoundParameters.ContainsKey('MonotonicTicks')) { $event['monotonicTicks'] = $MonotonicTicks }
+    if ($null -ne $MonotonicTicks -and $MonotonicTicks -gt 0) {
+        $event['monotonicTicks'] = $MonotonicTicks
+        $event['monotonicFrequency'] = [long][System.Diagnostics.Stopwatch]::Frequency
+    }
     $writer = $Session.Writer
     $writeWait = [System.Diagnostics.Stopwatch]::StartNew()
     [System.Threading.Monitor]::Enter($writer.SyncRoot)

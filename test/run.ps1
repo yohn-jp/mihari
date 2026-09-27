@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('all', 'certificate', 'contracts', 'findings-comparison', 'traffic-projection', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference', 'phase2-transport', 'phase2-evidence')]
+    [ValidateSet('all', 'certificate', 'contracts', 'findings-comparison', 'traffic-projection', 'browser', 'browser-observation', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference', 'phase2-transport', 'phase2-evidence', 'phase2-workbench')]
     [string] $Suite = 'all'
 )
 
@@ -39,13 +39,13 @@ try {
     Write-Host ("PASS parse: {0} PowerShell files" -f $sourceFiles.Count)
 
     if ($Suite -eq 'all') {
-        $selectedSuites = @('certificate', 'contracts', 'findings-comparison', 'traffic-projection', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference', 'phase2-transport', 'phase2-evidence')
+        $selectedSuites = @('certificate', 'contracts', 'findings-comparison', 'traffic-projection', 'browser', 'browser-observation', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference', 'phase2-transport', 'phase2-evidence', 'phase2-workbench')
     }
     else {
         $selectedSuites = @($Suite)
     }
     foreach ($selectedSuite in $selectedSuites) {
-        if ($env:OS -ne 'Windows_NT' -and $selectedSuite -in @('certificate', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser')) {
+        if ($env:OS -ne 'Windows_NT' -and $selectedSuite -in @('certificate', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'phase2-workbench')) {
             Write-Warning ("Skipping suite '{0}': Windows certificate/runtime integration is required." -f $selectedSuite)
             continue
         }
@@ -56,6 +56,7 @@ try {
             'findings-comparison' { & (Join-Path $PSScriptRoot 'findings-comparison.ps1') }
             'traffic-projection' { & (Join-Path $PSScriptRoot 'traffic-projection.ps1') }
             'browser' { & (Join-Path $PSScriptRoot 'browser.ps1') }
+            'browser-observation' { & (Join-Path $PSScriptRoot 'browser-observation.ps1') }
             'stale-cleanup' { & (Join-Path $PSScriptRoot 'stale-cleanup.ps1') }
             'runtime-basic' { & (Join-Path $PSScriptRoot 'runtime-basic.ps1') }
             'integration' { & (Join-Path $PSScriptRoot 'integration.ps1') }
@@ -71,6 +72,15 @@ try {
                 & (Join-Path $PSScriptRoot 'phase2-live-streaming.ps1')
             }
             'phase2-evidence' { & (Join-Path $PSScriptRoot 'phase2-evidence.ps1') }
+            'phase2-workbench' {
+                & (Join-Path $PSScriptRoot 'traffic-projection.ps1')
+                & (Join-Path $PSScriptRoot 'findings-comparison.ps1')
+                & (Join-Path $PSScriptRoot 'phase2-evidence.ps1')
+                & (Join-Path $PSScriptRoot 'browser-observation.ps1')
+                & (Join-Path $PSScriptRoot 'phase2-hpack.ps1')
+                & (Join-Path $PSScriptRoot 'phase2-http2-native.ps1')
+                & (Join-Path $PSScriptRoot 'phase2-ui-browser.ps1')
+            }
         }
     }
 }
