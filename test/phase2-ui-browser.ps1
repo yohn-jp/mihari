@@ -210,7 +210,18 @@ try {
     $runningProfileWarning = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("browser-profile-retention").textContent' -Predicate { param($value) [string]$value -match 'browser-managed cookies and history' -and [string]$value -match 'will not close browser processes' }
     $cleanupHiddenWhileRunning = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.querySelector("[data-cleanup-profile=""{0}""]")===null' -f $ownershipId)
     Assert-MihariTest -Condition ([string]$runningProfileWarning -match 'Close every Edge process' -and $cleanupHiddenWhileRunning -eq $true) -Message 'The UI warns about retained browser-managed data while refusing cleanup as long as the owned Edge profile is active.'
-    Stop-Phase2DiagnosticEdgeProfileProcesses -ProfilePath $diagnosticProfile -ExecutablePath ([string]$launch.executablePath)
+    $closeDeadline = [DateTime]::UtcNow.AddSeconds(25)
+    $closedProfileState = $null
+    do {
+        # Edge may start a child while its root is closing. Recheck the exact
+        # owned profile until the live management API confirms it is closed.
+        Stop-Phase2DiagnosticEdgeProfileProcesses -ProfilePath $diagnosticProfile -ExecutablePath ([string]$launch.executablePath)
+        $profileSnapshot = Get-Issue3UiHttpJson -Uri ($managementUrl + 'api/browser')
+        $closedProfileState = @($profileSnapshot.profiles | Where-Object { [string]$_.profileOwnershipId -eq $ownershipId }) | Select-Object -First 1
+        if ($null -ne $closedProfileState -and [bool]$closedProfileState.cleanupAvailable) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $closeDeadline)
+    Assert-MihariTest -Condition ($null -ne $closedProfileState -and [bool]$closedProfileState.cleanupAvailable) 'The live management API must verify that the exact diagnostic Edge profile is closed before the UI cleanup action.'
     Assert-MihariTest -Condition (-not $browser.Process.HasExited) -Message 'Closing the diagnostic profile must leave the separate management Edge process running.'
     $closedProfileWarning = Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 25 -Expression 'document.getElementById("browser-profile-retention").textContent' -Predicate { param($value) [string]$value -match 'Confirm below to remove it' }
     $confirmExpression = 'var box=document.querySelector("[data-confirm-profile-cleanup=""{0}""]"); var button=document.querySelector("[data-cleanup-profile=""{0}""]"); !!box&&!!button&&button.disabled===true' -f $ownershipId
