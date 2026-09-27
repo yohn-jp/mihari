@@ -59,7 +59,7 @@ function Invoke-Issue3UiEvaluate {
     $segment = [System.ArraySegment[byte]]::new($bytes)
     $cancel = [System.Threading.CancellationTokenSource]::new(10000)
     try {
-        $Browser.Socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cancel.Token).GetAwaiter().GetResult()
+        [void]$Browser.Socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cancel.Token).GetAwaiter().GetResult()
         do {
             $response = Read-Issue3UiCdpMessage -Socket $Browser.Socket
         } while ($null -eq $response.id -or [int]$response.id -ne $Browser.NextId)
@@ -118,7 +118,7 @@ function Start-Issue3UiEdge {
     if ($null -eq $target) { throw 'Headless Edge did not navigate to the Mihari management page.' }
     $socket = New-Object System.Net.WebSockets.ClientWebSocket
     $cancel = [System.Threading.CancellationTokenSource]::new(10000)
-    try { $socket.ConnectAsync([Uri]$target.webSocketDebuggerUrl, $cancel.Token).GetAwaiter().GetResult() }
+    try { [void]$socket.ConnectAsync([Uri]$target.webSocketDebuggerUrl, $cancel.Token).GetAwaiter().GetResult() }
     finally { $cancel.Dispose() }
     return [pscustomobject]@{ Process = $process; Socket = $socket; NextId = 0; ProfilePath = $ProfilePath }
 }
@@ -175,6 +175,7 @@ try {
     $metadata = Wait-MihariTestSession -Child $child
     $managementUrl = 'http://127.0.0.1:{0}/' -f [int]$metadata.actualManagementPort
     $browser = Start-Issue3UiEdge -Uri $managementUrl -ProfilePath (Join-Path $tempRoot 'management-edge')
+    Assert-MihariTest -Condition ($browser -is [pscustomobject] -and $null -ne $browser.PSObject.Properties['NextId']) -Message 'The headless Edge setup must return one browser control context.'
 
     $snapshotExpression = 'JSON.stringify({session:document.getElementById("session-id")?.textContent,mode:document.getElementById("mode-state")?.textContent,proxy:document.getElementById("proxy-endpoint")?.textContent,ui:document.getElementById("management-endpoint")?.textContent,updated:document.getElementById("last-updated")?.textContent,events:document.getElementById("event-rows")?.textContent,error:document.getElementById("api-error")?.className})'
     $initialText = Wait-Issue3UiValue -Browser $browser -Expression $snapshotExpression -Predicate {
