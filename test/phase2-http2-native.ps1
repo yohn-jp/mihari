@@ -59,6 +59,16 @@ Assert-MihariTestH2Rejected -Message 'Malformed preface must fail before forward
 $oversize = New-MihariHttp2Direction -Leg upstream
 $hugeHeader = [byte[]]@(0, 64, 1, 0, 0, 0, 0, 0, 1)
 Assert-MihariTestH2Rejected -Message 'An oversized frame must fail at its header.' -Action { Add-MihariHttp2Input -State $oversize -Bytes $hugeHeader -Count $hugeHeader.Length }
+$ambiguous = @(
+    [pscustomobject]@{ name = ':method'; value = 'GET' },
+    [pscustomobject]@{ name = ':scheme'; value = 'https' },
+    [pscustomobject]@{ name = ':authority'; value = 'localhost' },
+    [pscustomobject]@{ name = ':path'; value = '/safe' },
+    [pscustomobject]@{ name = 'host'; value = 'other.example' }
+)
+Assert-MihariTestH2Rejected -Message 'Conflicting HTTP/2 Host and authority must fail before forwarding.' -Action {
+    Assert-MihariHttp2HeaderSemantics -Headers $ambiguous -Request $true -Trailer $false -ConnectHost 'localhost' -ConnectPort 443
+}
 
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ('mihari-http2-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($temporary)

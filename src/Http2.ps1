@@ -149,6 +149,7 @@ function Assert-MihariHttp2HeaderSemantics {
     $pseudoSeen = @{}
     $regularSeen = $false
     $safe = @{}
+    $hostHeader = $null
     foreach ($field in $Headers) {
         $name = [string]$field.name
         $value = [string]$field.value
@@ -166,6 +167,10 @@ function Assert-MihariHttp2HeaderSemantics {
             throw [System.IO.InvalidDataException]::new('Forbidden HTTP/2 connection field.')
         }
         if ($name -eq 'te' -and $value -cne 'trailers') { throw [System.IO.InvalidDataException]::new('Invalid HTTP/2 TE field.') }
+        if ($name -eq 'host') {
+            if ($null -ne $hostHeader) { throw [System.IO.InvalidDataException]::new('Duplicate HTTP/2 Host field.') }
+            $hostHeader = $value
+        }
         if ($name -in @(':method',':scheme',':authority',':path',':status','grpc-status','content-type')) {
             if ($value.Length -gt 4096) { throw [System.IO.InvalidDataException]::new('HTTP/2 field value exceeds bound.') }
             $safe[$name] = $value
@@ -176,10 +181,10 @@ function Assert-MihariHttp2HeaderSemantics {
             if (-not $safe.ContainsKey(':method') -or -not $safe.ContainsKey(':scheme') -or -not $safe.ContainsKey(':authority') -or -not $safe.ContainsKey(':path')) {
                 throw [System.IO.InvalidDataException]::new('Required HTTP/2 request pseudo fields are missing.')
             }
-            if ($safe[':scheme'] -cne 'https' -or $safe[':method'] -eq 'CONNECT') {
+            if ($safe[':scheme'] -ine 'https' -or $safe[':method'] -eq 'CONNECT') {
                 throw [System.IO.InvalidDataException]::new('Unsupported HTTP/2 request form.')
             }
-            if ($safe[':method'].Length -gt 32 -or $safe[':method'] -cnotmatch '^[!#$%&''*+.^_`|~0-9A-Z-]+$') {
+            if ($safe[':method'].Length -gt 32 -or $safe[':method'] -cnotmatch '^[!#$%&''*+.^_`|~0-9A-Za-z-]+$') {
                 throw [System.IO.InvalidDataException]::new('Invalid HTTP/2 method token.')
             }
             $authority = $safe[':authority']
@@ -188,7 +193,16 @@ function Assert-MihariHttp2HeaderSemantics {
             if (-not [string]::Equals($uri.DnsSafeHost.TrimEnd('.'), $ConnectHost.TrimEnd('.'), [StringComparison]::OrdinalIgnoreCase) -or $uri.Port -ne $ConnectPort -or $authority -match '[@/?#]') {
                 throw [System.IO.InvalidDataException]::new('HTTP/2 authority differs from CONNECT destination.')
             }
-            if (-not $safe[':path'].StartsWith('/') -or $safe[':path'] -match '[\x00-\x1f\x7f#]') { throw [System.IO.InvalidDataException]::new('Invalid HTTP/2 path.') }
+            if ($null -ne $hostHeader) {
+                try { $hostUri = [Uri]::new(('https://' + $hostHeader + '/')) }
+                catch { throw [System.IO.InvalidDataException]::new('Invalid HTTP/2 Host field.') }
+                if (-not [string]::Equals($hostUri.DnsSafeHost.TrimEnd('.'), $uri.DnsSafeHost.TrimEnd('.'), [StringComparison]::OrdinalIgnoreCase) -or $hostUri.Port -ne $uri.Port -or $hostHeader -match '[@/?#]') {
+                    throw [System.IO.InvalidDataException]::new('HTTP/2 Host field differs from authority.')
+                }
+            }
+            if ((-not $safe[':path'].StartsWith('/') -and -not ($safe[':method'] -eq 'OPTIONS' -and $safe[':path'] -eq '*')) -or $safe[':path'] -match '[\x00-\x1f\x7f#]') {
+                throw [System.IO.InvalidDataException]::new('Invalid HTTP/2 path.')
+            }
         }
         else {
             $status = 0
