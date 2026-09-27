@@ -111,6 +111,10 @@ try {
     }
 
     $previewRequest = New-MihariManagementV2EvidenceTestRequest -Method 'GET' -Path '/api/v2/evidence/preview' -Query ('caseId=' + $case.caseId + '&maskHosts=true&maskUsernames=true&maskPaths=true&maskIdentifiers=true')
+    $caseSnapshot = Get-MihariCaseStoreSnapshot -CaseRoot $temporaryRoot
+    $activeTrialRecords = @($caseSnapshot.Trials | Where-Object { [string]$_.trialId -eq [string]$trial.trialId })
+    Assert-MihariTest -Condition ($activeTrialRecords.Count -eq 1) -Message 'The preview fixture must contain its canonical active trial.'
+    Assert-MihariTest -Condition ($activeTrialRecords[0].status -eq 'running' -and $null -eq $activeTrialRecords[0].endedAtUtc -and $null -eq $activeTrialRecords[0].endMarkerId) -Message 'The preview fixture must preserve missing completion time and end marker as null.'
     $previewResponse = Invoke-MihariManagementV2EvidenceRequest -Session $session -Request $previewRequest
     $previewErrorCode = 'none'
     if ($previewResponse.StatusCode -ne 200) {
@@ -121,7 +125,7 @@ try {
         }
         catch { $previewErrorCode = 'unparseable' }
     }
-    Assert-MihariTest -Condition ($previewResponse.StatusCode -eq 200) -Message ('The management preview route must return a redaction preview for the selected case (HTTP {0}, error code {1}).' -f [int]$previewResponse.StatusCode, $previewErrorCode)
+    Assert-MihariTest -Condition ($previewResponse.StatusCode -eq 200) -Message ('The management preview route must handle an active trial and return a redaction preview (HTTP {0}, error code {1}).' -f [int]$previewResponse.StatusCode, $previewErrorCode)
     $preview = ConvertFrom-MihariManagementV2EvidenceTestResponse -Response $previewResponse
     Assert-MihariTest -Condition ($preview.preview.schemaVersion -eq 1 -and $preview.preview.redacted.Count -ge 3) -Message 'The preview route must expose included and redacted bundle categories.'
 

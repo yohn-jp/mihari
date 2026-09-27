@@ -258,13 +258,16 @@ function Get-MihariManagementV2EvidenceBundleInputs {
     $portableTrials = New-Object 'System.Collections.Generic.List[object]'
     foreach ($trial in $trials) {
         $trialNotes = @($snapshot.Notes | Where-Object { [string]$_.caseId -eq $CaseId -and [string]$_.trialId -eq [string]$trial.trialId } | ForEach-Object { [string]$_.text })
+        $nonblankTrialNotes = @($trialNotes | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        $operatorNotes = $null
+        if ($nonblankTrialNotes.Count -gt 0) { $operatorNotes = $nonblankTrialNotes -join "`n" }
         $portableTrials.Add([pscustomobject]@{
             trialId = [string]$trial.trialId; caseId = [string]$trial.caseId; sessionId = [string]$trial.sessionId
             startedAtUtc = [string]$trial.startedAtUtc; endedAtUtc = $trial.endedAtUtc
             startMarkerId = [string]$trial.startMarkerId; endMarkerId = $trial.endMarkerId
             configurationRevision = [string]$trial.configurationRevision; profile = $trial.profile
-            environmentRef = $trial.environmentReference; businessOutcome = [string]$trial.operatorBusinessOutcome
-            operatorNotes = ($trialNotes -join "`n")
+            environmentRef = $trial.environmentReference; businessOutcome = $trial.operatorBusinessOutcome
+            operatorNotes = $operatorNotes
         })
     }
     $portableCase = [pscustomobject]@{
