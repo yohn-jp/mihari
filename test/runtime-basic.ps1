@@ -25,6 +25,29 @@ function Assert-MihariRuntimeBasicBytes {
     Assert-MihariTest -Condition $same -Message $Message
 }
 
+function Get-MihariRuntimeBasicEventSummary {
+    param([Parameter(Mandatory = $true)][string] $EventsPath)
+
+    if (-not [IO.File]::Exists($EventsPath)) { return 'no event file was created' }
+    $summaries = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($line in (Read-MihariTestCompleteLiveLines -Path $EventsPath)) {
+        try { $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop }
+        catch { continue }
+        $parts = New-Object 'System.Collections.Generic.List[string]'
+        $parts.Add([string]$event.stage)
+        if ($event.outcome) { $parts.Add(('outcome=' + [string]$event.outcome)) }
+        foreach ($field in @('routeKind', 'routeSource', 'errorCode')) {
+            $value = $event.data.$field
+            if (-not [string]::IsNullOrWhiteSpace([string]$value)) {
+                $parts.Add(($field + '=' + [string]$value))
+            }
+        }
+        $summaries.Add(($parts -join ' '))
+    }
+    if ($summaries.Count -eq 0) { return 'no complete events were written' }
+    return ($summaries -join '; ')
+}
+
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('mihari-basic-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($tempRoot)
 $tunnelChild = $null
@@ -54,7 +77,10 @@ try {
     $requestBytes = [System.Text.Encoding]::ASCII.GetBytes($requestText)
     $proxyStream.Write($requestBytes, 0, $requestBytes.Length)
     $proxyStream.Flush()
-    Assert-MihariTest -Condition ($acceptTask.Wait(15000)) -Message 'HTTP proxy did not connect to the local origin fixture.'
+    if (-not $acceptTask.Wait(15000)) {
+        $eventSummary = Get-MihariRuntimeBasicEventSummary -EventsPath ([string]$tunnelMetadata.eventsPath)
+        throw ('ASSERTION FAILED: HTTP proxy did not connect to the local origin fixture. Safe session events: ' + $eventSummary)
+    }
     $originClient = $acceptTask.Result
     $originStream = $originClient.GetStream()
     $originRequest = Read-MihariTestHeaderText -Stream $originStream
@@ -112,7 +138,7 @@ try {
     $tunnelChild = $null
     Assert-MihariTest -Condition ([string]::IsNullOrEmpty([string]$tunnelFinal.caThumbprint)) -Message 'Tunnel mode must not create or trust a session CA.'
     Invoke-MihariTestReportCommand -OutputRoot $tunnelRoot
-    $tunnelLines = [IO.File]::ReadAllLines([string]$tunnelFinal.eventsPath)
+    $tunnelLines = Read-MihariTestCompleteLiveLines -Path ([string]$tunnelFinal.eventsPath)
     Assert-MihariTest -Condition ($tunnelLines.Length -ge 8) -Message 'HTTP forwarding and CONNECT relay must emit structured observations.'
     foreach ($line in $tunnelLines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
@@ -143,7 +169,7 @@ try {
 
     $proxyEventIds = @{}
     $observedProxyStatuses = New-Object 'System.Collections.Generic.List[int]'
-    $proxyEventLines = [IO.File]::ReadAllLines([string]$proxyStatusFinal.eventsPath)
+    $proxyEventLines = Read-MihariTestCompleteLiveLines -Path ([string]$proxyStatusFinal.eventsPath)
     foreach ($line in $proxyEventLines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         Assert-MihariTest -Condition (-not $line.Contains('proxy-secret')) -Message 'JSONL must not retain an explicit proxy credential.'

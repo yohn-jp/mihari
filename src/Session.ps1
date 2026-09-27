@@ -99,10 +99,10 @@ function Get-MihariSafeProxyEndpoint {
         return '[configured; endpoint unavailable]'
     }
     if ([string]::IsNullOrWhiteSpace($uri.Host)) { return '[configured; endpoint unavailable]' }
-    $host = $uri.Host
-    if ($host.Contains(':') -and -not $host.StartsWith('[')) { $host = '[' + $host + ']' }
-    if ($uri.IsDefaultPort) { return $host }
-    return $host + ':' + $uri.Port
+    $proxyHostName = $uri.Host
+    if ($proxyHostName.Contains(':') -and -not $proxyHostName.StartsWith('[')) { $proxyHostName = '[' + $proxyHostName + ']' }
+    if ($uri.IsDefaultPort) { return $proxyHostName }
+    return $proxyHostName + ':' + $uri.Port
 }
 
 function Get-MihariSessionMetadataObject {
