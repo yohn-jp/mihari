@@ -10,6 +10,22 @@ permissions:
   contents: read
 
 jobs:
+  trust-ui-probe:
+    name: Trust UI probe (${{ matrix.shell }})
+    runs-on: windows-latest
+    timeout-minutes: 3
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe protected CurrentUser Root installation
+        run: ./test/trust-ui-probe.ps1
+
   powershell-tests:
     name: Tests (${{ matrix.label }}, ${{ matrix.suite }})
     runs-on: windows-latest
