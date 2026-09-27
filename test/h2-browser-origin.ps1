@@ -11,13 +11,20 @@ $repoRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $repoRoot 'src/Certificate.ps1')
 
 function Read-MihariH2FixtureBytes {
-    param([Parameter(Mandatory = $true)][System.IO.Stream] $Stream, [Parameter(Mandatory = $true)][int] $Count)
+    param(
+        [Parameter(Mandatory = $true)][System.IO.Stream] $Stream,
+        [Parameter(Mandatory = $true)][int] $Count,
+        [switch] $AllowCleanEof
+    )
 
     $buffer = New-Object 'byte[]' $Count
     $offset = 0
     while ($offset -lt $Count) {
         $read = $Stream.Read($buffer, $offset, $Count - $offset)
-        if ($read -le 0) { throw 'h2 peer closed before a complete frame was received.' }
+        if ($read -le 0) {
+            if ($AllowCleanEof -and $offset -eq 0) { return $null }
+            throw [System.IO.IOException]::new('h2 peer closed before a complete frame was received.')
+        }
         $offset += $read
     }
     return ,$buffer
@@ -26,7 +33,8 @@ function Read-MihariH2FixtureBytes {
 function Read-MihariH2FixtureFrame {
     param([Parameter(Mandatory = $true)][System.IO.Stream] $Stream)
 
-    $header = Read-MihariH2FixtureBytes -Stream $Stream -Count 9
+    $header = Read-MihariH2FixtureBytes -Stream $Stream -Count 9 -AllowCleanEof
+    if ($null -eq $header) { return $null }
     $length = ([int]$header[0] -shl 16) -bor ([int]$header[1] -shl 8) -bor [int]$header[2]
     if ($length -gt 16384) { throw 'h2 client frame exceeded the default frame-size limit.' }
     $streamId = (([long]$header[5] -band 0x7f) -shl 24) -bor
@@ -233,9 +241,19 @@ function Invoke-MihariH2FixtureConnection {
         Write-MihariH2FixtureFrame -Stream $tls -Type 4 -Flags 0 -StreamId 0 -Payload ([byte[]]@())
 
         $totalTransactionCount = 0
+        $rootPathCount = 0
+        $lastAcceptedStreamId = 0
+        $peerClosed = $false
         $fixtureDeadline = [DateTime]::UtcNow.AddSeconds(12)
         while ($totalTransactionCount -lt 64 -and [DateTime]::UtcNow -lt $fixtureDeadline) {
-            $frame = Read-MihariH2FixtureFrame -Stream $tls
+            try { $frame = Read-MihariH2FixtureFrame -Stream $tls }
+            catch {
+                $socketErrorCode = Get-MihariH2FixtureSocketErrorCode -Exception $_.Exception
+                if ($_.Exception -is [System.TimeoutException] -or
+                    $socketErrorCode -eq [System.Net.Sockets.SocketError]::TimedOut) { break }
+                throw
+            }
+            if ($null -eq $frame) { $peerClosed = $true; break }
             if ($frame.Type -eq 4 -and ($frame.Flags -band 0x01) -eq 0) {
                 Write-MihariH2FixtureFrame -Stream $tls -Type 4 -Flags 1 -StreamId 0 -Payload ([byte[]]@())
                 continue
@@ -249,10 +267,14 @@ function Invoke-MihariH2FixtureConnection {
             $headerBlock = Get-MihariH2FixtureHeaderBlock -FirstFrame $frame -Stream $tls
             $rootPathObserved = Test-MihariHpackRootPath -HeaderBlock $headerBlock
             $totalTransactionCount++
+            $lastAcceptedStreamId = [long]$frame.StreamId
             $body = [byte[]]@()
             if ($rootPathObserved) {
-                $page = '<!doctype html><html><body><script>setTimeout(function(){fetch("/")},500)</script>h2 tunnel fixture</body></html>'
-                $body = [System.Text.Encoding]::UTF8.GetBytes($page)
+                $rootPathCount++
+                if ($rootPathCount -eq 1) {
+                    $page = '<!doctype html><html><body><script>setTimeout(function(){fetch("/")},500)</script>h2 tunnel fixture</body></html>'
+                    $body = [System.Text.Encoding]::UTF8.GetBytes($page)
+                }
             }
             Write-MihariH2FixtureResponse -Stream $tls -StreamId $frame.StreamId -Body $body
             $record = [pscustomobject]@{
@@ -269,38 +291,45 @@ function Invoke-MihariH2FixtureConnection {
             }
             finally { [System.Threading.Monitor]::Exit($TransactionLock) }
 
-            # The script fetch may use a new CONNECT. Retire this connection
-            # cleanly so the bounded fixture pool can serve it independently.
+            # Keep this connection available for the delayed script fetch and
+            # the browser's favicon request. The bounded read timeout below
+            # retires an otherwise idle connection after the browser is done.
+            $tls.ReadTimeout = 3000
+        }
+
+        if ($totalTransactionCount -eq 0) {
+            throw 'The local h2 fixture did not receive a request HEADERS frame within its bounded stream window.'
+        }
+        if (-not $peerClosed -and $lastAcceptedStreamId -gt 0) {
             $goaway = New-Object byte[] 8
-            $goaway[0] = [byte](($frame.StreamId -shr 24) -band 0x7f)
-            $goaway[1] = [byte](($frame.StreamId -shr 16) -band 0xff)
-            $goaway[2] = [byte](($frame.StreamId -shr 8) -band 0xff)
-            $goaway[3] = [byte]($frame.StreamId -band 0xff)
+            $goaway[0] = [byte](($lastAcceptedStreamId -shr 24) -band 0x7f)
+            $goaway[1] = [byte](($lastAcceptedStreamId -shr 16) -band 0xff)
+            $goaway[2] = [byte](($lastAcceptedStreamId -shr 8) -band 0xff)
+            $goaway[3] = [byte]($lastAcceptedStreamId -band 0xff)
             Write-MihariH2FixtureFrame -Stream $tls -Type 7 -Flags 0 -StreamId 0 -Payload $goaway
             $tls.ShutdownAsync().GetAwaiter().GetResult()
-            $tls.ReadTimeout = 3000
-            $closeBuffer = New-Object byte[] 4096
-            $closeDeadline = [DateTime]::UtcNow.AddSeconds(3)
-            while ([DateTime]::UtcNow -lt $closeDeadline) {
-                try {
-                    $closeRead = $tls.Read($closeBuffer, 0, $closeBuffer.Length)
-                    if ($closeRead -le 0) { break }
-                }
-                catch [System.IO.IOException] {
-                    $inner = $_.Exception.InnerException
-                    if ($null -ne $inner -and $inner -is [System.Net.Sockets.SocketException] -and
-                        $inner.SocketErrorCode -eq [System.Net.Sockets.SocketError]::TimedOut) { break }
-                    throw
-                }
-            }
-            return
         }
-        throw 'The local h2 fixture did not receive a request HEADERS frame within its bounded stream window.'
     }
     finally {
         if ($null -ne $tls) { $tls.Dispose() }
         $Client.Close()
     }
+}
+
+function Get-MihariH2FixtureSocketErrorCode {
+    param([Parameter(Mandatory = $true)][System.Exception] $Exception)
+
+    $pending = New-Object 'System.Collections.Generic.Queue[System.Exception]'
+    $pending.Enqueue($Exception)
+    while ($pending.Count -gt 0) {
+        $cause = $pending.Dequeue()
+        if ($cause -is [System.Net.Sockets.SocketException]) { return $cause.SocketErrorCode }
+        if ($null -ne $cause.InnerException) { $pending.Enqueue($cause.InnerException) }
+        if ($cause -is [System.AggregateException]) {
+            foreach ($inner in $cause.InnerExceptions) { if ($null -ne $inner) { $pending.Enqueue($inner) } }
+        }
+    }
+    return $null
 }
 
 function Get-MihariH2FixtureErrorRecord {
