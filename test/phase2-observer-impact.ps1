@@ -58,7 +58,7 @@ function Get-MihariImpactEvents {
         try { $events.Add((ConvertFrom-Json -InputObject $line -ErrorAction Stop)) }
         catch { throw 'The observer wrote an invalid complete JSONL record.' }
     }
-    return ,$events.ToArray()
+    return $events.ToArray()
 }
 
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ('mihari-impact-' + [Guid]::NewGuid().ToString('N'))
@@ -116,6 +116,8 @@ try {
     $final = Stop-MihariTestSession -Child $child -Metadata $metadata
     Assert-MihariTest -Condition (-not [bool]$final.capture.incomplete -and [int]$final.capture.queuePeak -eq 4 -and
         [long]$final.capture.saturationCount -ge 1) -Message 'Clean stop must persist measured queue bounds without false capture loss.'
+    $finalEvents = @(Get-MihariImpactEvents -Path ([string]$final.eventsPath))
+    Assert-MihariTest -Condition (@($finalEvents | Where-Object { $_.stage -eq 'listener.queue' -and $_.outcome -eq 'cancelled' }).Count -eq 4) -Message 'Stop must leave explicit cancellation facts for all four queued clients.'
     $child.Process.Dispose(); $child = $null
 
     # Exercise the canonical writer and persisted session state with a small,
