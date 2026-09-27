@@ -55,6 +55,10 @@ function Invoke-MihariHttp2TlsAuthentication {
         if ($method.Name -eq $name -and $parameters.Length -eq 1) { $sync = $method }
         elseif ($method.Name -eq ($name + 'Async')) { $async = $method }
     }
+    # The upstream trust callback is a PowerShell delegate. Authenticate on
+    # this runspace when the runtime exposes the options overload so the
+    # callback does not execute on an unbound thread-pool thread.
+    if ($null -ne $sync) { [void]$sync.Invoke($Tls, [object[]]@($Options)); return }
     if ($null -ne $async) {
         $parameters = $async.GetParameters()
         $args = New-Object 'object[]' $parameters.Length
@@ -69,7 +73,6 @@ function Invoke-MihariHttp2TlsAuthentication {
         $task.GetAwaiter().GetResult()
         return
     }
-    if ($null -ne $sync) { [void]$sync.Invoke($Tls, [object[]]@($Options)); return }
     throw [System.NotSupportedException]::new('Managed TLS authentication with ALPN options is unavailable.')
 }
 
