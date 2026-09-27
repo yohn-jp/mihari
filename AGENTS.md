@@ -182,6 +182,10 @@ Be careful with `ConvertTo-Json` depth and enum/date serialization. Event output
 
 Avoid global mutable variables. Pass a session/context object explicitly.
 
+## Source encoding
+
+Windows PowerShell 5.1 can decode BOM-less PowerShell source through the active ANSI code page. Any PowerShell source that embeds HTML or JavaScript must therefore remain ASCII-only unless the file is deliberately stored with a UTF-8 BOM. Use HTML entities or JavaScript Unicode escapes for non-ASCII typography. This is required for locale-independent parsing and UI behavior.
+
 ## Error handling
 
 Never use empty `catch {}`.

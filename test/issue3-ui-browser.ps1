@@ -10,6 +10,11 @@ if ($env:OS -ne 'Windows_NT') {
 . (Join-Path $PSScriptRoot 'integration.ps1') -LoadHelpersOnly
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'src/Browser.ps1')
 
+$managementUiSourcePath = Join-Path (Join-Path (Split-Path $PSScriptRoot -Parent) 'src') 'ManagementUi.ps1'
+$managementUiBytes = [IO.File]::ReadAllBytes($managementUiSourcePath)
+$nonAsciiUiBytes = @($managementUiBytes | Where-Object { $_ -gt 127 })
+Assert-MihariTest -Condition ($nonAsciiUiBytes.Count -eq 0) -Message 'ManagementUi.ps1 must remain ASCII-only so Windows PowerShell 5.1 cannot reinterpret embedded HTML/JavaScript through the active ANSI code page.'
+
 function Get-Issue3UiHttpJson {
     param([Parameter(Mandatory = $true)][string]$Uri)
     $request = [System.Net.HttpWebRequest]::Create($Uri)
@@ -84,7 +89,7 @@ function Wait-Issue3UiValue {
         Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $deadline)
     $lastValue = [string]$value
-    if ($lastValue.Length -gt 200) { $lastValue = $lastValue.Substring(0, 200) + '…' }
+    if ($lastValue.Length -gt 200) { $lastValue = $lastValue.Substring(0, 200) + '...' }
     throw ('The management UI did not reach the expected DOM state. Last value: ' + $lastValue)
 }
 
