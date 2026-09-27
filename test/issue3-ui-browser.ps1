@@ -175,7 +175,9 @@ try {
     $metadata = Wait-MihariTestSession -Child $child
     $managementUrl = 'http://127.0.0.1:{0}/' -f [int]$metadata.actualManagementPort
     $browser = Start-Issue3UiEdge -Uri $managementUrl -ProfilePath (Join-Path $tempRoot 'management-edge')
-    Assert-MihariTest -Condition ($browser -is [pscustomobject] -and $null -ne $browser.PSObject.Properties['NextId']) -Message 'The headless Edge setup must return one browser control context.'
+    $browserType = 'null'
+    if ($null -ne $browser) { $browserType = $browser.GetType().FullName }
+    Assert-MihariTest -Condition ($browser -is [pscustomobject] -and $null -ne $browser.PSObject.Properties['NextId']) -Message ('The headless Edge setup must return one browser control context; type={0}, count={1}.' -f $browserType, @($browser).Count)
 
     $snapshotExpression = 'JSON.stringify({session:document.getElementById("session-id")?.textContent,mode:document.getElementById("mode-state")?.textContent,proxy:document.getElementById("proxy-endpoint")?.textContent,ui:document.getElementById("management-endpoint")?.textContent,updated:document.getElementById("last-updated")?.textContent,events:document.getElementById("event-rows")?.textContent,error:document.getElementById("api-error")?.className})'
     $initialText = Wait-Issue3UiValue -Browser $browser -Expression $snapshotExpression -Predicate {
