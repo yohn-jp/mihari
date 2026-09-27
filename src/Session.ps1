@@ -136,6 +136,9 @@ function Set-MihariSessionMode {
     if ([string]$Session.Status -ne 'running') {
         throw 'Mihari mode can only change while both session listeners are running.'
     }
+    if ($Mode -eq 'Inspect' -and [string]$Session.Profile -eq 'http2-observe') {
+        throw 'The http2-observe profile is Tunnel only. Start a new compatibility trial for Inspect.'
+    }
     [System.Threading.Monitor]::Enter($Session.StateLock)
     try {
         $previous = [string]$Session.Mode
@@ -158,13 +161,59 @@ function Set-MihariSessionMode {
             }
         }
         $Session.Mode = $Mode
+        $Session.ConfigurationRevision = [int]$Session.ConfigurationRevision + 1
         [void](Save-MihariSessionMetadata -Session $Session)
         if ($null -ne $Session.Writer) {
-            $null = Write-MihariEvent -Session $Session -ConnectionId 'session' -Stage 'session.mode' -Outcome 'changed' -ElapsedMs 0 -Data @{
+            $null = Write-MihariEvent -Session $Session -ConnectionId 'session' -Stage 'session.mode' -Outcome 'changed' -ElapsedMs 0 -ConfigurationRevision ([int]$Session.ConfigurationRevision) -Data @{
                 previousMode = $previous; mode = $Mode; caTrusted = (Test-MihariSessionCATrust -Session $Session)
             }
         }
         return $Mode
+    }
+    finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
+}
+
+function Set-MihariLocalInspectExclusion {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Session,
+        [Parameter(Mandatory = $true)][string]$HostName,
+        [Parameter(Mandatory = $true)][bool]$Excluded
+    )
+
+    if ([string]$Session.Status -ne 'running') { throw 'Local exclusions require a running session.' }
+    $hostValue = $HostName.Trim().TrimEnd('.').ToLowerInvariant()
+    if ($hostValue.Length -lt 1 -or $hostValue.Length -gt 253 -or $hostValue.Contains('*') -or
+        $hostValue.Contains('/') -or $hostValue.Contains('?') -or $hostValue.Contains('@')) {
+        throw 'An exact DNS host or IP address is required.'
+    }
+    $address = $null
+    if (-not [System.Net.IPAddress]::TryParse($hostValue, [ref]$address)) {
+        try { $hostValue = ([System.Globalization.IdnMapping]::new()).GetAscii($hostValue).ToLowerInvariant() }
+        catch { throw 'An exact DNS host or IP address is required.' }
+        if ([Uri]::CheckHostName($hostValue) -ne [UriHostNameType]::Dns) {
+            throw 'An exact DNS host or IP address is required.'
+        }
+    }
+    else { $hostValue = $address.ToString().ToLowerInvariant() }
+
+    [System.Threading.Monitor]::Enter($Session.StateLock)
+    try {
+        $current = @($Session.LocalInspectExclusions | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        $next = @($current | Where-Object { -not [string]::Equals([string]$_, $hostValue, [StringComparison]::OrdinalIgnoreCase) })
+        if ($Excluded) { $next += $hostValue }
+        $next = @($next | Sort-Object -Unique)
+        if (($current -join '|') -ne ($next -join '|')) {
+            $Session.LocalInspectExclusions = $next
+            $Session.ConfigurationRevision = [int]$Session.ConfigurationRevision + 1
+            [void](Save-MihariSessionMetadata -Session $Session)
+            if ($null -ne $Session.Writer) {
+                $null = Write-MihariEvent -Session $Session -ConnectionId 'session' -Stage 'session.local_exclusion' -Outcome 'changed' -ElapsedMs 0 -Source operator -ConfigurationRevision ([int]$Session.ConfigurationRevision) -Data @{
+                    host = $hostValue; reason = $(if ($Excluded) { 'enabled' } else { 'disabled' })
+                }
+            }
+        }
+        return [pscustomobject]@{ host = $hostValue; excluded = $Excluded; configurationRevision = [int]$Session.ConfigurationRevision; effectiveFor = 'new_connections' }
     }
     finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
 }
@@ -195,6 +244,10 @@ function Get-MihariSessionMetadataObject {
         processId = [int]$Session.ProcessId
         processStartTimeUtc = [string]$Session.ProcessStartTimeUtc
         mode = [string]$Session.Mode
+        profile = [string]$Session.Profile
+        httpConnectionPolicy = [string]$Session.HttpConnectionPolicy
+        configurationRevision = [int]$Session.ConfigurationRevision
+        localInspectExclusions = @($Session.LocalInspectExclusions)
         status = [string]$Session.Status
         bindAddress = '127.0.0.1'
         port = [int]$Session.Port
@@ -252,6 +305,8 @@ function New-MihariSession {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][ValidateSet('Tunnel', 'Inspect')][string]$Mode,
+        [ValidateSet('compatibility', 'http2-observe')][string]$Profile = 'compatibility',
+        [ValidateSet('reuse', 'close')][string]$HttpConnectionPolicy = 'reuse',
         [Parameter(Mandatory = $true)][ValidateRange(0, 65535)][int]$Port,
         [ValidateRange(0, 65535)][int]$ManagementPort = 0,
         [string]$UpstreamProxy,
@@ -261,6 +316,9 @@ function New-MihariSession {
 
     if (-not (Get-Command Test-MihariCapability -ErrorAction SilentlyContinue)) {
         throw 'Mihari compatibility checks are unavailable.'
+    }
+    if ($Profile -eq 'http2-observe' -and $Mode -ne 'Tunnel') {
+        throw 'The http2-observe profile requires Tunnel mode.'
     }
     $capability = Test-MihariCapability -Mode $Mode
     if (-not $capability.Available) {
@@ -315,10 +373,20 @@ function New-MihariSession {
             throw 'The upstream route snapshot function is unavailable.'
         }
         $platformProxySnapshot = New-MihariUpstreamSnapshot
+        $controlBytes = New-Object byte[] 32
+        $controlRandom = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $controlRandom.GetBytes($controlBytes) }
+        finally { $controlRandom.Dispose() }
+        $controlToken = ([Convert]::ToBase64String($controlBytes)).TrimEnd('=') -replace '\+', '-' -replace '/', '_'
 
         $session = [pscustomobject]@{
             Id = $id
             Mode = $Mode
+            Profile = $Profile
+            HttpConnectionPolicy = $HttpConnectionPolicy
+            ConfigurationRevision = 1
+            LocalInspectExclusions = @()
+            ControlToken = $controlToken
             Port = $Port
             ActualPort = $null
             ManagementPort = $ManagementPort
@@ -641,6 +709,13 @@ function Stop-MihariSession {
         }
     }
     catch { [void]$cleanupErrors.Add('Could not stop the listener cleanly.') }
+
+    try {
+        if (Get-Command Stop-MihariBrowserObservation -ErrorAction SilentlyContinue) {
+            Stop-MihariBrowserObservation -Session $Session
+        }
+    }
+    catch { [void]$cleanupErrors.Add('Could not stop the owned browser observation cleanly.') }
 
     try {
         if ($null -ne $Session.ManagementListener -and (Get-Command Stop-MihariManagementListener -ErrorAction SilentlyContinue)) {

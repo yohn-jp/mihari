@@ -49,15 +49,27 @@ function ConvertTo-MihariManagementEvent {
     $stage = ConvertTo-MihariManagementScalar -Value (Get-MihariMemberValue -InputObject $Event -Names @('stage')) -MaximumLength 64
     $outcome = ConvertTo-MihariManagementScalar -Value (Get-MihariMemberValue -InputObject $Event -Names @('outcome')) -MaximumLength 32
     $elapsed = ConvertTo-MihariManagementNumber -Value (Get-MihariMemberValue -InputObject $Event -Names @('elapsedMs'))
+    $schemaVersion = ConvertTo-MihariManagementNumber -Value (Get-MihariMemberValue -InputObject $Event -Names @('schemaVersion'))
+    $sequence = ConvertTo-MihariManagementNumber -Value (Get-MihariMemberValue -InputObject $Event -Names @('sequence'))
+    $source = ConvertTo-MihariManagementScalar -Value (Get-MihariMemberValue -InputObject $Event -Names @('source')) -MaximumLength 32
+    if ($null -eq $source) { $source = 'proxy' }
+    $coverage = ConvertTo-MihariManagementScalar -Value (Get-MihariMemberValue -InputObject $Event -Names @('coverage')) -MaximumLength 32
+    if ($null -eq $coverage) { $coverage = 'unknown' }
     $rawData = Get-MihariEventData -Event $Event
     $projectedData = [ordered]@{}
 
     $stringFields = @(
         'host', 'scheme', 'method', 'routeKind', 'routeSource', 'proxyHost',
-        'clientEndpoint', 'direction', 'tlsProtocol', 'tlsCipher', 'certificateSubject',
+        'clientEndpoint', 'direction', 'tlsProtocol', 'tlsCipher', 'tlsCipherSuite', 'certificateSubject',
         'certificateIssuer', 'certificateThumbprint', 'certificateNotBefore',
         'certificateNotAfter', 'errorType', 'errorCode', 'reason',
-        'unsupportedProtocol', 'mode', 'previousMode'
+        'unsupportedProtocol', 'mode', 'previousMode', 'tlsAlpn',
+        'certificateChainState', 'hostnameState', 'validityState',
+        'ekuState', 'revocationState', 'validationPolicy', 'peerIdentityRole',
+        'clientCertificateState', 'protocol', 'initiatorType', 'browserTargetId',
+        'browserRequestId', 'browserConnectionId', 'browserError',
+        'browserTimingOrigin', 'requestFraming', 'responseFraming',
+        'connectionPolicy', 'framing'
     )
     foreach ($name in $stringFields) {
         $value = Get-MihariMemberValue -InputObject $rawData -Names @($name)
@@ -71,18 +83,34 @@ function ConvertTo-MihariManagementEvent {
     $path = ConvertTo-MihariPath -Value (Get-MihariMemberValue -InputObject $rawData -Names @('path'))
     if ($null -ne $path) { $projectedData['path'] = $path }
 
-    foreach ($name in @('port', 'proxyPort', 'statusCode', 'proxyStatus', 'bytesClientToUpstream', 'bytesUpstreamToClient')) {
+    foreach ($name in @('port', 'proxyPort', 'statusCode', 'proxyStatus', 'bytesClientToUpstream', 'bytesUpstreamToClient', 'tlsCipherStrength', 'browserRedirectIndex', 'browserTimingStartMs', 'browserTimingDurationMs', 'requestBytes', 'responseBytes', 'bytes', 'firstByteMs', 'lastByteMs', 'forwardWriteMs', 'workerOccupancy', 'maxWorkers')) {
         $number = ConvertTo-MihariManagementNumber -Value (Get-MihariMemberValue -InputObject $rawData -Names @($name))
         if ($null -ne $number -and $number -ge 0 -and $number -le [decimal]([long]::MaxValue)) {
             $projectedData[$name] = [long][Math]::Truncate($number)
         }
     }
-    foreach ($name in @('certificateAccepted', 'caTrusted')) {
+    foreach ($name in @('certificateAccepted', 'caTrusted', 'fromDiskCache', 'fromServiceWorker', 'reused', 'queueSaturated')) {
         $value = Get-MihariMemberValue -InputObject $rawData -Names @($name)
         if ($value -is [bool]) { $projectedData[$name] = $value }
     }
+    $rawChain = Get-MihariMemberValue -InputObject $rawData -Names @('certificateChain')
+    if ($null -ne $rawChain) {
+        $safeChain = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($element in @(@($rawChain) | Select-Object -First 8)) {
+            if ($null -eq $element) { continue }
+            $safeElement = [ordered]@{}
+            foreach ($field in @('subject', 'issuer', 'thumbprint', 'notBefore', 'notAfter')) {
+                $safeValue = ConvertTo-MihariManagementScalar -Value (Get-MihariMemberValue -InputObject $element -Names @($field)) -MaximumLength 256
+                if ($null -ne $safeValue) { $safeElement[$field] = $safeValue }
+            }
+            if ($safeElement.Count -gt 0) { $safeChain.Add([pscustomobject]$safeElement) }
+        }
+        $projectedData['certificateChain'] = @($safeChain.ToArray())
+    }
 
     $eventProjection = [ordered]@{
+        schemaVersion = $schemaVersion
+        sequence = $sequence
         eventId = $eventId
         timestamp = $timestamp
         sessionId = $sessionId
@@ -92,7 +120,21 @@ function ConvertTo-MihariManagementEvent {
         stage = $stage
         outcome = $outcome
         elapsedMs = $elapsed
+        source = $source
+        coverage = $coverage
         data = [pscustomobject]$projectedData
+    }
+    foreach ($name in @('caseId', 'trialId', 'configurationRevision', 'transportLeg', 'upstreamConnectionId', 'streamId', 'sourceIdentity', 'sourceVersion', 'monotonicTicks', 'clockId')) {
+        $value = Get-MihariMemberValue -InputObject $Event -Names @($name)
+        if ($null -eq $value) { continue }
+        if ($name -in @('configurationRevision', 'monotonicTicks')) {
+            $number = ConvertTo-MihariManagementNumber -Value $value
+            if ($null -ne $number -and $number -ge 0 -and $number -le [decimal]([long]::MaxValue)) { $eventProjection[$name] = [long]$number }
+        }
+        else {
+            $safeValue = ConvertTo-MihariManagementScalar -Value $value -MaximumLength 128
+            if ($null -ne $safeValue) { $eventProjection[$name] = $safeValue }
+        }
     }
     return [pscustomobject]$eventProjection
 }

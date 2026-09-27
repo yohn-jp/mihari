@@ -6,6 +6,7 @@ $sourceRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'src'
 . (Join-Path $sourceRoot 'Http.ps1')
 . (Join-Path $sourceRoot 'Observation.ps1')
 . (Join-Path $sourceRoot 'Diagnosis.ps1')
+. (Join-Path $sourceRoot 'ManagementProjection.ps1')
 . (Join-Path $sourceRoot 'Cli.ps1')
 
 function New-MihariTestMemoryStream {
@@ -118,16 +119,24 @@ try {
         Authorization = 'Bearer authorization-secret'; Cookie = 'session=cookie-secret'; ProxyAuthorization = 'proxy-secret'
         SetCookie = 'set-cookie-secret'; body = 'body-secret'; arbitraryHeader = 'header-secret'
     } | Out-Null
+    Write-MihariEvent -Session $session -ConnectionId 'connection-contract' -RequestId 'request-contract' -Stage 'http.response' -Outcome 'success' -ElapsedMs 20 -Data @{ statusCode = 200 } | Out-Null
     Close-MihariEventWriter -Writer $writer
     $lines = [IO.File]::ReadAllLines($eventsPath)
-    Assert-MihariTest -Condition ($lines.Length -eq 1) -Message 'Event writer must emit one complete JSONL line.'
+    Assert-MihariTest -Condition ($lines.Length -eq 2) -Message 'Event writer must emit complete JSONL lines.'
     $serializedEvent = $lines[0]
     foreach ($secret in @('secret', 'authorization-secret', 'cookie-secret', 'proxy-secret', 'set-cookie-secret', 'body-secret', 'header-secret')) {
         Assert-MihariTest -Condition (-not $serializedEvent.Contains($secret)) -Message 'Event JSONL must exclude query, credential, cookie, body, and arbitrary-header values.'
     }
     $event = ConvertFrom-Json -InputObject $serializedEvent
     Assert-MihariTest -Condition ($event.data.path -eq '/safe/path?token=[REDACTED]&x=[REDACTED]') -Message 'Event JSONL must preserve the path and redact query values.'
-    Assert-MihariTest -Condition ($event.schemaVersion -eq 1 -and $event.sessionId -eq $session.Id -and $event.connectionId -eq 'connection-contract' -and $event.requestId -eq 'request-contract') -Message 'Event envelope must include the required correlation fields.'
+    Assert-MihariTest -Condition ($event.schemaVersion -eq 2 -and $event.sequence -eq 1 -and $event.source -eq 'proxy' -and $event.coverage -eq 'observed' -and $event.sessionId -eq $session.Id -and $event.connectionId -eq 'connection-contract' -and $event.requestId -eq 'request-contract') -Message 'Event envelope must include versioned order, provenance, coverage, and correlation fields.'
+    $secondEvent = ConvertFrom-Json -InputObject $lines[1]
+    Assert-MihariTest -Condition ($secondEvent.sequence -eq 2 -and $secondEvent.eventId -ne $event.eventId) -Message 'Writer sequence must advance independently of timestamp ties.'
+    $legacyProjection = ConvertTo-MihariManagementEvent -Event ([pscustomobject]@{
+        schemaVersion = 1; eventId = 'legacy-1'; sessionId = 'legacy-session'; connectionId = 'legacy-connection'
+        stage = 'upstream.tcp'; outcome = 'failed'; data = [pscustomobject]@{ host = 'legacy.test' }
+    })
+    Assert-MihariTest -Condition ($legacyProjection.source -eq 'proxy' -and $legacyProjection.coverage -eq 'unknown' -and $null -eq $legacyProjection.sequence) -Message 'Legacy schema-v1 events must retain unknown coverage and sequence.'
 
     $emptyFindings = @(Get-MihariDiagnosis -Events @())
     Assert-MihariTest -Condition ($emptyFindings.Count -eq 0) -Message 'Diagnosis must accept an empty event collection and return no findings.'

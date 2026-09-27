@@ -250,6 +250,9 @@ function Get-MihariManagementStatusDocument {
         status = $status
         effectiveStatus = $effectiveStatus
         mode = [string]$Session.Mode
+        profile = [string]$Session.Profile
+        httpConnectionPolicy = [string]$Session.HttpConnectionPolicy
+        configurationRevision = [int]$Session.ConfigurationRevision
         inspectEnabled = ([string]$Session.Mode -eq 'Inspect')
         startedAtUtc = [string]$Session.StartedAtUtc
         processId = [int]$Session.ProcessId
@@ -290,6 +293,9 @@ function Get-MihariManagementStatusDocument {
         managementHealth = $managementHealth
         upstreamRoute = (Get-MihariManagementUpstreamRoute -Session $Session -Snapshot $projection)
         ca = $ca
+        profile = [string]$Session.Profile
+        httpConnectionPolicy = [string]$Session.HttpConnectionPolicy
+        configurationRevision = [int]$Session.ConfigurationRevision
         activeConnections = $activeConnections
         recentConnections = @($recentConnections | Select-Object -First 100)
         errors = @($errors | Select-Object -First 100)

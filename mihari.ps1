@@ -4,6 +4,10 @@ param(
     [string] $Command = 'help',
     [ValidateSet('Inspect', 'Tunnel')]
     [string] $Mode = 'Inspect',
+    [ValidateSet('compatibility', 'http2-observe')]
+    [string] $Profile = 'compatibility',
+    [ValidateSet('reuse', 'close')]
+    [string] $HttpConnectionPolicy = 'reuse',
     [int] $Port = 8899,
     [int] $UiPort = 0,
     [string] $UpstreamProxy,
@@ -25,7 +29,7 @@ switch ($Command) {
         break
     }
     'start' {
-        $session = New-MihariSession -Mode $Mode -Port $Port -ManagementPort $UiPort -UpstreamProxy $UpstreamProxy -OutputRoot $OutputRoot -MaxWorkers $MaxWorkers
+        $session = New-MihariSession -Mode $Mode -Profile $Profile -HttpConnectionPolicy $HttpConnectionPolicy -Port $Port -ManagementPort $UiPort -UpstreamProxy $UpstreamProxy -OutputRoot $OutputRoot -MaxWorkers $MaxWorkers
         try {
             Start-MihariListener -Session $session -OnReady {
                 param($readySession)

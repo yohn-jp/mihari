@@ -28,6 +28,7 @@ function New-MihariEventWriter {
         Stream = $streamWriter
         SyncRoot = (New-Object System.Object)
         Closed = $false
+        Sequence = [long]0
     }
     return $writer
 }
@@ -77,7 +78,24 @@ function Write-MihariEvent {
         [object] $Data,
 
         [ValidateSet('Inspect', 'Tunnel')]
-        [string] $Mode
+        [string] $Mode,
+
+        [ValidateSet('proxy', 'browser', 'windows', 'operator', 'import')]
+        [string] $Source = 'proxy',
+
+        [ValidateSet('observed', 'unknown', 'unsupported', 'permission_denied', 'truncated', 'lost')]
+        [string] $Coverage = 'observed',
+
+        [AllowNull()][string] $CaseId,
+        [AllowNull()][string] $TrialId,
+        [AllowNull()][string] $TransportLeg,
+        [AllowNull()][string] $UpstreamConnectionId,
+        [AllowNull()][string] $StreamId,
+        [AllowNull()][string] $SourceIdentity,
+        [AllowNull()][string] $SourceVersion,
+        [AllowNull()][string] $ClockId,
+        [AllowNull()][long] $MonotonicTicks,
+        [AllowNull()][int] $ConfigurationRevision
     )
 
     if (-not $PSBoundParameters.ContainsKey('Mode')) { $Mode = [string]$Session.Mode }
@@ -86,7 +104,7 @@ function Write-MihariEvent {
     $requestIdValue = $RequestId
     if ([string]::IsNullOrWhiteSpace($requestIdValue)) { $requestIdValue = $null }
     $event = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         timestamp = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
         eventId = [Guid]::NewGuid().ToString('N')
         sessionId = [string]$Session.Id
@@ -96,16 +114,31 @@ function Write-MihariEvent {
         stage = $Stage
         outcome = $Outcome
         elapsedMs = $elapsed
+        sequence = [long]0
+        source = $Source
+        coverage = $Coverage
         data = $safeData
     }
-
-    $json = ConvertTo-Json -InputObject $event -Depth 8 -Compress -ErrorAction Stop
+    foreach ($name in @('CaseId', 'TrialId', 'TransportLeg', 'UpstreamConnectionId', 'StreamId', 'SourceIdentity', 'SourceVersion', 'ClockId')) {
+        $value = Get-Variable -Name $name -ValueOnly
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $jsonName = $name.Substring(0, 1).ToLowerInvariant() + $name.Substring(1)
+            $safeValue = ConvertTo-MihariSafeText -Text $value
+            if ($safeValue.Length -gt 128) { $safeValue = $safeValue.Substring(0, 128) }
+            $event[$jsonName] = $safeValue
+        }
+    }
+    if ($PSBoundParameters.ContainsKey('ConfigurationRevision')) { $event['configurationRevision'] = $ConfigurationRevision }
+    if ($PSBoundParameters.ContainsKey('MonotonicTicks')) { $event['monotonicTicks'] = $MonotonicTicks }
     $writer = $Session.Writer
     [System.Threading.Monitor]::Enter($writer.SyncRoot)
     try {
         if ($writer.Closed) {
             throw 'The Mihari event writer is closed.'
         }
+        $writer.Sequence = [long]$writer.Sequence + 1
+        $event['sequence'] = [long]$writer.Sequence
+        $json = ConvertTo-Json -InputObject $event -Depth 8 -Compress -ErrorAction Stop
         $writer.Stream.WriteLine($json)
         $writer.Stream.Flush()
     }
@@ -125,16 +158,25 @@ function ConvertTo-MihariSafeEventData {
 
     $stringFields = @(
         'host', 'scheme', 'path', 'method', 'routeKind', 'routeSource', 'proxyHost',
-        'clientEndpoint', 'direction', 'tlsProtocol', 'tlsCipher', 'certificateSubject',
+        'clientEndpoint', 'direction', 'tlsProtocol', 'tlsCipher', 'tlsCipherSuite', 'certificateSubject',
         'certificateIssuer', 'certificateThumbprint', 'certificateNotBefore',
         'certificateNotAfter', 'errorType', 'errorCode', 'message', 'reason',
-        'unsupportedProtocol', 'mode', 'previousMode'
+        'unsupportedProtocol', 'mode', 'previousMode', 'tlsAlpn',
+        'certificateChainState', 'hostnameState', 'validityState', 'ekuState',
+        'revocationState', 'validationPolicy', 'peerIdentityRole',
+        'clientCertificateState', 'protocol', 'initiatorType', 'browserTargetId',
+        'browserRequestId', 'browserConnectionId', 'browserError',
+        'browserTimingOrigin', 'requestFraming', 'responseFraming',
+        'connectionPolicy', 'framing'
     )
     $integerFields = @(
         'port', 'statusCode', 'proxyStatus', 'proxyPort', 'bytesClientToUpstream',
-        'bytesUpstreamToClient'
+        'bytesUpstreamToClient', 'tlsCipherStrength', 'browserRedirectIndex',
+        'browserTimingStartMs', 'browserTimingDurationMs', 'requestBytes',
+        'responseBytes', 'bytes', 'firstByteMs', 'lastByteMs',
+        'forwardWriteMs', 'workerOccupancy', 'maxWorkers'
     )
-    $booleanFields = @('certificateAccepted', 'caTrusted')
+    $booleanFields = @('certificateAccepted', 'caTrusted', 'fromDiskCache', 'fromServiceWorker', 'reused', 'queueSaturated')
     $allowed = @{}
     foreach ($name in $stringFields) { $allowed[$name] = 'string' }
     foreach ($name in $integerFields) { $allowed[$name] = 'integer' }
@@ -162,6 +204,7 @@ function ConvertTo-MihariSafeEventData {
                 continue
             }
             if ($allowed.ContainsKey($name)) { $properties[$name] = $Data[$key] }
+            if ($name -eq 'certificateChain') { $properties[$name] = $Data[$key] }
         }
     }
     else {
@@ -175,6 +218,7 @@ function ConvertTo-MihariSafeEventData {
                 continue
             }
             if ($allowed.ContainsKey($name)) { $properties[$name] = $property.Value }
+            if ($name -eq 'certificateChain') { $properties[$name] = $property.Value }
         }
     }
 
@@ -182,6 +226,28 @@ function ConvertTo-MihariSafeEventData {
     $propertyNames = @($properties.Keys | Sort-Object { [string]$_ })
     foreach ($name in $propertyNames) {
         $value = $properties[$name]
+        if ($name -eq 'certificateChain') {
+            $chain = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($element in @(@($value) | Select-Object -First 8)) {
+                if ($null -eq $element) { continue }
+                $safeElement = [ordered]@{}
+                foreach ($field in @('subject', 'issuer', 'thumbprint', 'notBefore', 'notAfter')) {
+                    $member = $null
+                    if ($element -is [System.Collections.IDictionary]) {
+                        foreach ($key in $element.Keys) { if ([string]$key -eq $field) { $member = $element[$key]; break } }
+                    }
+                    elseif ($null -ne $element.PSObject.Properties[$field]) { $member = $element.PSObject.Properties[$field].Value }
+                    if ($null -ne $member) {
+                        $safeText = ConvertTo-MihariSafeText -Text ([string]$member)
+                        if ($safeText.Length -gt 256) { $safeText = $safeText.Substring(0, 256) }
+                        $safeElement[$field] = $safeText
+                    }
+                }
+                if ($safeElement.Count -gt 0) { $chain.Add([pscustomobject]$safeElement) }
+            }
+            $result[$name] = @($chain.ToArray())
+            continue
+        }
         $kind = $allowed[$name]
         if ($null -eq $value) { continue }
         if ($kind -eq 'string') {

@@ -16,6 +16,8 @@ Commands:
 
 Start options:
   -Mode Inspect|Tunnel    Inspect terminates TLS 1.2; Tunnel relays CONNECT.
+  -Profile <name>         compatibility (default), or http2-observe (Tunnel only).
+  -HttpConnectionPolicy <reuse|close>  HTTP/1.1 exchange policy. Default: reuse.
   -Port <port>            Loopback listener port. Default: 8899. Use 0 for any free port.
   -UiPort <port>          Management UI loopback port. Default: 0 (free port).
   -UpstreamProxy <uri>    Explicit upstream HTTP proxy override.
