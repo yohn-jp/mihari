@@ -78,11 +78,11 @@ try {
     $ctx = [pscustomobject]@{ Session = $session; ConnectionId = 'client-leg'; UpstreamConnectionId = 'upstream-leg'; Host = 'localhost'; Port = 443; Mode = 'Inspect'; ConfigurationRevision = 1; Clock = [Diagnostics.Stopwatch]::StartNew(); Streams = @{} }
     $client = New-MihariHttp2Direction -Leg client
     $upstream = New-MihariHttp2Direction -Leg upstream
-    $null = Invoke-MihariHttp2Frame -Context $ctx -State $client -Opposite $upstream -Frame ([pscustomobject]@{ Preface = $true; Bytes = $preface })
-    foreach ($direction in @($client,$upstream)) {
-        $frame = (Add-MihariHttp2Input -State $direction -Bytes $settings -Count $settings.Length).Items[0]
-        $null = Invoke-MihariHttp2Frame -Context $ctx -State $direction -Opposite $(if ($direction.Leg -eq 'client') { $upstream } else { $client }) -Frame $frame
+    foreach ($frame in (Add-MihariHttp2Input -State $client -Bytes $input -Count $input.Length).Items) {
+        $null = Invoke-MihariHttp2Frame -Context $ctx -State $client -Opposite $upstream -Frame $frame
     }
+    $frame = (Add-MihariHttp2Input -State $upstream -Bytes $settings -Count $settings.Length).Items[0]
+    $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
     $initialAck = New-MihariTestH2Frame -Type 4 -Flags 1 -StreamId 0
     foreach ($direction in @($client,$upstream)) {
         $frame = (Add-MihariHttp2Input -State $direction -Bytes $initialAck -Count $initialAck.Length).Items[0]
