@@ -83,13 +83,15 @@ function Write-MihariEvent {
     if (-not $PSBoundParameters.ContainsKey('Mode')) { $Mode = [string]$Session.Mode }
     $safeData = ConvertTo-MihariSafeEventData -Data $Data
     $elapsed = [long][Math]::Max(0, [Math]::Round($ElapsedMs, 0, [MidpointRounding]::AwayFromZero))
+    $requestIdValue = $RequestId
+    if ([string]::IsNullOrWhiteSpace($requestIdValue)) { $requestIdValue = $null }
     $event = [ordered]@{
         schemaVersion = 1
         timestamp = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
         eventId = [Guid]::NewGuid().ToString('N')
         sessionId = [string]$Session.Id
         connectionId = $ConnectionId
-        requestId = $RequestId
+        requestId = $requestIdValue
         mode = $Mode
         stage = $Stage
         outcome = $Outcome
