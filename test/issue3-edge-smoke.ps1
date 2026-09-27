@@ -22,6 +22,9 @@ function Invoke-MihariIssue3ManagementRequest {
     $request.Timeout = 10000
     $request.ReadWriteTimeout = 10000
     if ($Method -eq 'POST') {
+        # .NET Framework sends Expect: 100-continue by default. The small
+        # management listener intentionally does not support that extension.
+        $request.ServicePoint.Expect100Continue = $false
         $request.ContentType = 'application/json'
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes([string]$Body)
         $request.ContentLength = $bodyBytes.Length
@@ -30,7 +33,44 @@ function Invoke-MihariIssue3ManagementRequest {
         finally { $requestStream.Dispose() }
     }
 
-    $response = $request.GetResponse()
+    $response = $null
+    try { $response = $request.GetResponse() }
+    catch [System.Net.WebException] {
+        $errorResponse = $_.Exception.Response
+        if ($null -eq $errorResponse) { throw }
+        $statusCode = [int]$errorResponse.StatusCode
+        $errorCode = $null
+        try {
+            $errorStream = $errorResponse.GetResponseStream()
+            if ($null -ne $errorStream) {
+                $errorReader = [System.IO.StreamReader]::new($errorStream, [System.Text.Encoding]::UTF8)
+                try {
+                    $errorBuffer = New-Object char[] 4096
+                    $errorLength = $errorReader.Read($errorBuffer, 0, $errorBuffer.Length)
+                    $errorContent = [string]::new([char[]]$errorBuffer, 0, $errorLength)
+                }
+                finally { $errorReader.Dispose() }
+                $errorDocument = $null
+                try { $errorDocument = ConvertFrom-Json -InputObject $errorContent -ErrorAction Stop }
+                catch { $errorDocument = $null }
+                if ($null -ne $errorDocument) {
+                    foreach ($propertyName in @('error', 'code')) {
+                        $property = $errorDocument.PSObject.Properties[$propertyName]
+                        if ($null -ne $property -and [string]$property.Value -match '^[A-Za-z0-9_.-]{1,80}$') {
+                            $errorCode = [string]$property.Value
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        catch {
+            $errorCode = $null
+        }
+        finally { $errorResponse.Close() }
+        if ($errorCode) { throw ('Management {0} request returned HTTP {1} ({2}).' -f $Method, $statusCode, $errorCode) }
+        throw ('Management {0} request returned HTTP {1}.' -f $Method, $statusCode)
+    }
     try {
         $reader = [System.IO.StreamReader]::new($response.GetResponseStream(), [System.Text.Encoding]::UTF8)
         try { $content = $reader.ReadToEnd() }
