@@ -11,10 +11,15 @@ $result = [ordered]@{}
 $cleanupFailures = New-Object 'System.Collections.Generic.List[string]'
 $failure = $null
 $primaryCA = $null
+$primaryCAThumbprint = $null
+$primaryCASubject = $null
 $untrustedCA = $null
+$untrustedCAThumbprint = $null
 $publicRoot = $null
 $primaryLeaf = $null
+$primaryLeafThumbprint = $null
 $untrustedLeaf = $null
+$untrustedLeafThumbprint = $null
 $primaryKeyFile = $null
 $untrustedKeyFile = $null
 $primarySession = [pscustomobject]@{ CA = $null; LeafCache = (New-Object 'System.Collections.Hashtable') }
@@ -88,7 +93,7 @@ function New-ProbeProtocolList {
     foreach ($protocol in $Protocols) {
         [void] $add.Invoke($list, [object[]]@($protocol))
     }
-    return $list
+    return ,$list
 }
 
 function Set-ProbeProperty {
@@ -462,13 +467,16 @@ $result['tlsApi'] = [ordered]@{
 try {
     Write-Host '[h2-probe] Creating two unique in-memory Mihari CAs and exact-host leaves.'
     $primaryCA = New-MihariCA -SessionId ([guid]::NewGuid().ToString('N'))
+    $primaryCAThumbprint = $primaryCA.Thumbprint
+    $primaryCASubject = $primaryCA.Subject
     $primarySession.CA = $primaryCA
     $primaryLeaf = Get-MihariLeaf -Session $primarySession -DestinationHost 'localhost'
+    $primaryLeafThumbprint = $primaryLeaf.Thumbprint
     $primaryKeyFile = Get-ProbeLeafKeyFile -Certificate $primaryLeaf
     if (-not (Test-Path -LiteralPath $primaryKeyFile -PathType Leaf)) {
         throw 'The active exact-host leaf has no temporary current-user key file for Schannel.'
     }
-    if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $primaryLeaf.Thumbprint)) {
+    if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $primaryLeafThumbprint)) {
         throw 'The primary per-host leaf is present in a certificate store.'
     }
 
@@ -481,7 +489,7 @@ try {
         exactHost = 'localhost'
         leafHasPrivateKey = [bool]$primaryLeaf.HasPrivateKey
         temporaryCurrentUserKeyFilePresentDuringUse = [bool](Test-Path -LiteralPath $primaryKeyFile -PathType Leaf)
-        leafAbsentFromCertificateStoresDuringUse = [bool](Test-MihariTestThumbprintAbsent -Thumbprint $primaryLeaf.Thumbprint)
+        leafAbsentFromCertificateStoresDuringUse = [bool](Test-MihariTestThumbprintAbsent -Thumbprint $primaryLeafThumbprint)
         publicSessionRootInstalledForPositiveValidation = $true
     }
 
@@ -516,23 +524,25 @@ try {
     $result['leaf']['tlsHandshake'] = 'passed'
 
     $removed = Invoke-MihariTestRootConfirmation -Operation Remove -Action {
-        Remove-MihariCARoot -Thumbprint $primaryCA.Thumbprint -Subject $primaryCA.Subject
+        Remove-MihariCARoot -Thumbprint $primaryCAThumbprint -Subject $primaryCASubject
     }
     $rootInstalled = $false
     if ($removed -ne 1) { throw ("Expected to remove one exact session root; removed {0}." -f $removed) }
-    if (-not (Test-ProbeRootAbsent -Thumbprint $primaryCA.Thumbprint)) { throw 'The exact session root remains in CurrentUser Root after cleanup.' }
+    if (-not (Test-ProbeRootAbsent -Thumbprint $primaryCAThumbprint)) { throw 'The exact session root remains in CurrentUser Root after cleanup.' }
     $publicRoot.Dispose()
     $publicRoot = $null
 
     Write-Host '[h2-probe] Testing that a default outbound SslStream rejects an untrusted session leaf.'
     $untrustedCA = New-MihariCA -SessionId ([guid]::NewGuid().ToString('N'))
+    $untrustedCAThumbprint = $untrustedCA.Thumbprint
     $untrustedSession.CA = $untrustedCA
     $untrustedLeaf = Get-MihariLeaf -Session $untrustedSession -DestinationHost 'localhost'
+    $untrustedLeafThumbprint = $untrustedLeaf.Thumbprint
     $untrustedKeyFile = Get-ProbeLeafKeyFile -Certificate $untrustedLeaf
-    if (-not (Test-ProbeRootAbsent -Thumbprint $untrustedCA.Thumbprint)) {
+    if (-not (Test-ProbeRootAbsent -Thumbprint $untrustedCAThumbprint)) {
         throw 'The negative-validation fixture CA unexpectedly exists in CurrentUser Root.'
     }
-    if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $untrustedLeaf.Thumbprint)) {
+    if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $untrustedLeafThumbprint)) {
         throw 'The negative-validation fixture leaf unexpectedly exists in a certificate store.'
     }
     $validationResult = Invoke-ProbeDefaultValidationRejectsUntrustedLeaf -Certificate $untrustedLeaf -WaitMilliseconds $TimeoutMilliseconds
@@ -553,9 +563,9 @@ finally {
     if ($rootInstalled -and $null -ne $primaryCA) {
         try {
             $removed = Invoke-MihariTestRootConfirmation -Operation Remove -Action {
-                Remove-MihariCARoot -Thumbprint $primaryCA.Thumbprint -Subject $primaryCA.Subject
+                Remove-MihariCARoot -Thumbprint $primaryCAThumbprint -Subject $primaryCASubject
             }
-            if ($removed -ne 1 -and -not (Test-ProbeRootAbsent -Thumbprint $primaryCA.Thumbprint)) {
+            if ($removed -ne 1 -and -not (Test-ProbeRootAbsent -Thumbprint $primaryCAThumbprint)) {
                 $cleanupFailures.Add(('exact session root cleanup removed {0} certificate(s)' -f $removed))
             }
         }
@@ -596,7 +606,7 @@ finally {
     }
     if ($null -ne $primaryLeaf) {
         try {
-            if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $primaryLeaf.Thumbprint)) {
+            if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $primaryLeafThumbprint)) {
                 $cleanupFailures.Add('primary exact-host leaf remains in a certificate store')
             }
         }
@@ -604,7 +614,7 @@ finally {
     }
     if ($null -ne $untrustedLeaf) {
         try {
-            if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $untrustedLeaf.Thumbprint)) {
+            if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $untrustedLeafThumbprint)) {
                 $cleanupFailures.Add('untrusted exact-host leaf remains in a certificate store')
             }
         }
@@ -612,7 +622,7 @@ finally {
     }
     if ($null -ne $primaryCA) {
         try {
-            if (-not (Test-ProbeRootAbsent -Thumbprint $primaryCA.Thumbprint)) {
+            if (-not (Test-ProbeRootAbsent -Thumbprint $primaryCAThumbprint)) {
                 $cleanupFailures.Add('primary session root remains in CurrentUser Root')
             }
         }
@@ -620,7 +630,7 @@ finally {
     }
     if ($null -ne $untrustedCA) {
         try {
-            if (-not (Test-ProbeRootAbsent -Thumbprint $untrustedCA.Thumbprint)) {
+            if (-not (Test-ProbeRootAbsent -Thumbprint $untrustedCAThumbprint)) {
                 $cleanupFailures.Add('untrusted fixture root unexpectedly exists in CurrentUser Root')
             }
         }
