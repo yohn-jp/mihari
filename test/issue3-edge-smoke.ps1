@@ -361,9 +361,9 @@ try {
         $tlsFixtureStream = $originClient.GetStream()
         $tlsFixtureStream.ReadTimeout = 15000
         $clientHelloRecordType = -1
+        $tlsReadFailureType = $null
         try { $clientHelloRecordType = $tlsFixtureStream.ReadByte() }
-        catch { throw 'The HTTPS fixture accepted a connection but received no TLS ClientHello from Edge through the tunnel.' }
-        Assert-MihariTest -Condition ($clientHelloRecordType -eq 22) -Message 'The local HTTPS fixture must receive a TLS handshake record from real Edge through Mihari.'
+        catch { $tlsReadFailureType = $_.Exception.GetType().FullName }
         $originClient.Close()
         $originClient = $null
         $originListener.Stop()
@@ -372,14 +372,26 @@ try {
         $connectEvents = @(Get-MihariIssue3ConnectEvents -EventsPath ([string]$metadata.eventsPath) -HostName '127.0.0.1' -Port $tlsFixturePort)
         if ($connectEvents.Count -eq 0) {
             $safeSummary = Get-MihariIssue3SafeEventSummary -EventsPath ([string]$metadata.eventsPath)
-            throw ('Mihari did not complete the browser HTTPS CONNECT/Tunnel event chain. Safe session event summary: ' + $safeSummary)
+            throw ('Mihari did not complete the browser HTTPS CONNECT/Tunnel event chain. First fixture byte: {0}; read failure type: {1}; safe event summary: {2}' -f $clientHelloRecordType, $tlsReadFailureType, $safeSummary)
         }
         $connectRequest = @($connectEvents | Where-Object { $_.stage -eq 'proxy.request' }) | Select-Object -First 1
         $connectRoute = @($connectEvents | Where-Object { $_.stage -eq 'upstream.resolve' }) | Select-Object -First 1
         $connectTcp = @($connectEvents | Where-Object { $_.stage -eq 'upstream.tcp' }) | Select-Object -First 1
         $connectRelay = @($connectEvents | Where-Object { $_.stage -eq 'tunnel.relay' }) | Select-Object -First 1
+        $connectChainSummary = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($connectEvent in $connectEvents) {
+            $summaryLine = '{0}={1}' -f [string]$connectEvent.stage, [string]$connectEvent.outcome
+            if ($connectEvent.stage -eq 'tunnel.relay') {
+                $summaryLine += ' clientToUpstreamBytes={0}' -f [long]$connectEvent.data.bytesClientToUpstream
+            }
+            if ($connectEvent.data.errorCode) { $summaryLine += ' errorCode={0}' -f [string]$connectEvent.data.errorCode }
+            $connectChainSummary.Add($summaryLine)
+        }
         Assert-MihariTest -Condition ($connectRequest.mode -eq 'Tunnel' -and $connectRequest.data.method -eq 'CONNECT' -and [int]$connectRequest.data.port -eq $tlsFixturePort) -Message 'Mihari must observe real Edge HTTPS as a CONNECT accepted in Tunnel mode.'
         Assert-MihariTest -Condition ($connectRoute.outcome -eq 'success' -and $connectTcp.outcome -eq 'success') -Message 'Mihari must resolve and connect the browser HTTPS tunnel to the local TLS fixture.'
+        if ($clientHelloRecordType -ne 22 -or $null -ne $tlsReadFailureType) {
+            throw ('The local HTTPS fixture expected TLS record type 22 but read numeric byte {0} (read failure type: {1}); Mihari CONNECT chain: {2}' -f $clientHelloRecordType, $tlsReadFailureType, ($connectChainSummary -join '; '))
+        }
         Assert-MihariTest -Condition ([long]$connectRelay.data.bytesClientToUpstream -gt 0) -Message 'Mihari must relay Edge TLS handshake bytes unchanged to the local HTTPS fixture.'
         $clientTlsEvents = @($connectEvents | Where-Object { $_.stage -eq 'client.tls' })
         Assert-MihariTest -Condition ($clientTlsEvents.Count -eq 0) -Message 'Tunnel mode must not terminate the HTTPS fixture TLS handshake.'
