@@ -256,7 +256,13 @@ try {
     $netLogJob = Wait-MihariManagementV2EvidenceTestJob -Session $browserSession -JobId ([string]$netLogAccepted.jobId)
     Assert-MihariTest -Condition ($netLogJob.state -eq 'completed' -and $netLogJob.result.source -eq 'import' -and $netLogJob.result.format -eq 'Chromium NetLog JSON' -and $netLogJob.result.supported -and $netLogJob.result.sourceIdentity -match '^[0-9a-f]{32}$' -and $netLogJob.result.sourceVersion -eq 'chromium-netlog-json-recognized-events-v1' -and $netLogJob.result.importedCount -eq 2 -and $netLogJob.result.unsupportedCount -eq 1 -and $netLogJob.result.coverage -eq 'partial') -Message 'NetLog job status must report safe source identity/version, import counts, and coverage.'
 
-    $browserEventText = [System.IO.File]::ReadAllText($browserEventsPath, [System.Text.Encoding]::UTF8)
+    $browserEventStream = New-Object System.IO.FileStream($browserEventsPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $browserEventReader = New-Object System.IO.StreamReader($browserEventStream, [System.Text.Encoding]::UTF8)
+        try { $browserEventText = $browserEventReader.ReadToEnd() }
+        finally { $browserEventReader.Dispose() }
+    }
+    finally { $browserEventStream.Dispose() }
     $browserEvents = @($browserEventText -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { ConvertFrom-Json -InputObject $_ })
     Assert-MihariTest -Condition ($browserEvents.Count -eq 3 -and @($browserEvents | Where-Object { $_.source -eq 'import' -and $_.stage -eq 'browser.network.request' }).Count -eq 3) -Message 'Browser import must append sanitized import-provenance facts through the canonical event writer.'
     Assert-MihariTest -Condition ($browserEvents[0].data.path -eq '/api/upload' -and $browserEvents[0].data.protocol -eq 'h2' -and $browserEvents[0].data.statusCode -eq 201 -and $browserEvents[1].data.statusCode -eq 403) -Message 'Browser import must retain only safe URL, status, and protocol facts.'
