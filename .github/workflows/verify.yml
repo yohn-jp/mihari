@@ -34,7 +34,7 @@ jobs:
       fail-fast: false
       matrix:
         shell: [powershell, pwsh]
-        proof: [leaf]
+        proof: [leaf, h2-feasibility]
     defaults:
       run:
         shell: ${{ matrix.shell }}
