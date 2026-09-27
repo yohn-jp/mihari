@@ -462,7 +462,8 @@ catch {
         if ($activeWorkers.Count -gt 0) { Start-Sleep -Milliseconds 25 }
     }
     foreach ($worker in $activeWorkers) {
-        $worker.Client.Close()
+        try { $worker.Client.Close() }
+        catch { Write-Warning ('Could not close an h2 fixture client socket ({0}).' -f $_.Exception.GetType().FullName) }
         try { $worker.PowerShell.Stop() }
         catch { Write-Warning ('Could not stop an h2 fixture connection worker ({0}).' -f $_.Exception.GetType().FullName) }
         try { $worker.PowerShell.Dispose() }
@@ -476,8 +477,16 @@ catch {
     catch { Write-Warning ('Could not record local h2 fixture error ({0}).' -f $_.Exception.GetType().FullName) }
 }
 finally {
-    if ($null -ne $listener) { $listener.Stop() }
-    if ($null -ne $workerPool) { $workerPool.Close(); $workerPool.Dispose() }
+    if ($null -ne $listener) {
+        try { $listener.Stop() }
+        catch { Write-Warning ('Could not stop the local h2 fixture listener ({0}).' -f $_.Exception.GetType().FullName) }
+    }
+    if ($null -ne $workerPool) {
+        try { $workerPool.Close() }
+        catch { Write-Warning ('Could not close the local h2 fixture worker pool ({0}).' -f $_.Exception.GetType().FullName) }
+        try { $workerPool.Dispose() }
+        catch { Write-Warning ('Could not dispose the local h2 fixture worker pool ({0}).' -f $_.Exception.GetType().FullName) }
+    }
     if ($null -ne $leaf -and $null -ne $leafSession) {
         try { Release-MihariLeaf -Session $leafSession -Certificate $leaf }
         catch { Write-Warning ('Could not release local h2 fixture leaf ({0}).' -f $_.Exception.GetType().FullName) }
