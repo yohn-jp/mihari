@@ -1,0 +1,57 @@
+name: Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  powershell-tests:
+    name: Tests (${{ matrix.label }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shell: powershell
+            label: Windows PowerShell 5.1
+            major: 5
+            minor: 1
+          - shell: pwsh
+            label: PowerShell 7
+            major: 7
+            minor: 0
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify PowerShell version
+        run: |
+          $actual = $PSVersionTable.PSVersion
+          Write-Host "Running $($PSVersionTable.PSEdition) $actual"
+          if ($actual.Major -ne ${{ matrix.major }} -or $actual.Minor -lt ${{ matrix.minor }}) {
+            throw "Expected ${{ matrix.label }}; found PowerShell $actual"
+          }
+
+      - name: Run repository tests
+        env:
+          MIHARI_TEST_ARTIFACT_DIR: ${{ runner.temp }}/mihari-test-artifacts
+        run: |
+          if (-not (Test-Path -LiteralPath './test/run.ps1' -PathType Leaf)) {
+            throw 'Repository test entry point test/run.ps1 is missing.'
+          }
+          & ./test/run.ps1
+
+      - name: Upload test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-artifacts-${{ matrix.shell }}
+          path: ${{ runner.temp }}/mihari-test-artifacts/
+          if-no-files-found: ignore
