@@ -164,7 +164,7 @@ function New-MihariTestListener {
 }
 
 function Read-MihariTestHeaderText {
-    param([Parameter(Mandatory = $true)][System.IO.Stream] $Stream, [int]$MaximumBytes = 65536)
+    param([Parameter(Mandatory = $true)][System.IO.Stream] $Stream, [int]$MaximumBytes = 65536, [string]$Context = 'HTTP exchange')
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     $text = New-Object System.Text.StringBuilder
     while ($text.Length -lt $MaximumBytes) {
@@ -172,7 +172,7 @@ function Read-MihariTestHeaderText {
         if ([DateTime]::UtcNow -ge $deadline) { throw 'The fixture HTTP header read exceeded its 15 second deadline.' }
         if ($Stream.CanTimeout) { $Stream.ReadTimeout = $remainingMs }
         $value = $Stream.ReadByte()
-        if ($value -lt 0) { throw 'The fixture peer closed before completing an HTTP header.' }
+        if ($value -lt 0) { throw "The fixture peer closed before completing the $Context header." }
         $character = [char]$value
         [void]$text.Append($character)
         if ($text.Length -ge 4 -and
@@ -477,7 +477,7 @@ try {
     $connectRequest = [System.Text.Encoding]::ASCII.GetBytes("CONNECT 127.0.0.1:$originPort HTTP/1.1`r`nHost: 127.0.0.1:$originPort`r`n`r`n")
     $proxyStream.Write($connectRequest, 0, $connectRequest.Length)
     $proxyStream.Flush()
-    $connectReply = Read-MihariTestHeaderText -Stream $proxyStream
+    $connectReply = Read-MihariTestHeaderText -Stream $proxyStream -Context 'Tunnel CONNECT response'
     Assert-MihariTest -Condition ($connectReply.StartsWith('HTTP/1.1 200')) -Message 'Tunnel CONNECT must be acknowledged after the local upstream connects.'
     Assert-MihariTest -Condition ($acceptTask.Wait(15000)) -Message 'Tunnel mode did not connect to the local TLS origin.'
     $originClient = $acceptTask.Result
@@ -490,7 +490,7 @@ try {
     $tunnelRequest = [System.Text.Encoding]::ASCII.GetBytes("GET /tunnel/probe HTTP/1.1`r`nHost: 127.0.0.1:$originPort`r`nConnection: close`r`n`r`n")
     $proxyTls.Write($tunnelRequest, 0, $tunnelRequest.Length)
     $proxyTls.Flush()
-    $originTunnelRequest = Read-MihariTestHeaderText -Stream $originTls
+    $originTunnelRequest = Read-MihariTestHeaderText -Stream $originTls -Context 'Tunnel origin request'
     Assert-MihariTest -Condition ($originTunnelRequest.StartsWith('GET /tunnel/probe HTTP/1.1')) -Message 'Tunnel must relay client TLS application bytes to the origin.'
     Write-MihariTestHttpResponse -Stream $originTls
     $tunnelResponse = Read-MihariTestHttpResponse -Stream $proxyTls
@@ -569,7 +569,7 @@ try {
     $connectRequest = [System.Text.Encoding]::ASCII.GetBytes("CONNECT 127.0.0.1:$originPort HTTP/1.1`r`nHost: 127.0.0.1:$originPort`r`n`r`n")
     $proxyStream.Write($connectRequest, 0, $connectRequest.Length)
     $proxyStream.Flush()
-    $connectReply = Read-MihariTestHeaderText -Stream $proxyStream
+    $connectReply = Read-MihariTestHeaderText -Stream $proxyStream -Context 'Inspect CONNECT response'
     Assert-MihariTest -Condition ($connectReply.StartsWith('HTTP/1.1 200')) -Message 'Inspect CONNECT must acknowledge the client TLS endpoint.'
     $proxyTls = [System.Net.Security.SslStream]::new($proxyStream, $true)
     $clientAuth = Begin-MihariTestTlsClientAuthentication -Stream $proxyTls -TargetHost '127.0.0.1'
@@ -583,7 +583,7 @@ try {
     $originTls = [System.Net.Security.SslStream]::new($originClient.GetStream(), $true)
     $serverAuth = Begin-MihariTestTlsServerAuthentication -Stream $originTls -Certificate $fixtureIdentity.Leaf
     Complete-MihariTestTlsAuthentication -ServerStream $originTls -ServerResult $serverAuth
-    $originInspectRequest = Read-MihariTestHeaderText -Stream $originTls
+    $originInspectRequest = Read-MihariTestHeaderText -Stream $originTls -Context 'Inspect origin request'
     Assert-MihariTest -Condition ($originInspectRequest.StartsWith('GET /inspect/deep/path?token=inspect-secret HTTP/1.1')) -Message 'Inspect must forward the observed URL path to the local origin.'
     Write-MihariTestHttpResponse -Stream $originTls
     $inspectResponse = Read-MihariTestHttpResponse -Stream $proxyTls
@@ -614,6 +614,20 @@ try {
     $privateArtifacts = @(Get-ChildItem -LiteralPath $inspectFinal.outputDirectory -File -Recurse | Where-Object { $_.Extension -match '^\.(pfx|p12|key|pem)$' })
     Assert-MihariTest -Condition ($privateArtifacts.Count -eq 0) -Message 'The session output must not persist a CA private key or leaf certificate.'
     Write-Host 'PASS integration: child-process start/stop, local HTTP forwarding, TLS 1.2 CONNECT tunnel, TLS 1.2 Inspect/path redaction, JSONL, reports, CA cleanup'
+}
+catch {
+    if ($null -ne $inspectMetadata -and [IO.File]::Exists([string]$inspectMetadata.eventsPath)) {
+        try {
+            $safeEvents = New-Object 'System.Collections.Generic.List[string]'
+            foreach ($line in (Read-MihariTestCompleteLiveLines -Path ([string]$inspectMetadata.eventsPath))) {
+                $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+                $safeEvents.Add(('{0}:{1}:{2}:{3}' -f $event.stage, $event.outcome, $event.data.errorCode, $event.data.errorType))
+            }
+            Write-Host ('Inspect event stages at failure: ' + ($safeEvents -join '; '))
+        }
+        catch { Write-Host ('Could not read Inspect event stages: ' + $_.Exception.GetType().FullName) }
+    }
+    throw
 }
 finally {
     Stop-MihariTestRootConfirmation -Operator $inspectAddOperator

@@ -36,7 +36,7 @@ function Get-MihariRuntimeBasicEventSummary {
         $parts = New-Object 'System.Collections.Generic.List[string]'
         $parts.Add([string]$event.stage)
         if ($event.outcome) { $parts.Add(('outcome=' + [string]$event.outcome)) }
-        foreach ($field in @('routeKind', 'routeSource', 'errorCode')) {
+        foreach ($field in @('routeKind', 'routeSource', 'errorCode', 'reason')) {
             $value = $event.data.$field
             if (-not [string]::IsNullOrWhiteSpace([string]$value)) {
                 $parts.Add(($field + '=' + [string]$value))
