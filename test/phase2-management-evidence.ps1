@@ -100,11 +100,7 @@ try {
     $null = Add-MihariMarker -CaseRoot $temporaryRoot -TrialId $trial.trialId -Boundary 'point' -Label 'Upload started' -Note 'Bearer ANNOTATION_AUTH_SECRET https://intranet.corp/private/path?token=ANNOTATION_QUERY_SECRET'
 
     $sourceDirectory = Join-Path $repoRoot 'src'
-    $escapedSourceDirectory = $sourceDirectory.Replace("'", "''")
-    $initializerText = '$ErrorActionPreference = ''Stop''; foreach ($sourceFile in (Get-ChildItem -LiteralPath ''' + $escapedSourceDirectory + ''' -Filter ''*.ps1'' | Sort-Object -Property Name)) { . $sourceFile.FullName }'
-    $initialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-    $initialState.InitializationScripts.Add([scriptblock]::Create($initializerText))
-    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, 3, $initialState, $Host)
+    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, 3)
     $pool.Open()
 
     $session = [pscustomobject]@{
