@@ -143,7 +143,7 @@ try {
     foreach ($line in $tunnelLines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop
-        Assert-MihariTest -Condition ($event.schemaVersion -eq 1 -and $event.timestamp -and $event.sessionId -and $event.connectionId -and $event.mode -and $event.stage -and $event.outcome -and $null -ne $event.elapsedMs) -Message 'Every basic-session JSONL event must have the required envelope.'
+        Assert-MihariTest -Condition ($event.schemaVersion -eq 2 -and [long]$event.sequence -gt 0 -and $event.source -and $event.coverage -and $event.timestamp -and $event.sessionId -and $event.connectionId -and $event.mode -and $event.stage -and $event.outcome -and $null -ne $event.elapsedMs) -Message 'Every basic-session JSONL event must have the required schema-v2 envelope.'
     }
     $tunnelEventText = [string]::Join("`n", $tunnelLines)
     foreach ($secret in @('basic-secret', 'basic-auth-secret', 'basic-cookie-secret')) {

@@ -160,7 +160,7 @@ try {
     $report = New-MihariReport -EventsPath $eventsPath -OutputDirectory $reportDirectory
     Assert-MihariTest -Condition ([IO.File]::Exists((Join-Path $reportDirectory 'report.json'))) -Message 'JSON report must be written.'
     Assert-MihariTest -Condition ([IO.File]::Exists((Join-Path $reportDirectory 'report.txt'))) -Message 'Text report must be written.'
-    Assert-MihariTest -Condition ($report.eventCount -eq 1 -and $report.sessionId -eq $session.Id) -Message 'Report must carry event count and session identity.'
+    Assert-MihariTest -Condition ($report.eventCount -eq 2 -and $report.sessionId -eq $session.Id) -Message 'Report must carry event count and session identity.'
     $help = Get-MihariHelpText
     Assert-MihariTest -Condition ($help -match '(?m)^Usage:' -and $help -match '\.\\mihari\.ps1 start' -and $help -match '\.\\mihari\.ps1 status') -Message 'CLI help must expose the primary user workflow.'
     $emptyStatus = Format-MihariStatus -Metadata $null

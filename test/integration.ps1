@@ -508,10 +508,12 @@ try {
     Invoke-MihariTestReportCommand -OutputRoot $tunnelRoot
     $tunnelLines = [IO.File]::ReadAllLines([string]$tunnelFinal.eventsPath)
     Assert-MihariTest -Condition ($tunnelLines.Length -ge 8) -Message 'HTTP and CONNECT traffic must emit structured observations.'
+    $previousSequence = [long]0
     foreach ($line in $tunnelLines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop
-        Assert-MihariTest -Condition ($event.schemaVersion -eq 1 -and $event.timestamp -and $event.sessionId -and $event.connectionId -and $event.mode -and $event.stage -and $event.outcome -and $null -ne $event.elapsedMs) -Message 'Every JSONL event must have the required schema envelope.'
+        Assert-MihariTest -Condition ($event.schemaVersion -eq 2 -and [long]$event.sequence -gt $previousSequence -and $event.source -and $event.coverage -and $event.timestamp -and $event.sessionId -and $event.connectionId -and $event.mode -and $event.stage -and $event.outcome -and $null -ne $event.elapsedMs) -Message 'Every JSONL event must have the required ordered schema-v2 envelope.'
+        $previousSequence = [long]$event.sequence
     }
     $tunnelEventText = [string]::Join("`n", $tunnelLines)
     foreach ($secret in @('http-secret', 'auth-secret', 'cookie-secret')) {
