@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('all', 'certificate', 'contracts', 'findings-comparison', 'finding-projection', 'traffic-projection', 'browser', 'browser-observation', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference', 'phase2-transport', 'phase2-evidence', 'phase2-workbench')]
+    [ValidateSet('all', 'certificate', 'contracts', 'findings-comparison', 'finding-projection', 'traffic-projection', 'browser', 'browser-profile-cleanup', 'browser-observation', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference', 'phase2-transport', 'phase2-evidence', 'phase2-workbench')]
     [string] $Suite = 'all'
 )
 
@@ -45,7 +45,7 @@ try {
         $selectedSuites = @($Suite)
     }
     foreach ($selectedSuite in $selectedSuites) {
-        if ($env:OS -ne 'Windows_NT' -and $selectedSuite -in @('certificate', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'phase2-workbench')) {
+        if ($env:OS -ne 'Windows_NT' -and $selectedSuite -in @('certificate', 'browser-profile-cleanup', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'phase2-workbench')) {
             Write-Warning ("Skipping suite '{0}': Windows certificate/runtime integration is required." -f $selectedSuite)
             continue
         }
@@ -57,6 +57,7 @@ try {
             'finding-projection' { & (Join-Path $PSScriptRoot 'finding-projection.ps1') }
             'traffic-projection' { & (Join-Path $PSScriptRoot 'traffic-projection.ps1') }
             'browser' { & (Join-Path $PSScriptRoot 'browser.ps1') }
+            'browser-profile-cleanup' { & (Join-Path $PSScriptRoot 'browser-profile-cleanup.ps1') }
             'browser-observation' { & (Join-Path $PSScriptRoot 'browser-observation.ps1') }
             'stale-cleanup' { & (Join-Path $PSScriptRoot 'stale-cleanup.ps1') }
             'runtime-basic' { & (Join-Path $PSScriptRoot 'runtime-basic.ps1') }
@@ -86,6 +87,7 @@ try {
                 & (Join-Path $PSScriptRoot 'phase2-management-evidence.ps1')
                 & (Join-Path $PSScriptRoot 'browser-observation.ps1')
                 & (Join-Path $PSScriptRoot 'browser-observation-edge.ps1')
+                & (Join-Path $PSScriptRoot 'browser-profile-cleanup.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-ui-browser.ps1')
             }
         }
