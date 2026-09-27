@@ -2,7 +2,9 @@ param()
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestSupport.ps1')
-. (Join-Path (Split-Path $PSScriptRoot -Parent) 'src/Evidence.ps1')
+$evidenceSourceRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'src'
+. (Join-Path $evidenceSourceRoot 'Evidence.ps1')
+. (Join-Path $evidenceSourceRoot 'Diagnosis.ps1')
 
 function New-MihariEvidenceTestZip {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Files, [string]$SymlinkEntry)
@@ -66,10 +68,11 @@ try {
     $firstEvent = [pscustomobject]@{
         schemaVersion = 2; sequence = 1; timestamp = '2026-01-01T00:00:00Z'; eventId = 'EVENT_SECRET_1'
         sessionId = 'SESSION_SECRET_123'; connectionId = 'CONNECTION_SECRET_1'; requestId = 'REQUEST_SECRET_1'
-        mode = 'Inspect'; stage = 'http.request'; outcome = 'observed'; elapsedMs = 3; source = 'proxy'; coverage = 'observed';
+        mode = 'Inspect'; stage = 'upstream.proxy.connect'; outcome = 'rejected'; elapsedMs = 3; source = 'proxy'; coverage = 'observed';
         transportLeg = 'client'; data = [pscustomobject]@{
             host = 'intranet.corp'; path = '/classified/customer-77'; url = 'https://intranet.corp/classified/customer-77?ticket=EVENT_QUERY_SECRET'
-            method = 'GET'; authorization = 'Bearer EVENT_AUTH_SECRET'; cookie = 'EVENT_COOKIE_SECRET'; body = 'EVENT_BODY_SECRET'
+            method = 'GET'; routeKind = 'ExplicitProxy'; explicitProxy = $true; proxyStatus = 407
+            authorization = 'Bearer EVENT_AUTH_SECRET'; cookie = 'EVENT_COOKIE_SECRET'; body = 'EVENT_BODY_SECRET'
             debuggerAddress = 'http://127.0.0.1:9222/json/version'; secret = 'EVENT_SECRET_FIELD'; username = 'alice'
             reason = 'Bearer EVENT_ERROR_TOKEN_SECRET at C:\Users\alice\private\error.txt'
         }
@@ -107,6 +110,24 @@ try {
     Assert-MihariTest -Condition ($null -ne $offline.originalResult -and $offline.originalResult.findings.Count -eq 1) -Message 'Import must preserve the original diagnosis result.'
     $reanalyzed = New-MihariOfflineReanalysisRecord -OfflineCase $offline -RuleVersion 'rules-2' -Findings @($finding)
     Assert-MihariTest -Condition ($reanalyzed.originalResultPreserved -and $reanalyzed.originalResult.ruleVersion -eq 'rules-1' -and $reanalyzed.ruleVersion -eq 'rules-2') -Message 'Offline reanalysis must record its rule version and preserve the original result.'
+
+    $script:offlineSideEffectCalls = 0
+    function New-MihariSession { $script:offlineSideEffectCalls++; throw 'Offline review must not create a session.' }
+    function New-MihariCA { $script:offlineSideEffectCalls++; throw 'Offline review must not create a CA.' }
+    function Install-MihariCARoot { $script:offlineSideEffectCalls++; throw 'Offline review must not install CA trust.' }
+    function Start-MihariListener { $script:offlineSideEffectCalls++; throw 'Offline review must not bind a proxy listener.' }
+    function Start-MihariManagementListener { $script:offlineSideEffectCalls++; throw 'Offline review must not bind a management listener.' }
+    function Start-MihariBrowser { $script:offlineSideEffectCalls++; throw 'Offline review must not start a browser.' }
+    function Set-MihariSessionMode { $script:offlineSideEffectCalls++; throw 'Offline review must not mutate a session.' }
+    $offlineReview = Open-MihariOfflineEvidenceReview -CaseDirectory $imported.caseDirectory -RuleVersion 'rules-2' -MaximumEvidenceBytes 8388608 -MaximumEvents 20
+    Assert-MihariTest -Condition ($offlineReview.readOnly -and $offlineReview.reanalysis.findings.Count -eq 1 -and $offlineReview.reanalysis.findings[0].code -eq 'upstream_proxy_auth_required') -Message 'Offline reanalysis must use the canonical diagnosis rules over the saved case.'
+    Assert-MihariTest -Condition ($offlineReview.reanalysis.findings[0].evidenceRefs[0].eventId -eq $offline.events[0].eventId) -Message 'Offline reanalysis evidence references must still drill down to the saved pseudonymized event.'
+    Assert-MihariTest -Condition ($offlineReview.reanalysis.originalResult.ruleVersion -eq 'rules-1' -and $offlineReview.reanalysis.ruleVersion -eq 'rules-2') -Message 'Offline reanalysis must preserve the original result alongside its new rule version.'
+    $offlineReviewJsonBytes = [System.Text.Encoding]::UTF8.GetByteCount((ConvertTo-Json -InputObject $offlineReview -Depth 32 -Compress))
+    Assert-MihariTest -Condition ($offlineReview.limits.evidenceBytesRead -le $offlineReview.limits.maximumEvidenceBytes -and $offlineReview.limits.resultBytes -eq $offlineReviewJsonBytes -and $offlineReview.limits.resultBytes -le $offlineReview.limits.maximumResultBytes) -Message 'Offline review must report measured evidence and response bounds.'
+    Assert-MihariTest -Condition ($script:offlineSideEffectCalls -eq 0) -Message 'Offline loading and reanalysis must not create sessions, listeners, browsers, or CA trust.'
+    Assert-MihariTestThrows -Action { Open-MihariOfflineEvidenceReview -CaseDirectory $imported.caseDirectory -RuleVersion 'rules-2' -MaximumEvents 1 } -Message 'Offline reanalysis must enforce the event-count bound.'
+    Assert-MihariTestThrows -Action { Open-MihariOfflineEvidenceReview -CaseDirectory $imported.caseDirectory -RuleVersion 'rules-2' -MaximumEvidenceBytes 1024 } -Message 'Offline reanalysis must enforce the evidence byte bound.'
 
     $badHashPath = Join-Path $temporaryRoot 'bad-hash.zip'
     $sourceFiles = @{}
