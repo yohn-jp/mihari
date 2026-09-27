@@ -340,7 +340,7 @@ catch {
             foreach ($line in ((Read-MihariTestLiveText -Path $eventPath) -split "`r?`n")) {
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
                 $fact = ConvertFrom-Json -InputObject $line -ErrorAction Stop
-                $safeFacts.Add(([string]$fact.stage + ':' + [string]$fact.outcome + ':' + [string]$fact.data.errorCode))
+                $safeFacts.Add(([string]$fact.stage + ':' + [string]$fact.outcome + ':' + [string]$fact.data.errorCode + ':' + [string]$fact.data.errorType + ':' + [string]$fact.data.certificateChainState + ':' + [string]$fact.data.hostnameState))
             }
             $start = [Math]::Max(0, $safeFacts.Count - 8)
             Write-Warning ('Native fixture last safe fact stages: ' + [string]::Join(', ', $safeFacts.GetRange($start, $safeFacts.Count - $start).ToArray()))
