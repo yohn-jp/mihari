@@ -7,6 +7,9 @@ if ($env:OS -ne 'Windows_NT') { return }
 function Invoke-MihariLiveManagement {
     param([string]$Endpoint, [string]$Method = 'GET', $Body, [string]$Token)
     $request = [System.Net.HttpWebRequest][System.Net.WebRequest]::Create($Endpoint)
+    # The management fixture reads the JSON body directly; avoid a client-side
+    # 100-continue wait before the action reaches it.
+    $request.ServicePoint.Expect100Continue = $false
     $request.Method = $Method
     $request.Proxy = $null
     $request.KeepAlive = $false
@@ -248,7 +251,9 @@ try {
     $token = $tokenMatch.Groups['token'].Value
     $addOperator = Start-MihariTestRootConfirmation -Operation Add -TargetProcessId $child.Process.Id
     $modeResult = Invoke-MihariLiveManagement -Endpoint ($management + 'api/mode') -Method POST -Body @{ mode = 'Inspect' } -Token $token
-    Assert-MihariTest -Condition ($modeResult.StatusCode -eq 200) -Message 'Mode action must respond while WebSocket remains open.'
+    $modeError = $null
+    if ($null -ne $modeResult.Json) { $modeError = [string]$modeResult.Json.code + [string]$modeResult.Json.error }
+    Assert-MihariTest -Condition ($modeResult.StatusCode -eq 200) -Message ('Mode action must respond while WebSocket remains open (HTTP {0}, error {1}).' -f $modeResult.StatusCode, $modeError)
     Complete-MihariTestRootConfirmation -Operator $addOperator
     Stop-MihariTestRootConfirmation -Operator $addOperator
     $addOperator = $null
