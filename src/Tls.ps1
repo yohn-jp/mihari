@@ -267,8 +267,8 @@ function Invoke-MihariInspect {
             throw [System.IO.InvalidDataException]::new('A WebSocket upgrade cannot carry an HTTP request body.')
         }
         $expect = Get-MihariHeaderText -Headers $request.Headers -Name 'Expect'
-        if ($expect -and $expect -ine '100-continue') {
-            throw [System.NotSupportedException]::new('Only Expect: 100-continue is supported.')
+        if ($expect) {
+            throw [System.NotSupportedException]::new('Expect is unavailable on the inspected TLS path.')
         }
         $hasCredentials = ($request.Headers.Contains('Authorization') -or
             $request.Headers.Contains('Proxy-Authorization') -or $request.Headers.Contains('Cookie'))
@@ -366,11 +366,6 @@ function Invoke-MihariInspect {
         $timer.Restart()
         Write-MihariHttpHead -Stream $upstreamTls -Message $request -RequestTarget $target.UpstreamTarget -CloseConnection:(-not $requestKeepAlive -and -not $webSocket) -UpgradeWebSocket:$webSocket
         $upstreamTls.Flush()
-        if ($expect) {
-            $continueWire = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 100 Continue`r`n`r`n")
-            $clientTls.Write($continueWire, 0, $continueWire.Length)
-            $clientTls.Flush()
-        }
         $requestTransfer = Copy-MihariHttpBody -Source $clientTls -Destination $upstreamTls -Framing $requestFraming -Session $Session
         $upstreamTls.Flush()
         $response = Read-MihariHttpHead -Stream $upstreamTls -Kind Response -RequestMethod $request.Method
@@ -380,10 +375,8 @@ function Invoke-MihariInspect {
             if ($informationalCount -gt 8) {
                 throw (New-Object System.IO.InvalidDataException -ArgumentList @('Too many informational HTTP responses from upstream.'))
             }
-            if ([int]$response.StatusCode -ne 100 -or -not $expect) {
-                Write-MihariHttpHead -Stream $clientTls -Message $response
-                $clientTls.Flush()
-            }
+            Write-MihariHttpHead -Stream $clientTls -Message $response
+            $clientTls.Flush()
             $response = Read-MihariHttpHead -Stream $upstreamTls -Kind Response -RequestMethod $request.Method
         }
         if ($null -eq $response) {
