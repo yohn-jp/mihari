@@ -472,7 +472,9 @@ try {
         throw 'The primary per-host leaf is present in a certificate store.'
     }
 
-    $publicRoot = Install-MihariCARoot -CA $primaryCA
+    $publicRoot = Invoke-MihariTestRootConfirmation -Operation Add -Action {
+        Install-MihariCARoot -CA $primaryCA
+    }
     $rootInstalled = $true
     if ($publicRoot.HasPrivateKey) { throw 'The installed test root unexpectedly contains a private key.' }
     $result['leaf'] = [ordered]@{
@@ -513,7 +515,9 @@ try {
     }
     $result['leaf']['tlsHandshake'] = 'passed'
 
-    $removed = Remove-MihariCARoot -Thumbprint $primaryCA.Thumbprint -Subject $primaryCA.Subject
+    $removed = Invoke-MihariTestRootConfirmation -Operation Remove -Action {
+        Remove-MihariCARoot -Thumbprint $primaryCA.Thumbprint -Subject $primaryCA.Subject
+    }
     $rootInstalled = $false
     if ($removed -ne 1) { throw ("Expected to remove one exact session root; removed {0}." -f $removed) }
     if (-not (Test-ProbeRootAbsent -Thumbprint $primaryCA.Thumbprint)) { throw 'The exact session root remains in CurrentUser Root after cleanup.' }
@@ -548,7 +552,9 @@ finally {
     }
     if ($rootInstalled -and $null -ne $primaryCA) {
         try {
-            $removed = Remove-MihariCARoot -Thumbprint $primaryCA.Thumbprint -Subject $primaryCA.Subject
+            $removed = Invoke-MihariTestRootConfirmation -Operation Remove -Action {
+                Remove-MihariCARoot -Thumbprint $primaryCA.Thumbprint -Subject $primaryCA.Subject
+            }
             if ($removed -ne 1 -and -not (Test-ProbeRootAbsent -Thumbprint $primaryCA.Thumbprint)) {
                 $cleanupFailures.Add(('exact session root cleanup removed {0} certificate(s)' -f $removed))
             }
