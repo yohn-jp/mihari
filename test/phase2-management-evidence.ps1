@@ -3,7 +3,7 @@ param()
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestSupport.ps1')
 $repoRoot = Split-Path $PSScriptRoot -Parent
-foreach ($name in @('Case', 'Diagnosis', 'TrafficProjection', 'Evidence', 'Management', 'ManagementV2Evidence')) {
+foreach ($name in @('Observation', 'BrowserObservation', 'Case', 'Diagnosis', 'TrafficProjection', 'Evidence', 'Management', 'ManagementV2', 'ManagementV2Cases', 'ManagementV2Evidence')) {
     . (Join-Path (Join-Path $repoRoot 'src') ($name + '.ps1'))
 }
 
@@ -73,6 +73,7 @@ function Get-MihariManagementV2EvidenceTestZipText {
 $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('mihari-management-evidence-test-' + [Guid]::NewGuid().ToString('N'))
 [void][System.IO.Directory]::CreateDirectory($temporaryRoot)
 $pool = $null
+$browserWriter = $null
 try {
     $sessionId = [Guid]::NewGuid().ToString('N').ToLowerInvariant()
     $sessionDirectory = [System.IO.Path]::Combine($temporaryRoot, $sessionId)
@@ -164,6 +165,107 @@ try {
     $cleanupResponse = Invoke-MihariManagementV2EvidenceRequest -Session $session -Request (New-MihariManagementV2EvidenceTestRequest -Method 'POST' -Path '/api/v2/evidence/cleanup' -Body ([pscustomobject]@{ scope = 'imports'; olderThanUtc = [DateTime]::UtcNow.AddDays(1).ToString('o'); confirmDeletion = $true }))
     Assert-MihariTest -Condition ($cleanupResponse.StatusCode -eq 200 -and (ConvertFrom-MihariManagementV2EvidenceTestResponse -Response $cleanupResponse).deletedCount -eq 1) -Message 'Confirmed import retention must clean only verified case bundles.'
 
+    $browserImportDirectory = Join-Path $temporaryRoot 'browser-import'
+    [void][System.IO.Directory]::CreateDirectory($browserImportDirectory)
+    $browserEventsPath = Join-Path $browserImportDirectory 'events.jsonl'
+    $browserWriter = New-MihariEventWriter -Path $browserEventsPath
+    $browserSession = [pscustomobject]@{
+        Id = [Guid]::NewGuid().ToString('N').ToLowerInvariant(); Mode = 'Tunnel'; ConfigurationRevision = 1
+        Profile = 'compatibility'; HttpConnectionPolicy = 'reuse'; MaxWorkers = 4
+        OutputRoot = $temporaryRoot; OutputDirectory = $browserImportDirectory; EventsPath = $browserEventsPath
+        Writer = $browserWriter; StateLock = (New-Object System.Object); ManagementWorkerPool = $pool
+        ManagementListener = (New-Object System.Object); ManagementSourceRoot = $sourceDirectory
+        ActualManagementPort = 49152; ControlToken = 'browser-import-test-control-token'
+    }
+    $harPath = Join-Path $browserImportDirectory 'input.har'
+    $harJson = @'
+{"log":{"version":"1.2","entries":[{"startedDateTime":"2026-01-02T03:04:05Z","time":42.5,"request":{"method":"POST","url":"https://alice:password@example.test/api/upload?token=BROWSER_HAR_QUERY_SECRET","headers":[{"name":"Cookie","value":"BROWSER_HAR_COOKIE_SECRET"}],"postData":{"text":"BROWSER_HAR_BODY_SECRET"}},"response":{"status":201,"httpVersion":"h2","content":{"text":"BROWSER_HAR_RESPONSE_SECRET"}}},{"request":{"method":"GET","url":"data:text/plain,unsupported"}}]}}
+'@
+    [System.IO.File]::WriteAllText($harPath, $harJson, [System.Text.UTF8Encoding]::new($false))
+    $netLogPath = Join-Path $browserImportDirectory 'input-netlog.json'
+    $netLogJson = @'
+{"constants":{"logEventTypes":{"URL_REQUEST_START_JOB":1,"HTTP_TRANSACTION_READ_HEADERS":2}},"events":[{"type":1,"source":{"id":77,"type":31},"params":{"url":"https://bob:password@example.test/api/list?token=BROWSER_NETLOG_QUERY_SECRET","method":"GET","headers":{"Authorization":"BROWSER_NETLOG_AUTH_SECRET"},"request_body":"BROWSER_NETLOG_BODY_SECRET"}},{"type":2,"source":{"id":77,"type":31},"params":{"url":"https://example.test/api/list?token=BROWSER_NETLOG_QUERY_SECRET","status_code":403,"http_version":"h2","response_body":"BROWSER_NETLOG_RESPONSE_SECRET"}},{"type":999,"source":{"id":77,"type":31},"params":{"url":"https://example.test/ignored"}}]}
+'@
+    [System.IO.File]::WriteAllText($netLogPath, $netLogJson, [System.Text.UTF8Encoding]::new($false))
+
+    $unguardedRequest = New-MihariManagementV2EvidenceTestRequest -Method 'POST' -Path '/api/v2/browser/import' -Body ([pscustomobject]@{ format = 'har'; path = $harPath })
+    $unguardedRequest.Headers['host'] = '127.0.0.1:49152'
+    $unguardedRequest.Headers['origin'] = 'http://127.0.0.1:49152'
+    $unguardedResponse = Invoke-MihariManagementApiRequest -Session $browserSession -Request $unguardedRequest
+    Assert-MihariTest -Condition ($unguardedResponse.StatusCode -eq 403 -and (ConvertFrom-MihariManagementV2EvidenceTestResponse -Response $unguardedResponse).error -eq 'invalid_control_token') -Message 'Browser evidence import must require the management control token.'
+
+    $badOriginRequest = New-MihariManagementV2EvidenceTestRequest -Method 'POST' -Path '/api/v2/browser/import' -Body ([pscustomobject]@{ format = 'har'; path = $harPath })
+    $badOriginRequest.Headers['host'] = '127.0.0.1:49152'
+    $badOriginRequest.Headers['origin'] = 'https://127.0.0.1:49152'
+    $badOriginRequest.Headers['x-mihari-control-token'] = $browserSession.ControlToken
+    $badOriginResponse = Invoke-MihariManagementApiRequest -Session $browserSession -Request $badOriginRequest
+    Assert-MihariTest -Condition ($badOriginResponse.StatusCode -eq 403 -and (ConvertFrom-MihariManagementV2EvidenceTestResponse -Response $badOriginResponse).error -eq 'invalid_local_origin') -Message 'Browser evidence import must reject a non-local management origin.'
+
+    $badHostRequest = New-MihariManagementV2EvidenceTestRequest -Method 'POST' -Path '/api/v2/browser/import' -Body ([pscustomobject]@{ format = 'har'; path = $harPath })
+    $badHostRequest.Headers['host'] = 'example.test:49152'
+    $badHostRequest.Headers['origin'] = 'http://example.test:49152'
+    $badHostRequest.Headers['x-mihari-control-token'] = $browserSession.ControlToken
+    $badHostResponse = Invoke-MihariManagementApiRequest -Session $browserSession -Request $badHostRequest
+    Assert-MihariTest -Condition ($badHostResponse.StatusCode -eq 403 -and (ConvertFrom-MihariManagementV2EvidenceTestResponse -Response $badHostResponse).error -eq 'invalid_local_origin') -Message 'Browser evidence import must reject a non-loopback management host.'
+
+    $invalidFormatRequest = New-MihariManagementV2EvidenceTestRequest -Method 'POST' -Path '/api/v2/browser/import' -Body ([pscustomobject]@{ format = 'unknown'; path = $harPath })
+    $invalidFormatRequest.Headers['host'] = '127.0.0.1:49152'
+    $invalidFormatRequest.Headers['origin'] = 'http://127.0.0.1:49152'
+    $invalidFormatRequest.Headers['x-mihari-control-token'] = $browserSession.ControlToken
+    $invalidFormatResponse = Invoke-MihariManagementApiRequest -Session $browserSession -Request $invalidFormatRequest
+    Assert-MihariTest -Condition ($invalidFormatResponse.StatusCode -eq 400 -and (ConvertFrom-MihariManagementV2EvidenceTestResponse -Response $invalidFormatResponse).error -eq 'browser_import_invalid_format') -Message 'Browser evidence import must reject unsupported format names with a fixed error code.'
+
+    $missingSourceRequest = New-MihariManagementV2EvidenceTestRequest -Method 'POST' -Path '/api/v2/browser/import' -Body ([pscustomobject]@{ format = 'har'; path = (Join-Path $browserImportDirectory 'missing.har') })
+    $missingSourceRequest.Headers['host'] = '127.0.0.1:49152'
+    $missingSourceRequest.Headers['origin'] = 'http://127.0.0.1:49152'
+    $missingSourceRequest.Headers['x-mihari-control-token'] = $browserSession.ControlToken
+    $missingSourceResponse = Invoke-MihariManagementApiRequest -Session $browserSession -Request $missingSourceRequest
+    Assert-MihariTest -Condition ($missingSourceResponse.StatusCode -eq 404 -and (ConvertFrom-MihariManagementV2EvidenceTestResponse -Response $missingSourceResponse).error -eq 'browser_import_source_not_found') -Message 'Browser evidence import must return a fixed missing-file error without exposing the path.'
+    $missingSourceResponseText = [System.Text.Encoding]::UTF8.GetString([byte[]]$missingSourceResponse.Body)
+    Assert-MihariTest -Condition (-not $missingSourceResponseText.Contains((Join-Path $browserImportDirectory 'missing.har'))) -Message 'Browser import errors must not echo the selected local file path.'
+
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $networkPath = '\\example.test\share\BROWSER_UNC_PATH_SECRET.har'
+        $networkPathRequest = New-MihariManagementV2EvidenceTestRequest -Method 'POST' -Path '/api/v2/browser/import' -Body ([pscustomobject]@{ format = 'har'; path = $networkPath })
+        $networkPathRequest.Headers['host'] = '127.0.0.1:49152'
+        $networkPathRequest.Headers['origin'] = 'http://127.0.0.1:49152'
+        $networkPathRequest.Headers['x-mihari-control-token'] = $browserSession.ControlToken
+        $networkPathResponse = Invoke-MihariManagementApiRequest -Session $browserSession -Request $networkPathRequest
+        $networkPathResponseText = [System.Text.Encoding]::UTF8.GetString([byte[]]$networkPathResponse.Body)
+        Assert-MihariTest -Condition ($networkPathResponse.StatusCode -eq 400 -and (ConvertFrom-MihariManagementV2EvidenceTestResponse -Response $networkPathResponse).error -eq 'browser_import_invalid_input' -and -not $networkPathResponseText.Contains('BROWSER_UNC_PATH_SECRET')) -Message 'Browser import must reject network paths without attempting network file access or echoing them.'
+    }
+
+    $harImportRequest = New-MihariManagementV2EvidenceTestRequest -Method 'POST' -Path '/api/v2/browser/import' -Body ([pscustomobject]@{ format = 'har'; path = $harPath })
+    $harImportRequest.Headers['host'] = '127.0.0.1:49152'
+    $harImportRequest.Headers['origin'] = 'http://127.0.0.1:49152'
+    $harImportRequest.Headers['x-mihari-control-token'] = $browserSession.ControlToken
+    $harImportResponse = Invoke-MihariManagementApiRequest -Session $browserSession -Request $harImportRequest
+    Assert-MihariTest -Condition ($harImportResponse.StatusCode -eq 202) -Message 'HAR import must start as a bounded asynchronous management job.'
+    $harAccepted = ConvertFrom-MihariManagementV2EvidenceTestResponse -Response $harImportResponse
+    Assert-MihariTest -Condition ($harAccepted.operation -eq 'browser-import' -and $harAccepted.state -eq 'accepted' -and $harAccepted.progress.totalStages -eq 2) -Message 'HAR import must expose its accepted job and bounded progress.'
+    $harJob = Wait-MihariManagementV2EvidenceTestJob -Session $browserSession -JobId ([string]$harAccepted.jobId)
+    Assert-MihariTest -Condition ($harJob.state -eq 'completed' -and $harJob.result.source -eq 'import' -and $harJob.result.format -eq 'HAR' -and $harJob.result.supported -and $harJob.result.sourceIdentity -match '^[0-9a-f]{32}$' -and $harJob.result.sourceVersion -eq 'har-1.2' -and $harJob.result.importedCount -eq 1 -and $harJob.result.unsupportedCount -eq 1 -and $harJob.result.coverage -eq 'partial') -Message 'HAR job status must report safe source identity/version, import counts, and coverage.'
+
+    $netLogImportRequest = New-MihariManagementV2EvidenceTestRequest -Method 'POST' -Path '/api/v2/browser/import' -Body ([pscustomobject]@{ format = 'netlog'; path = $netLogPath })
+    $netLogImportRequest.Headers['host'] = '127.0.0.1:49152'
+    $netLogImportRequest.Headers['origin'] = 'http://127.0.0.1:49152'
+    $netLogImportRequest.Headers['x-mihari-control-token'] = $browserSession.ControlToken
+    $netLogImportResponse = Invoke-MihariManagementApiRequest -Session $browserSession -Request $netLogImportRequest
+    Assert-MihariTest -Condition ($netLogImportResponse.StatusCode -eq 202) -Message 'NetLog import must start as a bounded asynchronous management job.'
+    $netLogAccepted = ConvertFrom-MihariManagementV2EvidenceTestResponse -Response $netLogImportResponse
+    $netLogJob = Wait-MihariManagementV2EvidenceTestJob -Session $browserSession -JobId ([string]$netLogAccepted.jobId)
+    Assert-MihariTest -Condition ($netLogJob.state -eq 'completed' -and $netLogJob.result.source -eq 'import' -and $netLogJob.result.format -eq 'Chromium NetLog JSON' -and $netLogJob.result.supported -and $netLogJob.result.sourceIdentity -match '^[0-9a-f]{32}$' -and $netLogJob.result.sourceVersion -eq 'chromium-netlog-json-recognized-events-v1' -and $netLogJob.result.importedCount -eq 2 -and $netLogJob.result.unsupportedCount -eq 1 -and $netLogJob.result.coverage -eq 'partial') -Message 'NetLog job status must report safe source identity/version, import counts, and coverage.'
+
+    $browserEventText = [System.IO.File]::ReadAllText($browserEventsPath, [System.Text.Encoding]::UTF8)
+    $browserEvents = @($browserEventText -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { ConvertFrom-Json -InputObject $_ })
+    Assert-MihariTest -Condition ($browserEvents.Count -eq 3 -and @($browserEvents | Where-Object { $_.source -eq 'import' -and $_.stage -eq 'browser.network.request' }).Count -eq 3) -Message 'Browser import must append sanitized import-provenance facts through the canonical event writer.'
+    Assert-MihariTest -Condition ($browserEvents[0].data.path -eq '/api/upload' -and $browserEvents[0].data.protocol -eq 'h2' -and $browserEvents[0].data.statusCode -eq 201 -and $browserEvents[1].data.statusCode -eq 403) -Message 'Browser import must retain only safe URL, status, and protocol facts.'
+    Assert-MihariTest -Condition ($browserEvents[0].sourceIdentity -eq $harJob.result.sourceIdentity -and $browserEvents[0].sourceVersion -eq $harJob.result.sourceVersion) -Message 'Job metadata must use the same import source identity and parser version as canonical facts.'
+    $browserImportText = $browserEventText + (ConvertTo-Json -InputObject @($harAccepted, $harJob.result, $netLogJob.result) -Depth 8 -Compress)
+    foreach ($secret in @('BROWSER_HAR_QUERY_SECRET', 'BROWSER_HAR_COOKIE_SECRET', 'BROWSER_HAR_BODY_SECRET', 'BROWSER_HAR_RESPONSE_SECRET', 'BROWSER_NETLOG_QUERY_SECRET', 'BROWSER_NETLOG_AUTH_SECRET', 'BROWSER_NETLOG_BODY_SECRET', 'BROWSER_NETLOG_RESPONSE_SECRET', 'browser-import-test-control-token', 'password', $harPath, $netLogPath)) {
+        Assert-MihariTest -Condition (-not $browserImportText.Contains($secret)) -Message 'Browser import results and canonical events must exclude raw paths, credentials, queries, and bodies.'
+    }
+
     Write-Host '[management-evidence] preview, bounded export/import jobs, offline review, retention, and privacy passed'
 }
 finally {
@@ -172,6 +274,10 @@ finally {
         catch { Write-Warning 'The test evidence runspace pool could not be closed cleanly.' }
         try { $pool.Dispose() }
         catch { Write-Warning 'The test evidence runspace pool could not be disposed cleanly.' }
+    }
+    if ($null -ne $browserWriter) {
+        try { Close-MihariEventWriter -Writer $browserWriter }
+        catch { Write-Warning 'The test browser import event writer could not be closed cleanly.' }
     }
     if ([System.IO.Directory]::Exists($temporaryRoot)) { [System.IO.Directory]::Delete($temporaryRoot, $true) }
 }
