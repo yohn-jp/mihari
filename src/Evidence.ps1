@@ -183,9 +183,28 @@ function ConvertTo-MihariEvidenceSafeEvent {
     if (-not [int]::TryParse([string]$schemaValue, [ref]$schemaVersion) -or $schemaVersion -notin @(1, 2)) {
         return [pscustomobject]@{ Recognized = $false; Reason = 'unknown_schema'; Record = $null }
     }
+    foreach ($requiredName in @('timestamp', 'eventId', 'sessionId', 'connectionId', 'mode', 'stage', 'outcome')) {
+        $requiredValue = Get-MihariEvidenceValue -InputObject $Event -Name $requiredName
+        if ($null -eq $requiredValue -or [string]::IsNullOrWhiteSpace([string]$requiredValue)) {
+            return [pscustomobject]@{ Recognized = $false; Reason = 'missing_required_field'; Record = $null }
+        }
+    }
     $source = Get-MihariEvidenceValue -InputObject $Event -Name 'source'
     if ($null -ne $source -and [string]$source -notin @('proxy', 'browser', 'windows', 'operator', 'import')) {
         return [pscustomobject]@{ Recognized = $false; Reason = 'unknown_source'; Record = $null }
+    }
+    if ($schemaVersion -eq 2) {
+        if ($null -eq $source) { return [pscustomobject]@{ Recognized = $false; Reason = 'missing_v2_field'; Record = $null } }
+        $sequenceValue = Get-MihariEvidenceValue -InputObject $Event -Name 'sequence'
+        $sequenceNumber = [long]0
+        if (-not [long]::TryParse([string]$sequenceValue, [ref]$sequenceNumber) -or $sequenceNumber -le 0) {
+            return [pscustomobject]@{ Recognized = $false; Reason = 'invalid_sequence'; Record = $null }
+        }
+        $coverageValue = Get-MihariEvidenceValue -InputObject $Event -Name 'coverage'
+        if ($null -eq $coverageValue) { return [pscustomobject]@{ Recognized = $false; Reason = 'missing_v2_field'; Record = $null } }
+        if ([string]$coverageValue -notin @('observed', 'unknown', 'unsupported', 'permission_denied', 'truncated', 'lost')) {
+            return [pscustomobject]@{ Recognized = $false; Reason = 'unknown_coverage'; Record = $null }
+        }
     }
     $record = [ordered]@{ schemaVersion = $schemaVersion }
     foreach ($name in @('timestamp', 'eventId', 'sessionId', 'connectionId', 'requestId', 'mode', 'stage', 'outcome')) {
@@ -424,10 +443,26 @@ function New-MihariEvidenceBundleContent {
     $safeEvents = New-Object 'System.Collections.Generic.List[object]'
     $unknownEvents = New-Object 'System.Collections.Generic.List[object]'
     $eventBytes = [long]0
+    $lastSequences = @{}
+    $seenEventIds = @{}
     foreach ($event in @($Events)) {
         if ($safeEvents.Count + $unknownEvents.Count -ge 100000) { break }
         $converted = ConvertTo-MihariEvidenceSafeEvent -Event $event -Context $context
         if ($converted.Recognized) {
+            $eventId = [string]$converted.Record.eventId
+            if ($seenEventIds.ContainsKey($eventId)) {
+                $unknownEvents.Add([pscustomobject]@{ reason = 'duplicate_event_id' })
+                continue
+            }
+            $seenEventIds[$eventId] = $true
+            if ($converted.Record.schemaVersion -eq 2) {
+                $sessionKey = [string]$converted.Record.sessionId
+                if ($lastSequences.ContainsKey($sessionKey) -and [long]$converted.Record.sequence -le [long]$lastSequences[$sessionKey]) {
+                    $unknownEvents.Add([pscustomobject]@{ reason = 'invalid_sequence_order' })
+                    continue
+                }
+                $lastSequences[$sessionKey] = [long]$converted.Record.sequence
+            }
             $line = ConvertTo-Json -InputObject $converted.Record -Depth 32 -Compress
             $lineBytes = [System.Text.Encoding]::UTF8.GetByteCount($line) + 1
             if ($lineBytes -gt 65536) { $unknownEvents.Add([pscustomobject]@{ reason = 'record_too_large' }); continue }
@@ -520,6 +555,7 @@ function New-MihariEvidenceBundleContent {
             paths = $(if ($context.Options.maskPaths) { 'pseudonymized' } else { 'as captured' })
             identifiers = $(if ($context.Options.maskIdentifiers) { 'pseudonymized' } else { 'as captured' })
             unsupportedEvents = $unknownEvents.Count
+            unsupportedEventReasons = @($unknownEvents | Group-Object -Property reason | ForEach-Object { [pscustomobject]@{ reason = $_.Name; count = $_.Count } })
         }
         integrity = [pscustomobject]@{ algorithm = 'SHA-256'; statement = 'Hashes detect file modification and do not establish authorship or trustworthy acquisition.' }
     }
@@ -540,6 +576,7 @@ function New-MihariEvidenceBundleContent {
             [pscustomobject]@{ category = 'hostnames, usernames, paths, identifiers'; treatment = 'controlled by the selected share profile' }
         )
         unsupportedEventCount = $unknownEvents.Count
+        unsupportedEventReasons = @($unknownEvents | Group-Object -Property reason | ForEach-Object { [pscustomobject]@{ reason = $_.Name; count = $_.Count } })
         shareProfile = $context.Options
         warning = 'SHA-256 hashes detect modification; they do not prove authorship or acquisition integrity.'
     }
@@ -698,6 +735,8 @@ function Read-MihariEvidenceJsonLines {
     catch { throw ('Evidence file {0} is not valid UTF-8.' -f $Name) }
     $accepted = New-Object 'System.Collections.Generic.List[object]'
     $unknown = New-Object 'System.Collections.Generic.List[object]'
+    $seenEventIds = @{}
+    $lastSequences = @{}
     $lines = $text.Split([char]"`n")
     if ($lines.Length -gt ($MaximumRecords + 1)) { throw ('Evidence file {0} exceeds the record count limit.' -f $Name) }
     for ($index = 0; $index -lt $lines.Length; $index++) {
@@ -709,8 +748,25 @@ function Read-MihariEvidenceJsonLines {
         if ($accepted.Count + $unknown.Count -ge $MaximumRecords) { throw ('Evidence file {0} exceeds the record count limit.' -f $Name) }
         if ($Name -eq 'events.jsonl') {
             $safe = ConvertTo-MihariEvidenceSafeEvent -Event $record -Context $Context
-            if ($safe.Recognized) { $accepted.Add($safe.Record) }
-            else { $unknown.Add([pscustomobject]@{ line = $index + 1; reason = $safe.Reason }) }
+            if (-not $safe.Recognized) {
+                $unknown.Add([pscustomobject]@{ line = $index + 1; reason = $safe.Reason })
+                continue
+            }
+            $eventId = [string]$safe.Record.eventId
+            if ($seenEventIds.ContainsKey($eventId)) {
+                $unknown.Add([pscustomobject]@{ line = $index + 1; reason = 'duplicate_event_id' })
+                continue
+            }
+            $seenEventIds[$eventId] = $true
+            if ($safe.Record.schemaVersion -eq 2) {
+                $sessionKey = [string]$safe.Record.sessionId
+                if ($lastSequences.ContainsKey($sessionKey) -and [long]$safe.Record.sequence -le [long]$lastSequences[$sessionKey]) {
+                    $unknown.Add([pscustomobject]@{ line = $index + 1; reason = 'invalid_sequence_order' })
+                    continue
+                }
+                $lastSequences[$sessionKey] = [long]$safe.Record.sequence
+            }
+            $accepted.Add($safe.Record)
         }
         else { $accepted.Add((ConvertTo-MihariEvidenceSafeAnnotation -Annotation $record -Context $Context)) }
     }
@@ -962,7 +1018,7 @@ function Read-MihariOfflineEvidenceCase {
             $line = [int]0
             [void][int]::TryParse([string](Get-MihariEvidenceValue -InputObject $item -Name 'line'), [ref]$line)
             $reason = [string](Get-MihariEvidenceValue -InputObject $item -Name 'reason')
-            if ($reason -notin @('unknown_schema', 'unknown_source', 'record_too_large')) { $reason = 'unknown_record' }
+            if ($reason -notin @('unknown_schema', 'unknown_source', 'record_too_large', 'missing_required_field', 'missing_v2_field', 'invalid_sequence', 'unknown_coverage', 'duplicate_event_id', 'invalid_sequence_order')) { $reason = 'unknown_record' }
             $safeUnknown.Add([pscustomobject]@{ line = [Math]::Max(0, $line); reason = $reason })
         }
         $importReport = [pscustomobject]@{
