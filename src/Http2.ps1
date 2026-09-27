@@ -43,6 +43,7 @@ function New-MihariHttp2Direction {
         HeldFrames = New-Object 'System.Collections.Generic.List[object]'
         HeaderEndStream = $false
         Hpack = New-MihariHpackContext -MaxTableSize 4096
+        PendingTableLimits = New-Object 'System.Collections.Generic.List[object]'
         LastOpenedStream = 0
         InitialWindow = [long]65535
         ConnectionWindow = [long]65535
@@ -252,9 +253,14 @@ function Invoke-MihariHttp2Frame {
         4 {
             if (($flags -band 1) -ne 0) {
                 if ($len -ne 0) { throw [System.IO.InvalidDataException]::new('HTTP/2 SETTINGS ACK has payload.') }
+                if ($State.PendingTableLimits.Count -eq 0) { throw [System.IO.InvalidDataException]::new('Unexpected HTTP/2 SETTINGS ACK.') }
+                $acknowledgedLimit = $State.PendingTableLimits[0]
+                $State.PendingTableLimits.RemoveAt(0)
+                if ($null -ne $acknowledgedLimit) { $State.Hpack.MaxTableSize = [int]$acknowledgedLimit }
             }
             else {
                 if ($len % 6 -ne 0) { throw [System.IO.InvalidDataException]::new('Invalid HTTP/2 SETTINGS size.') }
+                $tableLimit = $null
                 for ($offset = 9; $offset -lt $bytes.Length; $offset += 6) {
                     $setting = ([int]$bytes[$offset] -shl 8) -bor [int]$bytes[$offset+1]
                     $value = Get-MihariHttp2UInt32 -Bytes $bytes -Offset ($offset + 2)
@@ -262,7 +268,7 @@ function Invoke-MihariHttp2Frame {
                         1 {
                             if ($value -gt 4096) { throw [System.IO.InvalidDataException]::new('HTTP/2 header table exceeds local bound.') }
                             $State.Settings.headerTableSize = $value
-                            $Opposite.Hpack.MaxTableSize = [int]$value
+                            $tableLimit = [int]$value
                         }
                         2 { if ($value -gt 1) { throw [System.IO.InvalidDataException]::new('Invalid HTTP/2 ENABLE_PUSH.') } }
                         3 { $State.Settings.maxConcurrentStreams = $value }
@@ -281,6 +287,7 @@ function Invoke-MihariHttp2Frame {
                         6 { $State.Settings.maxHeaderListSize = $value }
                     }
                 }
+                $Opposite.PendingTableLimits.Add($tableLimit)
                 Write-MihariHttp2Fact -Context $Context -State $State -StreamId 0 -Stage 'http2.settings' -Outcome 'observed' -Data @{ maxConcurrentStreams = $State.Settings.maxConcurrentStreams; maxFrameSize = $State.Settings.maxFrameSize; initialWindowSize = $State.Settings.initialWindowSize; headerTableSize = $State.Settings.headerTableSize }
             }
         }
