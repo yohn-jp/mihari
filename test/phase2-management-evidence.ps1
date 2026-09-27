@@ -112,7 +112,16 @@ try {
 
     $previewRequest = New-MihariManagementV2EvidenceTestRequest -Method 'GET' -Path '/api/v2/evidence/preview' -Query ('caseId=' + $case.caseId + '&maskHosts=true&maskUsernames=true&maskPaths=true&maskIdentifiers=true')
     $previewResponse = Invoke-MihariManagementV2EvidenceRequest -Session $session -Request $previewRequest
-    Assert-MihariTest -Condition ($previewResponse.StatusCode -eq 200) -Message 'The management preview route must return a redaction preview for the selected case.'
+    $previewErrorCode = 'none'
+    if ($previewResponse.StatusCode -ne 200) {
+        try {
+            $previewErrorCodeCandidate = [string](ConvertFrom-MihariManagementV2EvidenceTestResponse -Response $previewResponse).error
+            if ($previewErrorCodeCandidate -match '^[a-z0-9_]{1,80}$') { $previewErrorCode = $previewErrorCodeCandidate }
+            else { $previewErrorCode = 'unrecognized' }
+        }
+        catch { $previewErrorCode = 'unparseable' }
+    }
+    Assert-MihariTest -Condition ($previewResponse.StatusCode -eq 200) -Message ('The management preview route must return a redaction preview for the selected case (HTTP {0}, error code {1}).' -f [int]$previewResponse.StatusCode, $previewErrorCode)
     $preview = ConvertFrom-MihariManagementV2EvidenceTestResponse -Response $previewResponse
     Assert-MihariTest -Condition ($preview.preview.schemaVersion -eq 1 -and $preview.preview.redacted.Count -ge 3) -Message 'The preview route must expose included and redacted bundle categories.'
 

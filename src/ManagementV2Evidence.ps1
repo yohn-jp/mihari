@@ -260,8 +260,8 @@ function Get-MihariManagementV2EvidenceBundleInputs {
         $trialNotes = @($snapshot.Notes | Where-Object { [string]$_.caseId -eq $CaseId -and [string]$_.trialId -eq [string]$trial.trialId } | ForEach-Object { [string]$_.text })
         $portableTrials.Add([pscustomobject]@{
             trialId = [string]$trial.trialId; caseId = [string]$trial.caseId; sessionId = [string]$trial.sessionId
-            startedAtUtc = [string]$trial.startedAtUtc; endedAtUtc = [string]$trial.endedAtUtc
-            startMarkerId = [string]$trial.startMarkerId; endMarkerId = [string]$trial.endMarkerId
+            startedAtUtc = [string]$trial.startedAtUtc; endedAtUtc = $trial.endedAtUtc
+            startMarkerId = [string]$trial.startMarkerId; endMarkerId = $trial.endMarkerId
             configurationRevision = [string]$trial.configurationRevision; profile = $trial.profile
             environmentRef = $trial.environmentReference; businessOutcome = [string]$trial.operatorBusinessOutcome
             operatorNotes = ($trialNotes -join "`n")
