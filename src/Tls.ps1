@@ -240,6 +240,7 @@ function Invoke-MihariInspect {
     $upstreamConnectionId = $null
     $upstreamKey = $null
     $exchangeCount = 0
+    $prefetchedClientByte = $null
     $longLivedSlot = $false
     $validationCapture = New-MihariTlsValidationCapture
     $stage = 'client.tls'
@@ -269,7 +270,11 @@ function Invoke-MihariInspect {
         $requestId = $null
         $stage = 'http.request'
         $timer.Restart()
-        $request = Read-MihariHttpHead -Stream $clientTls -Kind Request
+        if ($null -ne $prefetchedClientByte) {
+            $request = Read-MihariHttpHead -Stream $clientTls -Kind Request -InitialByte ([byte]$prefetchedClientByte)
+            $prefetchedClientByte = $null
+        }
+        else { $request = Read-MihariHttpHead -Stream $clientTls -Kind Request }
         if ($null -eq $request) { break }
         $exchangeCount++
         if ($exchangeCount -gt 1000) { throw [System.IO.InvalidDataException]::new('The inspected HTTP connection exceeded 1000 exchanges.') }
@@ -399,23 +404,26 @@ function Invoke-MihariInspect {
         $earlyFinal = $false
         $sentContinue = $false
         $response = $null
+        $pendingResponseRead = $null
+        $pendingResponseByte = $null
         if ($expect) {
             for ($earlyCount = 0; $earlyCount -lt 8; $earlyCount++) {
-                $firstByte = -1
-                $probeTimedOut = $false
-                $previousTimeout = $upstreamTls.ReadTimeout
-                try {
-                    $upstreamTls.ReadTimeout = 1000
-                    try { $firstByte = $upstreamTls.ReadByte() }
-                    catch {
-                        if (Test-MihariTlsReadTimeout -Exception $_.Exception) { $probeTimedOut = $true }
-                        else { throw }
-                    }
+                $probeByte = [byte[]]::new(1)
+                $probeRead = $upstreamTls.BeginRead($probeByte, 0, 1, $null, $null)
+                $probeTimedOut = -not $probeRead.AsyncWaitHandle.WaitOne(1000)
+                if ($probeTimedOut) {
+                    # Keep the outstanding read: ending it after the upload
+                    # preserves a response that arrives during that upload.
+                    $pendingResponseRead = $probeRead
+                    $pendingResponseByte = $probeByte
+                    break
                 }
-                finally { $upstreamTls.ReadTimeout = $previousTimeout }
-                if ($probeTimedOut) { break }
-                if ($firstByte -lt 0) { throw [System.IO.EndOfStreamException]::new('Upstream closed before an HTTP response to Expect.') }
-                $earlyResponse = Read-MihariHttpHead -Stream $upstreamTls -Kind Response -RequestMethod $request.Method -InitialByte ([byte]$firstByte)
+                try {
+                    $probeCount = $upstreamTls.EndRead($probeRead)
+                }
+                finally { $probeRead.AsyncWaitHandle.Close() }
+                if ($probeCount -le 0) { throw [System.IO.EndOfStreamException]::new('Upstream closed before an HTTP response to Expect.') }
+                $earlyResponse = Read-MihariHttpHead -Stream $upstreamTls -Kind Response -RequestMethod $request.Method -InitialByte $probeByte[0]
                 if ($null -eq $earlyResponse) { throw [System.IO.EndOfStreamException]::new('Upstream closed during an early HTTP response.') }
                 $earlyStatus = [int]$earlyResponse.StatusCode
                 if ($earlyStatus -eq 101 -or $earlyStatus -ge 200) {
@@ -439,7 +447,14 @@ function Invoke-MihariInspect {
         if (-not $earlyFinal) {
             $requestTransfer = Copy-MihariHttpBody -Source $clientTls -Destination $upstreamTls -Framing $requestFraming -Session $Session
             $upstreamTls.Flush()
-            $response = Read-MihariHttpHead -Stream $upstreamTls -Kind Response -RequestMethod $request.Method
+            if ($null -ne $pendingResponseRead) {
+                try { $pendingCount = $upstreamTls.EndRead($pendingResponseRead) }
+                finally { $pendingResponseRead.AsyncWaitHandle.Close() }
+                $pendingResponseRead = $null
+                if ($pendingCount -le 0) { throw [System.IO.EndOfStreamException]::new('Upstream closed before the continued HTTP response.') }
+                $response = Read-MihariHttpHead -Stream $upstreamTls -Kind Response -RequestMethod $request.Method -InitialByte $pendingResponseByte[0]
+            }
+            else { $response = Read-MihariHttpHead -Stream $upstreamTls -Kind Response -RequestMethod $request.Method }
         }
         $informationalCount = 0
         while ($null -ne $response -and [int]$response.StatusCode -ge 100 -and [int]$response.StatusCode -lt 200 -and [int]$response.StatusCode -ne 101) {
@@ -514,6 +529,22 @@ function Invoke-MihariInspect {
             $longLivedSlot = $false
         }
         if (-not $responseKeepAlive) { break }
+        # Read one byte with a bounded idle wait. SslStream may already hold
+        # decrypted data, so polling only the underlying TCP socket is unsafe.
+        $idleExpired = $false
+        $nextByte = -1
+        $previousClientTimeout = $clientTls.ReadTimeout
+        try {
+            $clientTls.ReadTimeout = 5000
+            try { $nextByte = $clientTls.ReadByte() }
+            catch {
+                if (Test-MihariTlsReadTimeout -Exception $_.Exception) { $idleExpired = $true }
+                else { throw }
+            }
+        }
+        finally { $clientTls.ReadTimeout = $previousClientTimeout }
+        if ($idleExpired -or $nextByte -lt 0) { break }
+        $prefetchedClientByte = [byte]$nextByte
         }
     } catch {
         $failure = @{ host = $ConnectHost; port = $ConnectPort; exception = $_ }

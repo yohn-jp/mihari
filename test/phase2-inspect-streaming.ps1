@@ -19,6 +19,7 @@ $originTls = $null
 $proxyClient = $null
 $proxyTls = $null
 $final = $null
+$fixtureStage = 'setup'
 $cleanupErrors = New-Object 'System.Collections.Generic.List[string]'
 try {
     $identity = New-MihariTestFixtureTlsIdentity
@@ -38,6 +39,7 @@ try {
     $connectWire = [Text.Encoding]::ASCII.GetBytes("CONNECT 127.0.0.1:$originPort HTTP/1.1`r`nHost: 127.0.0.1:$originPort`r`n`r`n")
     $proxyStream.Write($connectWire, 0, $connectWire.Length)
     $proxyStream.Flush()
+    $fixtureStage = 'CONNECT reply'
     $connectReply = Read-MihariTestHeaderText -Stream $proxyStream -Context 'Inspect streaming CONNECT'
     Assert-MihariTest -Condition ($connectReply.StartsWith('HTTP/1.1 200')) -Message 'Inspect streaming fixture must establish CONNECT.'
     $proxyTls = [System.Net.Security.SslStream]::new($proxyStream, $true)
@@ -56,6 +58,7 @@ try {
     $originTls = [System.Net.Security.SslStream]::new($originClient.GetStream(), $true)
     $serverAuth = Begin-MihariTestTlsServerAuthentication -Stream $originTls -Certificate $identity.Leaf
     Complete-MihariTestTlsAuthentication -ServerStream $originTls -ServerResult $serverAuth
+    $fixtureStage = 'large upload request header'
     $firstHead = Read-MihariTestHeaderText -Stream $originTls -Context 'streamed Inspect request'
     Assert-MihariTest -Condition ($firstHead.StartsWith('POST /large HTTP/1.1')) -Message 'Inspected request headers must reach origin before body completion.'
     Assert-MihariTest -Condition ($firstHead -match '(?im)^Content-Length: 35651584\r?$') -Message 'The large request framing must be preserved.'
@@ -72,25 +75,30 @@ try {
     $firstResponse = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: 2`r`nConnection: keep-alive`r`n`r`nok")
     $originTls.Write($firstResponse, 0, $firstResponse.Length)
     $originTls.Flush()
+    $fixtureStage = 'large upload response'
     $receivedResponse = Read-MihariTestHttpResponse -Stream $proxyTls
     Assert-MihariTest -Condition ($receivedResponse.Body -eq 'ok') -Message 'Inspect must relay the large upload response.'
 
     $secondWire = [Text.Encoding]::ASCII.GetBytes("GET /second HTTP/1.1`r`nHost: 127.0.0.1:$originPort`r`nConnection: keep-alive`r`n`r`n")
     $proxyTls.Write($secondWire, 0, $secondWire.Length)
     $proxyTls.Flush()
+    $fixtureStage = 'persistent request header'
     $secondHead = Read-MihariTestHeaderText -Stream $originTls -Context 'persistent Inspect request'
     Assert-MihariTest -Condition ($secondHead.StartsWith('GET /second HTTP/1.1')) -Message 'The second request must reuse the inspected client and upstream TLS legs.'
     $secondResponse = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: 6`r`nConnection: keep-alive`r`n`r`nsecond")
     $originTls.Write($secondResponse, 0, $secondResponse.Length)
     $originTls.Flush()
+    $fixtureStage = 'persistent response'
     $lastResponse = Read-MihariTestHttpResponse -Stream $proxyTls
     Assert-MihariTest -Condition ($lastResponse.Body -eq 'second') -Message 'The second inspected response must be relayed without framing mix-up.'
 
     $continueWire = [Text.Encoding]::ASCII.GetBytes("POST /expect-continue HTTP/1.1`r`nHost: 127.0.0.1:$originPort`r`nContent-Length: 4`r`nExpect: 100-continue`r`nConnection: keep-alive`r`n`r`n")
     $proxyTls.Write($continueWire, 0, $continueWire.Length)
     $proxyTls.Flush()
+    $fixtureStage = 'Expect request header'
     $continueHead = Read-MihariTestHeaderText -Stream $originTls -Context 'Inspect Expect request'
     Assert-MihariTest -Condition ($continueHead.StartsWith('POST /expect-continue HTTP/1.1')) -Message 'Inspect must forward Expect headers before reading the body.'
+    $fixtureStage = 'Expect 100 Continue'
     $continueReply = Read-MihariTestHeaderText -Stream $proxyTls -Context 'Inspect local 100 Continue'
     Assert-MihariTest -Condition ($continueReply.StartsWith('HTTP/1.1 100')) -Message 'Inspect must release an Expect client when upstream sends no interim response.'
     $continueBody = [Text.Encoding]::ASCII.GetBytes('body')
@@ -101,17 +109,20 @@ try {
     $continuedResponse = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: 9`r`nConnection: keep-alive`r`n`r`ncontinued")
     $originTls.Write($continuedResponse, 0, $continuedResponse.Length)
     $originTls.Flush()
+    $fixtureStage = 'Expect final response'
     $continuedClientResponse = Read-MihariTestHttpResponse -Stream $proxyTls
     Assert-MihariTest -Condition ($continuedClientResponse.Body -eq 'continued') -Message 'Inspect must relay the completed Expect exchange.'
 
     $rejectWire = [Text.Encoding]::ASCII.GetBytes("POST /expect-reject HTTP/1.1`r`nHost: 127.0.0.1:$originPort`r`nContent-Length: 4`r`nExpect: 100-continue`r`nConnection: close`r`n`r`n")
     $proxyTls.Write($rejectWire, 0, $rejectWire.Length)
     $proxyTls.Flush()
+    $fixtureStage = 'early rejection request header'
     $rejectHead = Read-MihariTestHeaderText -Stream $originTls -Context 'Inspect early rejection request'
     Assert-MihariTest -Condition ($rejectHead.StartsWith('POST /expect-reject HTTP/1.1')) -Message 'Inspect must present Expect headers to origin before an early final response.'
     $rejectResponse = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 417 Expectation Failed`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
     $originTls.Write($rejectResponse, 0, $rejectResponse.Length)
     $originTls.Flush()
+    $fixtureStage = 'early rejection final response'
     $rejectedClientResponse = Read-MihariTestHttpResponse -Stream $proxyTls
     Assert-MihariTest -Condition ($rejectedClientResponse.Headers.StartsWith('HTTP/1.1 417')) -Message 'Inspect must forward an early final response without requesting the body.'
     $proxyTls.Dispose(); $proxyTls = $null
@@ -130,6 +141,9 @@ try {
     Assert-MihariTest -Condition (@($events | Where-Object { $_.stage -eq 'upstream.http' -and $_.data.path -eq '/expect-reject' -and $_.data.requestBytes -eq 0 -and $_.data.statusCode -eq 417 }).Count -eq 1) -Message 'Early final Inspect response must record zero forwarded request-body bytes.'
     Assert-MihariTest -Condition (@($events | Where-Object { $_.stage -eq 'upstream.http' -and $_.data.requestBytes -eq $bodyLength }).Count -eq 1) -Message 'Large upload byte count must come from actual streamed transfer.'
     Write-Host 'PASS phase2-inspect-streaming'
+}
+catch {
+    throw ('Inspect streaming fixture at ' + $fixtureStage + ': ' + $_.Exception.Message)
 }
 finally {
     Stop-MihariTestRootConfirmation -Operator $addOperator
