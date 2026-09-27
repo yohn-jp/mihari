@@ -64,7 +64,11 @@ function Invoke-Issue3UiEvaluate {
             $response = Read-Issue3UiCdpMessage -Socket $Browser.Socket
         } while ($null -eq $response.id -or [int]$response.id -ne $Browser.NextId)
         if ($null -ne $response.error) { throw ('Edge DevTools command failed: ' + [string]$response.error.message) }
-        if ($null -ne $response.result.exceptionDetails) { throw ('Management UI JavaScript failed: ' + [string]$response.result.exceptionDetails.text) }
+        if ($null -ne $response.result.exceptionDetails) {
+            $detail = [string]$response.result.exceptionDetails.exception.description
+            if ([string]::IsNullOrWhiteSpace($detail)) { $detail = [string]$response.result.exceptionDetails.text }
+            throw ('Management UI JavaScript failed: ' + $detail)
+        }
         return $response.result.result.value
     }
     finally { $cancel.Dispose() }
@@ -79,7 +83,9 @@ function Wait-Issue3UiValue {
         if (& $Predicate $value) { return $value }
         Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw ('The management UI did not reach the expected DOM state. Last value: ' + [string]$value)
+    $lastValue = [string]$value
+    if ($lastValue.Length -gt 200) { $lastValue = $lastValue.Substring(0, 200) + '…' }
+    throw ('The management UI did not reach the expected DOM state. Last value: ' + $lastValue)
 }
 
 function Start-Issue3UiEdge {
@@ -88,7 +94,7 @@ function Start-Issue3UiEdge {
     if ([string]::IsNullOrWhiteSpace($edge)) { throw 'Microsoft Edge is required for the real management UI smoke test.' }
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = $edge
-    $arguments = @('--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
+    $arguments = @('--headless=new', '--disable-gpu', '--disable-background-networking', '--no-first-run', '--no-default-browser-check',
         '--no-proxy-server', '--remote-debugging-port=0', ('--user-data-dir=' + $ProfilePath), $Uri)
     $info.Arguments = [string]::Join(' ', @($arguments | ForEach-Object { ConvertTo-MihariWindowsArgument -Value $_ }))
     $info.UseShellExecute = $false
@@ -262,9 +268,23 @@ try {
     $launch = ConvertFrom-Json -InputObject (Read-MihariTestLiveText -Path $launchPath)
     $diagnosticProfile = [string]$launch.profilePath
     Assert-MihariTest -Condition ([bool]$launch.success -and [string]$launch.proxyEndpoint -eq ('http://127.0.0.1:{0}' -f [int]$metadata.actualPort)) -Message 'The UI-clicked Edge must use Mihari as its proxy.'
-    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("event-rows").textContent' -Predicate {
-        param($value) [string]$value -match [regex]::Escape($fixturePath)
-    }
+    # The page's bounded recent table can legitimately evict this request
+    # during Edge startup. The earlier unique poll fixture proves DOM updates;
+    # confirm this UI-clicked browser request in the canonical event stream.
+    $browserRequestSeen = $false
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        foreach ($line in (Read-MihariTestCompleteLiveLines -Path ([string]$metadata.eventsPath))) {
+            $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+            if ($event.stage -eq 'proxy.request' -and $event.data.path -eq $fixturePath) {
+                $browserRequestSeen = $true
+                break
+            }
+        }
+        if ($browserRequestSeen) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    Assert-MihariTest -Condition $browserRequestSeen -Message 'Mihari must record the UI-clicked browser request for the unique local fixture.'
 
     # A concrete upstream 407 must produce a finding in an already-open page.
     # The separate session keeps the first session's direct local fixtures and
@@ -275,13 +295,13 @@ try {
     $findingMetadata = Wait-MihariTestSession -Child $findingChild
     $findingManagementUrl = 'http://127.0.0.1:{0}/' -f [int]$findingMetadata.actualManagementPort
     $findingBrowser = Start-Issue3UiEdge -Uri $findingManagementUrl -ProfilePath (Join-Path $tempRoot 'finding-edge')
-    $null = Wait-Issue3UiValue -Browser $findingBrowser -Expression 'document.getElementById("session-id").textContent' -Predicate {
+    $null = Wait-Issue3UiValue -Browser $findingBrowser -Expression 'document.getElementById("session-id")?.textContent || ""' -Predicate {
         param($value) [string]$value -eq [string]$findingMetadata.sessionId
     }
-    $beforeFinding = Invoke-Issue3UiEvaluate -Browser $findingBrowser -Expression 'document.getElementById("finding-rows").textContent'
+    $beforeFinding = Invoke-Issue3UiEvaluate -Browser $findingBrowser -Expression 'document.getElementById("finding-rows")?.textContent || ""'
     Assert-MihariTest -Condition ([string]$beforeFinding -notmatch 'upstream_proxy_auth_required') -Message 'The finding must be absent before the fixture emits its upstream 407.'
     [void](Invoke-MihariTestExplicitProxyStatus -ProxyListener $findingListener -MihariPort ([int]$findingMetadata.actualPort) -StatusCode 407)
-    $null = Wait-Issue3UiValue -Browser $findingBrowser -Expression 'document.getElementById("finding-rows").textContent' -Predicate {
+    $null = Wait-Issue3UiValue -Browser $findingBrowser -Expression 'document.getElementById("finding-rows")?.textContent || ""' -Predicate {
         param($value) [string]$value -match 'upstream_proxy_auth_required'
     }
     Write-Host 'PASS issue3-ui-browser: Edge rendered live status, observations and a 407 finding; both mode clicks and UI-launched proxy traffic worked.'
