@@ -1,5 +1,5 @@
-# The CA uses ephemeral CNG; TLS leaves use ephemeral Windows CAPI keys.
-# No PFX or private key is exported.
+# The CA key stays in memory. TLS leaves briefly use a current-user key file
+# because Windows Schannel cannot authenticate with an ephemeral key handle.
 function New-MihariEphemeralRsa {
     [CmdletBinding()]
     param([int] $KeySize = 2048)
@@ -14,34 +14,6 @@ function New-MihariEphemeralRsa {
         }
         if ($rsa.KeySize -ne $KeySize) {
             throw 'CNG returned an RSA key with an unexpected size.'
-        }
-        return $rsa
-    }
-    catch {
-        $rsa.Dispose()
-        throw
-    }
-}
-
-# Schannel may reject a certificate backed by an unnamed CNG key during
-# SslStream server authentication. Try a Windows CAPI key whose provider
-# context is explicitly ephemeral and remains owned by this RSA object.
-function New-MihariEphemeralTlsRsa {
-    [CmdletBinding()]
-    param([int] $KeySize = 2048)
-
-    $parameters = [System.Security.Cryptography.CspParameters]::new(
-        24, 'Microsoft Enhanced RSA and AES Cryptographic Provider'
-    )
-    $parameters.KeyNumber = 1
-    $parameters.Flags = [System.Security.Cryptography.CspProviderFlags]::CreateEphemeralKey -bor
-        [System.Security.Cryptography.CspProviderFlags]::NoPrompt
-    $rsa = [System.Security.Cryptography.RSACryptoServiceProvider]::new($KeySize, $parameters)
-    try {
-        # Force generation now, while the provider context is still owned.
-        [void] $rsa.ExportParameters($false)
-        if ($rsa.KeySize -ne $KeySize -or $rsa.PersistKeyInCsp) {
-            throw 'CAPI returned a persistent or incorrectly sized TLS RSA key.'
         }
         return $rsa
     }
@@ -226,9 +198,12 @@ function New-MihariLeafCertificate {
 
     $rsa = $null
     $issued = $null
+    $attached = $null
     $certificate = $null
+    $pfxBytes = $null
+    $password = $null
     try {
-        $rsa = New-MihariEphemeralTlsRsa
+        $rsa = New-MihariEphemeralRsa
         $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
             "CN=$($NormalizedHost.Name)",
             $rsa,
@@ -263,24 +238,37 @@ function New-MihariLeafCertificate {
         $serial[0] = [byte] (($serial[0] -band 0x7f) -bor 1)
         $now = [DateTimeOffset]::UtcNow
         $issued = $request.Create($CA.Certificate, $now.AddMinutes(-1), $now.AddHours(6), $serial)
-        $certificate = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::CopyWithPrivateKey($issued, $rsa)
+        $attached = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::CopyWithPrivateKey($issued, $rsa)
+        # Export and import only in memory. UserKeySet deliberately allows
+        # Schannel's temporary, access-restricted key file. PersistKeySet and
+        # EphemeralKeySet must not be set: the former leaks, the latter fails TLS.
+        $password = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
+        $pfxBytes = $attached.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx, $password)
+        $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $pfxBytes,
+            $password,
+            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet
+        )
         if (-not $certificate.HasPrivateKey) {
-            throw 'The exact-host leaf lacks an in-memory private key.'
+            throw 'The exact-host leaf lacks a temporary private key for Schannel.'
         }
         return [pscustomobject]@{
             Certificate = $certificate
-            PrivateKey = $rsa
+            PrivateKey = $null
             LastUsedUtc = $now.UtcDateTime
             InUse = 0
         }
     }
     catch {
         if ($null -ne $certificate) { $certificate.Dispose() }
-        if ($null -ne $rsa) { $rsa.Dispose() }
-        throw "Could not issue an in-memory leaf for $($NormalizedHost.Name): $($_.Exception.Message)"
+        throw "Could not issue a temporary TLS leaf for $($NormalizedHost.Name): $($_.Exception.Message)"
     }
     finally {
+        if ($null -ne $pfxBytes) { [Array]::Clear($pfxBytes, 0, $pfxBytes.Length) }
+        $password = $null
+        if ($null -ne $attached) { $attached.Dispose() }
         if ($null -ne $issued) { $issued.Dispose() }
+        if ($null -ne $rsa) { $rsa.Dispose() }
     }
 }
 
@@ -317,7 +305,7 @@ function Get-MihariLeaf {
             $oldest = $cache[$oldestKey]
             $cache.Remove($oldestKey)
             $oldest.Certificate.Dispose()
-            $oldest.PrivateKey.Dispose()
+            if ($null -ne $oldest.PrivateKey) { $oldest.PrivateKey.Dispose() }
         }
         $item = New-MihariLeafCertificate -CA $Session.CA -NormalizedHost $normalized
         $item.InUse = 1
@@ -369,7 +357,7 @@ function Clear-MihariLeafCache {
         }
         foreach ($item in $cache.Values) {
             $item.Certificate.Dispose()
-            $item.PrivateKey.Dispose()
+            if ($null -ne $item.PrivateKey) { $item.PrivateKey.Dispose() }
         }
         $cache.Clear()
     }
