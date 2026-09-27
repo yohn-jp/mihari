@@ -464,8 +464,19 @@ function Start-MihariBrowser {
             -UrlProvided (-not [string]::IsNullOrWhiteSpace($Url)))
     }
 
+    $observerCommand = Get-Command Start-MihariBrowserObservation -CommandType Function -ErrorAction SilentlyContinue
+    $writer = Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'Writer'
+    $cancellation = Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'Cancellation'
+    $observerAcceptsInitialUrl = ($null -ne $observerCommand -and $observerCommand.Parameters.ContainsKey('InitialUrl'))
+    $liveObserverAvailable = ($observerAcceptsInitialUrl -and $null -ne $writer -and
+        -not [bool]$writer.Closed -and $null -ne $cancellation)
+    $browserUrl = $Url
+    if ($liveObserverAvailable -and -not [string]::IsNullOrWhiteSpace($Url)) {
+        # Keep the requested URL in memory and navigate only after observation is armed.
+        $browserUrl = 'about:blank'
+    }
     $arguments = Get-MihariEdgeLaunchArguments -ProfilePath $profilePath `
-        -ProxyEndpoint $proxyEndpoint -Url $Url -DiagnosticProfile $profile.Name
+        -ProxyEndpoint $proxyEndpoint -Url $browserUrl -DiagnosticProfile $profile.Name
     $quotedArguments = @()
     foreach ($argument in $arguments) {
         $quotedArguments += ConvertTo-MihariWindowsArgument -Value ([string]$argument)
@@ -493,9 +504,13 @@ function Start-MihariBrowser {
             -DiagnosticProfile $profile.Name -ProfileVersion $profile.Version `
             -RequestedHttpVersion $profile.RequestedHttpVersion -RequestedTlsPolicy $profile.RequestedTlsPolicy `
             -OwnerStartTimeUtc $ownerStartTimeUtc
-        if ($null -ne $ownerStartTimeUtc -and
-            (Get-Command Start-MihariBrowserObservation -CommandType Function -ErrorAction SilentlyContinue)) {
-            $observation = Start-MihariBrowserObservation -Session $SessionMetadata -Launch $result
+        if ($null -ne $ownerStartTimeUtc -and $null -ne $observerCommand) {
+            if ($liveObserverAvailable) {
+                $observation = Start-MihariBrowserObservation -Session $SessionMetadata -Launch $result -InitialUrl $Url
+            }
+            else {
+                $observation = Start-MihariBrowserObservation -Session $SessionMetadata -Launch $result
+            }
             if ($null -ne $observation) {
                 $result.ObservationStatus = [string]$observation.Status
                 if (-not [string]::IsNullOrWhiteSpace([string]$observation.Reason)) {
