@@ -93,11 +93,19 @@ function Write-MihariFindingProjectionSnapshotAtomic {
     }
 
     $temporaryPath = $Path + '.tmp.' + [Guid]::NewGuid().ToString('N')
+    $failurePhase = 'serialize'
     try {
         $json = ConvertTo-Json -InputObject $Snapshot -Depth 32 -Compress -ErrorAction Stop
+        $failurePhase = 'write_temporary'
         [System.IO.File]::WriteAllText($temporaryPath, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
-        if ([System.IO.File]::Exists($Path)) { [System.IO.File]::Replace($temporaryPath, $Path, $null) }
-        else { [System.IO.File]::Move($temporaryPath, $Path) }
+        if ([System.IO.File]::Exists($Path)) {
+            $failurePhase = 'replace'
+            [System.IO.File]::Replace($temporaryPath, $Path, $null)
+        }
+        else {
+            $failurePhase = 'move_into_place'
+            [System.IO.File]::Move($temporaryPath, $Path)
+        }
     }
     catch {
         $writeError = $_.Exception
@@ -107,10 +115,14 @@ function Write-MihariFindingProjectionSnapshotAtomic {
                 $cleanupError = $_.Exception
                 $combined = [System.InvalidOperationException]::new('Could not write or clean up the findings snapshot.', $writeError)
                 $combined.Data['cleanupError'] = $cleanupError.GetType().FullName
-                throw (New-MihariFindingProjectionError -Code 'finding_snapshot_write_error' -Message 'Could not atomically replace the persistent findings snapshot.' -InnerException $combined)
+                $projectionError = New-MihariFindingProjectionError -Code 'finding_snapshot_write_error' -Message 'Could not atomically replace the persistent findings snapshot.' -InnerException $combined
+                $projectionError.Data['failurePhase'] = $failurePhase
+                throw $projectionError
             }
         }
-        throw (New-MihariFindingProjectionError -Code 'finding_snapshot_write_error' -Message 'Could not atomically replace the persistent findings snapshot.' -InnerException $writeError)
+        $projectionError = New-MihariFindingProjectionError -Code 'finding_snapshot_write_error' -Message 'Could not atomically replace the persistent findings snapshot.' -InnerException $writeError
+        $projectionError.Data['failurePhase'] = $failurePhase
+        throw $projectionError
     }
 }
 

@@ -714,6 +714,7 @@ function Merge-MihariFindingGroups {
 
     $groups = New-Object 'System.Collections.Generic.List[object]'
     $groupIndex = @{}
+    $aggregateIndex = @{}
     foreach ($finding in $Findings) {
         if ($null -eq $finding) { continue }
         $parts = Get-MihariFindingIdentityParts -Finding $finding
@@ -749,36 +750,34 @@ function Merge-MihariFindingGroups {
             }
             $groups.Add($group)
             $groupIndex[$findingId] = $group
+            $aggregateIndex[$findingId] = [pscustomobject]@{
+                references = (New-Object 'System.Collections.Generic.List[object]')
+                referenceKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+                facts = (New-Object 'System.Collections.Generic.List[object]')
+                factKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+            }
         }
         $group = $groupIndex[$findingId]
-        $references = New-Object 'System.Collections.Generic.List[object]'
-        $facts = New-Object 'System.Collections.Generic.List[object]'
-        $referenceKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-        foreach ($reference in @($group.evidenceRefs)) {
-            if ($referenceKeys.Add((Get-MihariFindingReferenceKey -Reference $reference))) { $references.Add($reference) }
-        }
+        $aggregate = $aggregateIndex[$findingId]
         foreach ($reference in @($finding.evidenceRefs)) {
-            if ($referenceKeys.Add((Get-MihariFindingReferenceKey -Reference $reference))) { $references.Add($reference) }
-        }
-        $group.evidenceRefs = @($references.ToArray())
-        $group.evidenceIds = @($group.evidenceRefs | ForEach-Object { [string]$_.eventId } | Select-Object -Unique)
-        $existingFactKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-        foreach ($fact in @($group.observedFacts)) {
-            $existingFactKeys.Add((Get-MihariFindingReferenceKey -Reference $fact)) | Out-Null
-            $facts.Add($fact)
+            if ($aggregate.referenceKeys.Add((Get-MihariFindingReferenceKey -Reference $reference))) { $aggregate.references.Add($reference) }
         }
         foreach ($fact in @($finding.observedFacts)) {
-            if ($existingFactKeys.Add((Get-MihariFindingReferenceKey -Reference $fact))) { $facts.Add($fact) }
+            if ($aggregate.factKeys.Add((Get-MihariFindingReferenceKey -Reference $fact))) { $aggregate.facts.Add($fact) }
         }
-        $group.observedFacts = @($facts.ToArray())
+        $findingTimes = Get-MihariFindingObservedAt -Finding $finding
+        if ($null -eq $group.firstObserved -or ($null -ne $findingTimes.First -and (Compare-MihariDiagnosisTimestamp -Left $findingTimes.First -Right ([string]$group.firstObserved)) -lt 0)) { $group.firstObserved = $findingTimes.First }
+        if ($null -eq $group.lastObserved -or ($null -ne $findingTimes.Last -and (Compare-MihariDiagnosisTimestamp -Left $findingTimes.Last -Right ([string]$group.lastObserved)) -gt 0)) { $group.lastObserved = $findingTimes.Last }
+    }
+
+    foreach ($findingId in @($aggregateIndex.Keys)) {
+        $group = $groupIndex[$findingId]
+        $aggregate = $aggregateIndex[$findingId]
+        $group.evidenceRefs = @($aggregate.references.ToArray())
+        $group.evidenceIds = @($group.evidenceRefs | ForEach-Object { [string]$_.eventId } | Select-Object -Unique)
+        $group.observedFacts = @($aggregate.facts.ToArray())
         $group.occurrenceCount = $group.evidenceRefs.Count
         $group.count = $group.occurrenceCount
-        $times = Get-MihariFindingObservedAt -Finding $group
-        $findingTimes = Get-MihariFindingObservedAt -Finding $finding
-        if ($null -eq $times.First -or ($null -ne $findingTimes.First -and (Compare-MihariDiagnosisTimestamp -Left $findingTimes.First -Right $times.First) -lt 0)) { $group.firstObserved = $findingTimes.First }
-        else { $group.firstObserved = $times.First }
-        if ($null -eq $times.Last -or ($null -ne $findingTimes.Last -and (Compare-MihariDiagnosisTimestamp -Left $findingTimes.Last -Right $times.Last) -gt 0)) { $group.lastObserved = $findingTimes.Last }
-        else { $group.lastObserved = $times.Last }
     }
 
     foreach ($previous in $PreviousFindings) {

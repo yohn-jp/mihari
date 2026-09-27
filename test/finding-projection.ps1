@@ -58,7 +58,25 @@ try {
     $store = New-MihariTrafficProjectionStore -SessionId $sessionId -EventsPath $eventsPath -IndexDirectory $indexPath -HotLimit 2
     while ($store.Backlog) { $null = Update-MihariTrafficProjectionStore -Store $store -MaximumEventsPerPoll 5000 }
 
-    $firstPage = Get-MihariPersistentFindings -SessionId $sessionId -ProjectionStore $store -SnapshotPath $snapshotPath -Limit 1
+    try {
+        $firstPage = Get-MihariPersistentFindings -SessionId $sessionId -ProjectionStore $store -SnapshotPath $snapshotPath -Limit 1
+    }
+    catch {
+        $phase = [string]$_.Exception.Data['failurePhase']
+        $rootCause = $_.Exception
+        $innerDepth = 0
+        while ($null -ne $rootCause.InnerException -and $innerDepth -lt 8) {
+            $rootCause = $rootCause.InnerException
+            $innerDepth++
+        }
+        $safeMessage = [string]$rootCause.Message
+        if (-not [string]::IsNullOrEmpty($temporaryRoot)) { $safeMessage = $safeMessage.Replace($temporaryRoot, '[test-root]') }
+        $safeMessage = $safeMessage.Replace('projection-secret', '[redacted]')
+        $safeMessage = [System.Text.RegularExpressions.Regex]::Replace($safeMessage, '[\r\n\t]+', ' ')
+        if ($safeMessage.Length -gt 240) { $safeMessage = $safeMessage.Substring(0, 240) }
+        Write-Host ('DIAGNOSTIC finding snapshot: phase={0}; innerType={1}; hresult=0x{2:X8}; message={3}' -f $phase, $rootCause.GetType().FullName, $rootCause.HResult, $safeMessage)
+        throw
+    }
     Assert-MihariTest -Condition ($firstPage.scopeTotal -eq 2 -and $firstPage.items.Count -eq 1 -and $firstPage.counts.sessionTotal -eq 2) -Message 'Persistent findings must aggregate indexed event history independently of the two-record hot window.'
     Assert-MihariTest -Condition ($null -ne $firstPage.nextCursor -and -not $firstPage.projectionPending -and $firstPage.coverage -eq 'observed') -Message 'A fully indexed history returns observed coverage and a stable findings cursor.'
     Assert-MihariTest -Condition (($firstPage.items[0].findingId -match '^finding-[0-9a-f]{32}$') -and $firstPage.items[0].count -in @(1, 1150)) -Message 'The first page contains a stable grouped finding.'
