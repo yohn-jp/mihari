@@ -110,12 +110,38 @@ try {
     Assert-MihariTest -Condition ($limitEvents.Count -eq 4 -and
         @($limitEvents | Where-Object { $_.stage -eq 'browser.observation' -and $_.outcome -eq 'observer_limit' -and $_.coverage -eq 'truncated' -and $_.data.browserError -eq 'target_limit_reached' -and [long]$_.data.browserDroppedTargetCount -eq 3 }).Count -eq 1 -and
         @($limitEvents | Where-Object { $_.stage -eq 'browser.observation' -and $_.outcome -eq 'observer_limit' -and $_.coverage -eq 'truncated' -and $_.data.browserError -eq 'request_limit_reached' -and [long]$_.data.browserDroppedRequestCount -eq 2 }).Count -eq 1) -Message 'Browser observer overflow must persist explicit truncated tool-health facts and cumulative target/request drop counts.'
-    $observerUnavailable = New-MihariBrowserObservationUnavailableResult -Session $session -Launch $launch -ErrorCode 'profile_marker_unverified'
-    $observerFailureEvents = @((Read-MihariBrowserObservationTestText -Path $writerPath) -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { ConvertFrom-Json -InputObject $_ })
+    $diagnosticProfilePath = Join-Path $temporaryDirectory 'owned-profile-diagnostic'
+    $null = [System.IO.Directory]::CreateDirectory($diagnosticProfilePath)
+    $diagnosticMarkerPath = Join-Path $diagnosticProfilePath 'MihariProfileOwner.json'
+    $diagnosticMarker = [pscustomobject]@{
+        owner = 'Mihari'
+        sessionId = 'another-session'
+        processId = 4321
+        profilePath = $diagnosticProfilePath
+        executablePath = 'C:\Program Files\Microsoft\Edge\Application\msedge.exe'
+        processStartTimeUtc = '2026-01-02T03:04:05.0000000Z'
+    }
+    [System.IO.File]::WriteAllText($diagnosticMarkerPath, (ConvertTo-Json -InputObject $diagnosticMarker -Compress), [System.Text.UTF8Encoding]::new($false))
+    $diagnosticLaunch = [pscustomobject]@{
+        Pid = 4321
+        ProfilePath = $diagnosticProfilePath
+        Path = [string]$diagnosticMarker.executablePath
+        OwnerStartTimeUtc = [string]$diagnosticMarker.processStartTimeUtc
+    }
+    $ownedProcessVerification = Get-MihariBrowserOwnedProcessVerification -SessionId 'session-test' -Launch $diagnosticLaunch
+    Assert-MihariTest -Condition (-not $ownedProcessVerification.Verified -and
+        $ownedProcessVerification.FailureDetailCode -eq 'profile_marker_mismatch') -Message 'Owned browser verification must classify marker mismatches with a fixed safe detail code.'
+    $observerUnavailable = New-MihariBrowserObservationUnavailableResult -Session $session -Launch $diagnosticLaunch `
+        -ErrorCode 'profile_marker_unverified' -FailureDetailCode $ownedProcessVerification.FailureDetailCode
+    $observerFailureText = Read-MihariBrowserObservationTestText -Path $writerPath
+    $observerFailureEvents = @($observerFailureText -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { ConvertFrom-Json -InputObject $_ })
     $observerFailureEvent = @($observerFailureEvents | Where-Object { $_.source -eq 'browser' -and $_.stage -eq 'browser.observation' -and $_.outcome -eq 'unavailable' }) | Select-Object -Last 1
     Assert-MihariTest -Condition ($observerUnavailable.Status -eq 'unavailable' -and $observerUnavailable.ErrorCode -eq 'profile_marker_unverified' -and
         $null -ne $observerFailureEvent -and $observerFailureEvent.coverage -eq 'unknown' -and
-        $observerFailureEvent.data.browserError -eq 'profile_marker_unverified') -Message 'Owned browser observer startup failure must expose only a stable code in its result and canonical tool-health fact.'
+        $observerUnavailable.FailureDetailCode -eq 'profile_marker_mismatch' -and
+        $observerFailureEvent.data.browserError -eq 'profile_marker_unverified' -and
+        $observerFailureEvent.data.errorCode -eq 'profile_marker_mismatch' -and
+        -not $observerFailureText.Contains($diagnosticProfilePath)) -Message 'Owned browser observer failure must preserve API-compatible status and expose only a fixed safe verification detail code.'
 
     $harPath = Join-Path $temporaryDirectory 'input.har'
     $harJson = @'
