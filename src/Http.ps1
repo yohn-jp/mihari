@@ -2,11 +2,16 @@ function Read-MihariHttpHeaderBlock {
     param(
         [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
         [int]$MaximumBytes = 65536,
-        [int]$DeadlineMs = 30000
+        [int]$DeadlineMs = 30000,
+        [Nullable[byte]]$InitialByte
     )
 
     $bytes = New-Object 'System.Collections.Generic.List[byte]'
     $previous = -1
+    if ($null -ne $InitialByte) {
+        $bytes.Add([byte]$InitialByte)
+        $previous = [int]$InitialByte
+    }
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
     $originalTimeout = $null
     if ($Stream.CanTimeout) { $originalTimeout = $Stream.ReadTimeout }
@@ -268,10 +273,13 @@ function Read-MihariHttpMessage {
         [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
         [Parameter(Mandatory = $true)][ValidateSet('Request', 'Response')][string]$Kind,
         [string]$RequestMethod,
-        [switch]$HeadersOnly
+        [switch]$HeadersOnly,
+        [Nullable[byte]]$InitialByte
     )
 
-    $rawHeaderBlock = Read-MihariHttpHeaderBlock -Stream $Stream
+    $readArguments = @{ Stream = $Stream }
+    if ($PSBoundParameters.ContainsKey('InitialByte')) { $readArguments.InitialByte = $InitialByte }
+    $rawHeaderBlock = Read-MihariHttpHeaderBlock @readArguments
     if ($null -eq $rawHeaderBlock) { return $null }
 
     $encoding = [System.Text.Encoding]::GetEncoding(28591)
@@ -413,9 +421,12 @@ function Read-MihariHttpHead {
     param(
         [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
         [Parameter(Mandatory = $true)][ValidateSet('Request', 'Response')][string]$Kind,
-        [string]$RequestMethod
+        [string]$RequestMethod,
+        [Nullable[byte]]$InitialByte
     )
-    return Read-MihariHttpMessage -Stream $Stream -Kind $Kind -RequestMethod $RequestMethod -HeadersOnly
+    $readArguments = @{ Stream = $Stream; Kind = $Kind; RequestMethod = $RequestMethod; HeadersOnly = $true }
+    if ($PSBoundParameters.ContainsKey('InitialByte')) { $readArguments.InitialByte = $InitialByte }
+    return Read-MihariHttpMessage @readArguments
 }
 
 function ConvertTo-MihariAuthority {
