@@ -154,6 +154,7 @@ try {
         filesChild = $(if ($null -eq $filesChildResult) { $null } else { [pscustomobject]@{ status = $filesChildResult.status; reason = $filesChildResult.reason; path = $filesChildResult.path } })
         normalizedPolicy = $normalizedExactPolicy
     }
+    Assert-MihariTest -Condition ($normalizedExactPolicy.Supported -and @($normalizedExactPolicy.Rules).Count -eq 1 -and $normalizedExactPolicy.Rules[0].Path -eq '/files') -Message ('A single neutral policy rule must remain a supported collection. Diagnostics: ' + (ConvertTo-Json -InputObject $exactPolicyDiagnostics -Depth 8 -Compress))
     Assert-MihariTest -Condition ($exactFilesResult.status -eq 'covered' -and $filesChildResult.status -eq 'uncovered') -Message ('Neutral exact path rules must cover only the exact path. Diagnostics: ' + (ConvertTo-Json -InputObject $exactPolicyDiagnostics -Depth 8 -Compress))
     $firstPolicyPage = Compare-MihariDependencyPolicy -Dependencies $projection.items -PolicyDocument $exactPolicy -MaximumItems 1
     Assert-MihariTest -Condition ($null -ne $firstPolicyPage.nextCursor -and $firstPolicyPage.scopeTotal -gt 1) -Message 'Policy comparison needs bounded cursor paging and a full scope total.'

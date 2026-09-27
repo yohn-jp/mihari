@@ -5,7 +5,8 @@
 function Get-MihariDependencyValue {
     param(
         [AllowNull()][object] $InputObject,
-        [Parameter(Mandatory = $true)][string[]] $Names
+        [Parameter(Mandatory = $true)][string[]] $Names,
+        [switch] $NoEnumerate
     )
 
     if ($null -eq $InputObject) { return $null }
@@ -13,13 +14,17 @@ function Get-MihariDependencyValue {
         if ($InputObject -is [System.Collections.IDictionary]) {
             foreach ($key in $InputObject.Keys) {
                 if ([string]::Equals([string]$key, $name, [StringComparison]::OrdinalIgnoreCase)) {
+                    if ($NoEnumerate) { return ,($InputObject[$key]) }
                     return $InputObject[$key]
                 }
             }
         }
         else {
             $property = $InputObject.PSObject.Properties[$name]
-            if ($null -ne $property) { return $property.Value }
+            if ($null -ne $property) {
+                if ($NoEnumerate) { return ,($property.Value) }
+                return $property.Value
+            }
         }
     }
     return $null
@@ -743,7 +748,7 @@ function ConvertTo-MihariNeutralPolicyRuleSet {
     if ($format -ne 'mihari-neutral-url-policy' -or [int]$version -ne 1) {
         return [pscustomobject]@{ Supported = $false; Reason = 'unsupported_policy_format_or_version'; Rules = @(); UnsupportedRules = @() }
     }
-    $rules = Get-MihariDependencyValue -InputObject $PolicyDocument -Names @('rules')
+    $rules = Get-MihariDependencyValue -InputObject $PolicyDocument -Names @('rules') -NoEnumerate
     if ($null -eq $rules -or $rules -isnot [System.Collections.IEnumerable] -or $rules -is [string]) {
         return [pscustomobject]@{ Supported = $false; Reason = 'policy_rules_missing'; Rules = @(); UnsupportedRules = @() }
     }
