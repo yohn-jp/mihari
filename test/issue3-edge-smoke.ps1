@@ -19,7 +19,10 @@ function Invoke-MihariIssue3ManagementRequest {
     $request = [System.Net.HttpWebRequest]::Create($Uri)
     $request.Method = $Method
     $request.Proxy = $null
+    # Launch waits for the owned Edge process and its local observer to start.
+    # Keep the request bounded while allowing for a loaded Windows runner.
     $request.Timeout = 10000
+    if ($Method -eq 'POST') { $request.Timeout = 30000 }
     $request.ReadWriteTimeout = 10000
     if ($Method -eq 'POST') {
         $authority = ([Uri]$Uri).GetLeftPart([UriPartial]::Authority) + '/'
