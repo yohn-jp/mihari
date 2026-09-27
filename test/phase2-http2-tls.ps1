@@ -187,12 +187,14 @@ try {
     $preface = Read-MihariTestNativeExact -Stream $tls -Length 24
     if ([Text.Encoding]::ASCII.GetString($preface) -ne "PRI * HTTP/2.0`r`n`r`nSM`r`n`r`n") { throw 'Origin fixture received invalid preface.' }
     $seen = New-Object 'System.Collections.Generic.List[int]'
-    while ($seen.Count -lt 2) {
+    $settingsAckSeen = $false
+    while ($seen.Count -lt 2 -or -not $settingsAckSeen) {
         $frame = Read-MihariTestNativeFrame -Stream $tls
         if ($frame.Type -eq 4 -and ($frame.Flags -band 1) -eq 0) {
             $ack = New-MihariTestNativeFrame -Type 4 -Flags 1 -StreamId 0
             $tls.Write($ack,0,$ack.Length)
         }
+        if ($frame.Type -eq 4 -and ($frame.Flags -band 1) -ne 0) { $settingsAckSeen = $true }
         if ($frame.Type -eq 1 -and ($frame.Flags -band 4) -ne 0) { $seen.Add($frame.StreamId) }
     }
     if ($seen.Count -ne 2 -or -not $seen.Contains(1) -or -not $seen.Contains(3)) { throw 'Origin fixture did not receive two concurrent streams.' }
@@ -326,6 +328,26 @@ finally { $Accepted.Dispose() }
     Assert-MihariTest -Condition ($endEvents.Contains('"tlsAlpn":"h2"') -and $endEvents.Contains('/entry-1?token=[REDACTED]') -and $endEvents.Contains('/entry-3?token=[REDACTED]')) -Message 'Production JSONL must contain actual ALPN and safe path observations.'
     Assert-MihariTest -Condition (-not $endEvents.Contains('entry-secret') -and $endEvents.Contains('"statusCode":200')) -Message 'Production events must exclude query secrets and retain response status.'
     Write-Host 'PASS phase2-http2-tls: direct and production CONNECT two-leg h2, concurrent streams, normal trust, CA cleanup'
+}
+catch {
+    $originErrors = $(if ($null -ne $originWorker) { $originWorker.Powershell.Streams.Error.Count } else { 0 })
+    $proxyErrors = $(if ($null -ne $proxyWorker) { $proxyWorker.Powershell.Streams.Error.Count } else { 0 })
+    Write-Warning ("Native fixture worker error counts: origin={0}, proxy={1}." -f $originErrors, $proxyErrors)
+    $eventPath = Join-Path $temp 'events.jsonl'
+    if ([IO.File]::Exists($eventPath)) {
+        try {
+            $safeFacts = New-Object 'System.Collections.Generic.List[string]'
+            foreach ($line in ((Read-MihariTestLiveText -Path $eventPath) -split "`r?`n")) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $fact = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+                $safeFacts.Add(([string]$fact.stage + ':' + [string]$fact.outcome + ':' + [string]$fact.data.errorCode))
+            }
+            $start = [Math]::Max(0, $safeFacts.Count - 8)
+            Write-Warning ('Native fixture last safe fact stages: ' + [string]::Join(', ', $safeFacts.GetRange($start, $safeFacts.Count - $start).ToArray()))
+        }
+        catch { Write-Warning ('Native fixture fact summary unavailable: ' + $_.Exception.GetType().Name) }
+    }
+    throw
 }
 finally {
     if ($null -ne $clientTls) { $clientTls.Dispose() }
