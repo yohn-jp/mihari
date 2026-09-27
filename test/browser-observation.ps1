@@ -110,6 +110,12 @@ try {
     Assert-MihariTest -Condition ($limitEvents.Count -eq 4 -and
         @($limitEvents | Where-Object { $_.stage -eq 'browser.observation' -and $_.outcome -eq 'observer_limit' -and $_.coverage -eq 'truncated' -and $_.data.browserError -eq 'target_limit_reached' -and [long]$_.data.browserDroppedTargetCount -eq 3 }).Count -eq 1 -and
         @($limitEvents | Where-Object { $_.stage -eq 'browser.observation' -and $_.outcome -eq 'observer_limit' -and $_.coverage -eq 'truncated' -and $_.data.browserError -eq 'request_limit_reached' -and [long]$_.data.browserDroppedRequestCount -eq 2 }).Count -eq 1) -Message 'Browser observer overflow must persist explicit truncated tool-health facts and cumulative target/request drop counts.'
+    $observerUnavailable = New-MihariBrowserObservationUnavailableResult -Session $session -Launch $launch -ErrorCode 'profile_marker_unverified'
+    $observerFailureEvents = @((Read-MihariBrowserObservationTestText -Path $writerPath) -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { ConvertFrom-Json -InputObject $_ })
+    $observerFailureEvent = @($observerFailureEvents | Where-Object { $_.source -eq 'browser' -and $_.stage -eq 'browser.observation' -and $_.outcome -eq 'unavailable' }) | Select-Object -Last 1
+    Assert-MihariTest -Condition ($observerUnavailable.Status -eq 'unavailable' -and $observerUnavailable.ErrorCode -eq 'profile_marker_unverified' -and
+        $null -ne $observerFailureEvent -and $observerFailureEvent.coverage -eq 'unknown' -and
+        $observerFailureEvent.data.browserError -eq 'profile_marker_unverified') -Message 'Owned browser observer startup failure must expose only a stable code in its result and canonical tool-health fact.'
 
     $harPath = Join-Path $temporaryDirectory 'input.har'
     $harJson = @'
