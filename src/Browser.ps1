@@ -797,10 +797,11 @@ function Start-MihariBrowser {
     }
 
     $observerCommand = Get-Command Start-MihariBrowserObservation -CommandType Function -ErrorAction SilentlyContinue
+    $ownerIdentityCommand = Get-Command Get-MihariBrowserOwnedProfileIdentity -CommandType Function -ErrorAction SilentlyContinue
     $writer = Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'Writer'
     $cancellation = Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'Cancellation'
     $observerAcceptsInitialUrl = ($null -ne $observerCommand -and $observerCommand.Parameters.ContainsKey('InitialUrl'))
-    $liveObserverAvailable = ($observerAcceptsInitialUrl -and $null -ne $writer -and
+    $liveObserverAvailable = ($observerAcceptsInitialUrl -and $null -ne $ownerIdentityCommand -and $null -ne $writer -and
         -not [bool]$writer.Closed -and $null -ne $cancellation)
     $browserUrl = $Url
     if ($liveObserverAvailable -and -not [string]::IsNullOrWhiteSpace($Url)) {
@@ -837,11 +838,34 @@ function Start-MihariBrowser {
             -DiagnosticProfile $profile.Name -ProfileVersion $profile.Version `
             -RequestedHttpVersion $profile.RequestedHttpVersion -RequestedTlsPolicy $profile.RequestedTlsPolicy `
             -OwnerStartTimeUtc $ownerStartTimeUtc
-        if ($null -ne $ownerStartTimeUtc) {
+        $profileOwnerVerified = ($null -ne $ownerStartTimeUtc)
+        if ($liveObserverAvailable) {
+            # Edge can return a short-lived launcher PID. Resolve the browser
+            # root that owns this unique profile before persisting identity or
+            # attaching DevTools.
+            try {
+                $ownerIdentity = Get-MihariBrowserOwnedProfileIdentity -SessionId $sessionId `
+                    -Launch $result -TimeoutSeconds 5
+            }
+            catch {
+                $ownerIdentity = $null
+            }
+            if ($null -ne $ownerIdentity -and [bool]$ownerIdentity.Success -and
+                [int]$ownerIdentity.ProcessId -gt 0 -and
+                -not [string]::IsNullOrWhiteSpace([string]$ownerIdentity.OwnerStartTimeUtc)) {
+                $result.Pid = [int]$ownerIdentity.ProcessId
+                $result.OwnerStartTimeUtc = [string]$ownerIdentity.OwnerStartTimeUtc
+                $profileOwnerVerified = $true
+            }
+            else {
+                $result.OwnerStartTimeUtc = $null
+                $profileOwnerVerified = $false
+            }
+        }
+        if ($profileOwnerVerified) {
             [void](Set-MihariBrowserProfileOwnership -SessionMetadata $SessionMetadata -Result $result)
         }
-        if ($null -ne $ownerStartTimeUtc -and
-            $null -ne $observerCommand) {
+        if ($profileOwnerVerified -and $null -ne $observerCommand) {
             if ($liveObserverAvailable) {
                 try {
                     $observation = Start-MihariBrowserObservation -Session $SessionMetadata -Launch $result -InitialUrl $Url
@@ -866,7 +890,7 @@ function Start-MihariBrowser {
                 $result.Reason = 'Edge started on about:blank, but Mihari could not arm owned-profile observation. The requested URL was not opened.'
             }
         }
-        elseif ($null -eq $ownerStartTimeUtc -and
+        elseif (-not $profileOwnerVerified -and
             $null -ne (Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'Writer')) {
             $result.ObservationStatus = 'launched_but_unverified'
             $result.Reason = 'Edge started, but Mihari could not verify process ownership for browser observation.'

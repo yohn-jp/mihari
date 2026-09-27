@@ -8,6 +8,10 @@ $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ('mihari-browser-test
 [void][IO.Directory]::CreateDirectory($temporaryDirectory)
 $originalDiscovery = (Get-Command Find-MihariEdgeExecutable -CommandType Function).ScriptBlock
 $originalStartProcess = (Get-Command Start-MihariEdgeProcess -CommandType Function).ScriptBlock
+$originalOwnerIdentity = (Get-Command Get-MihariBrowserOwnedProfileIdentity -CommandType Function).ScriptBlock
+$originalBrowserObservation = (Get-Command Start-MihariBrowserObservation -CommandType Function).ScriptBlock
+$liveProfilePath = $null
+$failedProfilePath = $null
 try {
     Set-Item -Path Function:\Find-MihariEdgeExecutable -Value { return $null }
     $metadata = [pscustomobject]@{
@@ -88,6 +92,55 @@ try {
     $launchMetadata = ConvertFrom-Json -InputObject $launchText -ErrorAction Stop
     Assert-MihariTest -Condition ($launchMetadata.profile -eq 'http2-inspect' -and $launchMetadata.requestedHttp2Enabled -and $launchMetadata.requestedTlsPolicy -eq 'maximum_tls_1_2' -and $launchMetadata.maximumTlsVersion -eq 'tls1.2' -and -not $launchMetadata.http2Disabled) -Message 'HTTP/2 Inspect metadata must record requested h2 and TLS 1.2 without claiming a negotiated protocol.'
 
+    $script:capturedInitialUrl = $null
+    Set-Item -Path Function:\Get-MihariBrowserOwnedProfileIdentity -Value {
+        param([string] $SessionId, [object] $Launch, [int] $TimeoutSeconds)
+        return [pscustomobject]@{
+            Success = $true
+            ProcessId = 5252
+            OwnerStartTimeUtc = '2026-09-01T01:02:03.0000000Z'
+            ErrorCode = $null
+            MatchingProcessCount = 1
+        }
+    }
+    Set-Item -Path Function:\Start-MihariBrowserObservation -Value {
+        param([object] $Session, [object] $Launch, [string] $InitialUrl)
+        $script:capturedInitialUrl = $InitialUrl
+        return [pscustomobject]@{ Status = 'attached'; Reason = $null }
+    }
+    $liveMetadata = [pscustomobject]@{
+        id = [guid]::NewGuid().ToString('N')
+        actualPort = 48888
+        outputDirectory = $temporaryDirectory
+        Writer = [pscustomobject]@{ Closed = $false }
+        Cancellation = [pscustomobject]@{}
+    }
+    $liveUrl = 'https://example.test/observed?token=browser-secret'
+    $liveLaunch = Start-MihariBrowser -SessionMetadata $liveMetadata -Url $liveUrl
+    $liveProfilePath = [string]$liveLaunch.ProfilePath
+    Assert-MihariTest -Condition ($liveLaunch.Success -and $liveLaunch.Pid -eq 5252 -and $liveLaunch.OwnerStartTimeUtc -eq '2026-09-01T01:02:03.0000000Z') -Message 'Live observation launch must use the verified browser-root process identity rather than the Edge launcher PID.'
+    Assert-MihariTest -Condition ($script:capturedEdgeStartInfo.Arguments.Contains('about:blank') -and -not $script:capturedEdgeStartInfo.Arguments.Contains('example.test')) -Message 'A live observed URL must not navigate until the owner observer is armed.'
+    Assert-MihariTest -Condition ($script:capturedInitialUrl -eq $liveUrl -and $null -eq $liveLaunch.PSObject.Properties['InitialNavigationUrl']) -Message 'The requested URL is passed only in memory to the observer and is absent from launch results.'
+    $liveRecords = @(Get-MihariBrowserProfileRecords -SessionMetadata $liveMetadata)
+    Assert-MihariTest -Condition ($liveRecords.Count -eq 1 -and [int]$liveRecords[0].processId -eq 5252 -and $liveRecords[0].ownerStartTimeUtc -eq '2026-09-01T01:02:03.0000000Z') -Message 'The profile ownership record must use the final verified browser-root identity.'
+    $liveLaunchText = [IO.File]::ReadAllText((Join-Path $temporaryDirectory 'browser-launch.json'))
+    Assert-MihariTest -Condition (-not $liveLaunchText.Contains('browser-secret') -and -not $liveLaunchText.Contains('example.test')) -Message 'The requested URL must not be written into browser launch metadata.'
+
+    Set-Item -Path Function:\Get-MihariBrowserOwnedProfileIdentity -Value {
+        param([string] $SessionId, [object] $Launch, [int] $TimeoutSeconds)
+        return [pscustomobject]@{
+            Success = $false
+            ProcessId = $null
+            OwnerStartTimeUtc = $null
+            ErrorCode = 'browser_profile_owner_unverifiable'
+            MatchingProcessCount = 1
+        }
+    }
+    $failedIdentityLaunch = Start-MihariBrowser -SessionMetadata $liveMetadata -Url $liveUrl
+    $failedProfilePath = [string]$failedIdentityLaunch.ProfilePath
+    Assert-MihariTest -Condition (-not $failedIdentityLaunch.Success -and $failedIdentityLaunch.ObservationStatus -eq 'unavailable' -and $failedIdentityLaunch.Reason -match 'requested URL was not opened') -Message 'If the profile owner cannot be verified, deferred navigation must fail clearly instead of opening an unobserved URL.'
+    Assert-MihariTest -Condition ($script:capturedEdgeStartInfo.Arguments.Contains('about:blank') -and -not $script:capturedEdgeStartInfo.Arguments.Contains('example.test')) -Message 'An unverified live profile must remain at about:blank.'
+
     $invalidH2InspectMetadata = [pscustomobject]@{
         id = [guid]::NewGuid().ToString('N')
         profile = 'http2-inspect'
@@ -130,6 +183,14 @@ try {
 finally {
     Set-Item -Path Function:\Find-MihariEdgeExecutable -Value $originalDiscovery
     Set-Item -Path Function:\Start-MihariEdgeProcess -Value $originalStartProcess
+    Set-Item -Path Function:\Get-MihariBrowserOwnedProfileIdentity -Value $originalOwnerIdentity
+    Set-Item -Path Function:\Start-MihariBrowserObservation -Value $originalBrowserObservation
+    foreach ($ownedTestProfile in @($liveProfilePath, $failedProfilePath)) {
+        if (-not [string]::IsNullOrWhiteSpace($ownedTestProfile) -and [IO.Directory]::Exists($ownedTestProfile)) {
+            Remove-Item -LiteralPath $ownedTestProfile -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
     Remove-Variable -Name capturedEdgeStartInfo -Scope Script -ErrorAction SilentlyContinue
+    Remove-Variable -Name capturedInitialUrl -Scope Script -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }
