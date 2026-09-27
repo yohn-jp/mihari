@@ -402,7 +402,6 @@ function Handle-MihariConnection {
                 if ($null -eq $response) { throw [System.IO.EndOfStreamException]::new('Upstream closed before the expected HTTP response.') }
                 if ([int]$response.StatusCode -eq 100) {
                     Write-MihariHttpHead -Stream $clientStream -Message $response
-                    $responseStarted = $true
                     $continueReceived = $true
                     $response = $null
                     break
@@ -414,12 +413,10 @@ function Handle-MihariConnection {
                 $preBodyResponses++
                 if ($preBodyResponses -gt 8) { throw [System.IO.InvalidDataException]::new('Too many informational HTTP responses.') }
                 Write-MihariHttpHead -Stream $clientStream -Message $response
-                $responseStarted = $true
                 $response = $null
             }
             if (-not $continueReceived -and -not $earlyFinal) {
                 Write-MihariProxyStatus -Stream $clientStream -StatusCode 100 -Reason 'Continue' -ConnectSuccess $true
-                $responseStarted = $true
             }
         }
         $requestTransfer = [pscustomobject]@{ Bytes = [long]0 }
@@ -434,7 +431,6 @@ function Handle-MihariConnection {
             if ($informationalCount -gt 8) { throw [System.IO.InvalidDataException]::new('Too many informational HTTP responses.') }
             if ([int]$response.StatusCode -ne 100 -or -not $expect) {
                 Write-MihariHttpHead -Stream $clientStream -Message $response
-                $responseStarted = $true
             }
             $response = Read-MihariHttpHead -Stream $upstream.Stream -Kind Response -RequestMethod $request.Method
             if ($null -eq $response) { throw [System.IO.EndOfStreamException]::new('Upstream closed after an informational HTTP response.') }
