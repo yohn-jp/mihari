@@ -6,6 +6,21 @@ $repoRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $repoRoot 'src/Observation.ps1')
 . (Join-Path $repoRoot 'src/Browser.ps1')
 
+function Read-MihariBrowserObservationTestText {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    $reader = $null
+    try {
+        $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true)
+        return $reader.ReadToEnd()
+    }
+    finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        elseif ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
 $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ('mihari-browser-observation-test-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($temporaryDirectory)
 $writer = $null
@@ -61,10 +76,10 @@ try {
     Write-MihariBrowserObservationFact -Session $session -Launch $launch -Stage 'browser.network.request' `
         -Outcome $unmeasuredFact.Outcome -ConnectionId $unmeasuredFact.ConnectionId -RequestId $unmeasuredFact.RequestId `
         -ElapsedMs $unmeasuredFact.ElapsedMs -Data $unmeasuredFact.Data -Coverage 'observed'
-    $writtenEvents = @([IO.File]::ReadAllLines($writerPath, [Text.Encoding]::UTF8) | ForEach-Object { ConvertFrom-Json -InputObject $_ })
+    $eventText = Read-MihariBrowserObservationTestText -Path $writerPath
+    $writtenEvents = @($eventText -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { ConvertFrom-Json -InputObject $_ })
     Assert-MihariTest -Condition ($writtenEvents.Count -eq 2 -and $writtenEvents[0].schemaVersion -eq 2 -and $writtenEvents[0].source -eq 'browser' -and $writtenEvents[0].sequence -eq 1) -Message 'Browser producers must write through the canonical sequenced fact writer.'
     Assert-MihariTest -Condition ($null -eq $writtenEvents[1].elapsedMs -and $null -eq $writtenEvents[1].data.PSObject.Properties['browserTimingDurationMs']) -Message 'The canonical event must preserve an unavailable browser duration as null.'
-    $eventText = [IO.File]::ReadAllText($writerPath)
     Assert-MihariTest -Condition (-not $eventText.Contains('browser-query-secret') -and -not $eventText.Contains('password') -and -not $eventText.Contains('raw-request-id')) -Message 'Persisted browser facts must exclude credentials, query values, and raw debugger identifiers.'
     Close-MihariEventWriter -Writer $writer
     $writer = $null
