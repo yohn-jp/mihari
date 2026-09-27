@@ -12,6 +12,7 @@ $sessionId = [guid]::NewGuid().ToString('N')
 $ca = $null
 $publicRoot = $null
 $leaf = $null
+$leafThumbprint = $null
 $listener = $null
 $client = $null
 $serverClient = $null
@@ -36,7 +37,9 @@ try {
     $session = [pscustomobject]@{ CA = $ca; LeafCache = $cache }
     $leaf = Get-MihariLeaf -Session $session -DestinationHost 'localhost'
     $leafLeases.Add($leaf)
+    $leafThumbprint = $leaf.Thumbprint
     Assert-MihariTest -Condition ($leaf.HasPrivateKey) -Message 'The exact-host leaf must have an in-memory private key.'
+    Assert-MihariTest -Condition ($cache['localhost'].PrivateKey.Key.IsEphemeral) -Message 'The exact-host leaf RSA key must be ephemeral.'
     Assert-MihariTest -Condition (Test-MihariTestThumbprintAbsent -Thumbprint $leaf.Thumbprint) -Message 'An exact-host leaf must not be installed in any certificate store.'
 
     $sanExtension = $null
@@ -49,7 +52,7 @@ try {
     Assert-MihariTest -Condition ($null -ne $sanExtension) -Message 'Leaf certificate must contain a subject alternative name.'
     Assert-MihariTest -Condition ($sanExtension.Format($false) -match 'localhost') -Message 'Leaf SAN must match the exact requested host.'
 
-    $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     $listener.Start()
     $port = ([System.Net.IPEndPoint] $listener.LocalEndpoint).Port
     $acceptTask = $listener.AcceptTcpClientAsync()
@@ -60,6 +63,10 @@ try {
 
     $serverTls = [System.Net.Security.SslStream]::new($serverClient.GetStream(), $false)
     $clientTls = [System.Net.Security.SslStream]::new($client.GetStream(), $false)
+    $serverTls.ReadTimeout = 10000
+    $serverTls.WriteTimeout = 10000
+    $clientTls.ReadTimeout = 10000
+    $clientTls.WriteTimeout = 10000
     $serverAuth = $serverTls.BeginAuthenticateAsServer(
         $leaf,
         $false,
@@ -68,24 +75,47 @@ try {
         $null,
         $null
     )
-    $clientTls.AuthenticateAsClient(
+    $clientAuth = $clientTls.BeginAuthenticateAsClient(
         'localhost',
         $null,
         [System.Security.Authentication.SslProtocols]::Tls12,
-        $false
+        $false,
+        $null,
+        $null
     )
-    $serverTls.EndAuthenticateAsServer($serverAuth)
+    $handshakeDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    if (-not $serverAuth.AsyncWaitHandle.WaitOne(10000)) {
+        throw 'The in-memory leaf TLS 1.2 server handshake timed out.'
+    }
+    $remainingMs = [int][Math]::Max(0, ($handshakeDeadline - [DateTime]::UtcNow).TotalMilliseconds)
+    if (-not $clientAuth.AsyncWaitHandle.WaitOne($remainingMs)) {
+        throw 'The in-memory leaf TLS 1.2 client handshake timed out.'
+    }
+    $handshakeError = $null
+    try { $serverTls.EndAuthenticateAsServer($serverAuth) }
+    catch { $handshakeError = $_.Exception }
+    try { $clientTls.EndAuthenticateAsClient($clientAuth) }
+    catch { if ($null -eq $handshakeError) { $handshakeError = $_.Exception } }
+    if ($null -ne $handshakeError) { throw $handshakeError }
     Assert-MihariTest -Condition ($clientTls.SslProtocol -eq [System.Security.Authentication.SslProtocols]::Tls12) -Message 'The in-memory leaf must complete TLS 1.2 server authentication.'
     $reply = [System.Text.Encoding]::ASCII.GetBytes('ok')
     $serverTls.Write($reply, 0, $reply.Length)
-    $readBuffer = New-Object 'byte[]' 2
+    $readBuffer = [byte[]]::new(2)
     $readCount = $clientTls.Read($readBuffer, 0, $readBuffer.Length)
     Assert-MihariTest -Condition ($readCount -eq 2 -and [System.Text.Encoding]::ASCII.GetString($readBuffer, 0, $readCount) -eq 'ok') -Message 'TLS proof server response did not arrive.'
 
     $sameLeaf = Get-MihariLeaf -Session $session -DestinationHost 'LOCALHOST.'
     $leafLeases.Add($sameLeaf)
     Assert-MihariTest -Condition ($sameLeaf.Thumbprint -eq $leaf.Thumbprint) -Message 'Normalized equivalent hosts must reuse the session leaf cache.'
-    Assert-MihariTest -Condition ((Test-MihariTestStoreCertificates -StoreName ([System.Security.Cryptography.X509Certificates.StoreName]::Root) -StoreLocation ([System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser) | Where-Object { $_.Thumbprint -eq $ca.Thumbprint }).Count -eq 1) -Message 'The public CA root must be installed once in CurrentUser Root.'
+    $rootCertificates = Test-MihariTestStoreCertificates -StoreName ([System.Security.Cryptography.X509Certificates.StoreName]::Root) -StoreLocation ([System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
+    try {
+        $matchingRoots = @($rootCertificates | Where-Object { $_.Thumbprint -eq $ca.Thumbprint })
+        Assert-MihariTest -Condition ($matchingRoots.Count -eq 1) -Message 'The public CA root must be installed once in CurrentUser Root.'
+        Assert-MihariTest -Condition (-not $matchingRoots[0].HasPrivateKey) -Message 'CurrentUser Root must contain only the public CA certificate.'
+    }
+    finally {
+        foreach ($rootCertificate in $rootCertificates) { $rootCertificate.Dispose() }
+    }
     Write-Host 'PASS certificate: ephemeral CA, public trust, exact-host in-memory leaf, TLS 1.2, bounded-cache lookup, no leaf-store residue'
 }
 finally {
@@ -125,7 +155,7 @@ finally {
     }
     if ($null -ne $leaf) {
         try {
-            if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $leaf.Thumbprint)) { $cleanupFailures.Add('A per-host leaf remains installed after cleanup.') }
+            if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $leafThumbprint)) { $cleanupFailures.Add('A per-host leaf remains installed after cleanup.') }
         }
         catch { $cleanupFailures.Add("leaf store verification: $($_.Exception.Message)") }
     }

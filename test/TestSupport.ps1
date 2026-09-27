@@ -9,7 +9,7 @@ function Assert-MihariTest {
 }
 
 function Get-MihariTestFreePort {
-    $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     try {
         $listener.Start()
         return ([System.Net.IPEndPoint] $listener.LocalEndpoint).Port
@@ -39,20 +39,58 @@ function Get-MihariTestStoreCertificates {
 
 function Test-MihariTestThumbprintAbsent {
     param([Parameter(Mandatory = $true)][string] $Thumbprint)
+    $found = $false
     foreach ($location in @(
         [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser,
         [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
     )) {
         foreach ($name in @(
+            [System.Security.Cryptography.X509Certificates.StoreName]::AddressBook,
+            [System.Security.Cryptography.X509Certificates.StoreName]::AuthRoot,
+            [System.Security.Cryptography.X509Certificates.StoreName]::CertificateAuthority,
+            [System.Security.Cryptography.X509Certificates.StoreName]::Disallowed,
             [System.Security.Cryptography.X509Certificates.StoreName]::My,
-            [System.Security.Cryptography.X509Certificates.StoreName]::Root
+            [System.Security.Cryptography.X509Certificates.StoreName]::Root,
+            [System.Security.Cryptography.X509Certificates.StoreName]::TrustedPeople,
+            [System.Security.Cryptography.X509Certificates.StoreName]::TrustedPublisher
         )) {
-            foreach ($certificate in (Get-MihariTestStoreCertificates -StoreName $name -StoreLocation $location)) {
-                if ($certificate.Thumbprint -ieq $Thumbprint) {
-                    return $false
+            $certificates = Get-MihariTestStoreCertificates -StoreName $name -StoreLocation $location
+            foreach ($certificate in $certificates) {
+                try {
+                    if ($certificate.Thumbprint -ieq $Thumbprint) { $found = $true }
                 }
+                finally { $certificate.Dispose() }
             }
         }
     }
-    return $true
+    return (-not $found)
+}
+
+function Test-MihariTestNoLeavesForIssuer {
+    param([Parameter(Mandatory = $true)][string] $IssuerSubject)
+    $found = $false
+    foreach ($location in @(
+        [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser,
+        [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
+    )) {
+        foreach ($name in @(
+            [System.Security.Cryptography.X509Certificates.StoreName]::AddressBook,
+            [System.Security.Cryptography.X509Certificates.StoreName]::AuthRoot,
+            [System.Security.Cryptography.X509Certificates.StoreName]::CertificateAuthority,
+            [System.Security.Cryptography.X509Certificates.StoreName]::Disallowed,
+            [System.Security.Cryptography.X509Certificates.StoreName]::My,
+            [System.Security.Cryptography.X509Certificates.StoreName]::Root,
+            [System.Security.Cryptography.X509Certificates.StoreName]::TrustedPeople,
+            [System.Security.Cryptography.X509Certificates.StoreName]::TrustedPublisher
+        )) {
+            $certificates = Get-MihariTestStoreCertificates -StoreName $name -StoreLocation $location
+            foreach ($certificate in $certificates) {
+                try {
+                    if ($certificate.Issuer -ceq $IssuerSubject -and $certificate.Subject -cne $IssuerSubject) { $found = $true }
+                }
+                finally { $certificate.Dispose() }
+            }
+        }
+    }
+    return (-not $found)
 }

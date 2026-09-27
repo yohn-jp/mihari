@@ -41,6 +41,10 @@ try {
     else {
         & (Join-Path $PSScriptRoot 'certificate.ps1')
     }
+    & (Join-Path $PSScriptRoot 'contracts.ps1')
+    & (Join-Path $PSScriptRoot 'browser.ps1')
+    & (Join-Path $PSScriptRoot 'stale-cleanup.ps1')
+    & (Join-Path $PSScriptRoot 'integration.ps1')
 }
 catch {
     $exitCode = 1
