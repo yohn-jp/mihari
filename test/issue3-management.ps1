@@ -240,7 +240,13 @@ try {
     Assert-MihariTest -Condition (Test-Issue3TcpEndpoint -Port $managementPort) -Message 'The published management endpoint must accept a loopback TCP connection.'
 
     $statusResponse = Invoke-Issue3ManagementRequest -Endpoint ($managementEndpoint + 'api/status') -Method GET -Body $null
-    Assert-MihariTest -Condition ($statusResponse.StatusCode -eq 200 -and $null -ne $statusResponse.Json.session) -Message 'The management status endpoint must return the running session.'
+    $statusErrorCode = $null
+    if ($null -ne $statusResponse.Json) {
+        $statusErrorCode = [string]$statusResponse.Json.errorCode
+        if ([string]::IsNullOrWhiteSpace($statusErrorCode)) { $statusErrorCode = [string]$statusResponse.Json.code }
+    }
+    if ([string]::IsNullOrWhiteSpace($statusErrorCode)) { $statusErrorCode = '[none]' }
+    Assert-MihariTest -Condition ($statusResponse.StatusCode -eq 200 -and $null -ne $statusResponse.Json.session) -Message ('The management status endpoint must return the running session (HTTP {0}, error code {1}).' -f $statusResponse.StatusCode, $statusErrorCode)
     Assert-MihariTest -Condition ($statusResponse.Json.session.sessionId -eq $metadata.sessionId -and $statusResponse.Json.session.status -eq 'running') -Message 'Management status must identify the active session and running state.'
     Assert-MihariTest -Condition ($statusResponse.Json.session.mode -eq 'Tunnel' -and -not [bool]$statusResponse.Json.session.inspectEnabled) -Message 'Initial management status must report Tunnel with Inspect disabled.'
     Assert-MihariTest -Condition ([bool]$statusResponse.Json.proxyHealth.healthy -and [bool]$statusResponse.Json.managementHealth.healthy) -Message 'Management status must report both live listeners healthy.'
