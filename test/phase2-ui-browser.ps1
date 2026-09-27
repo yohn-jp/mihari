@@ -254,7 +254,30 @@ try {
     $proposalExportStatus = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("proposal-status").textContent' -Predicate { param($value) [string]$value -match 'Export complete' -and [string]$value -match 'change-requests/' }
     Assert-MihariTest -Condition ([string]$proposalExportStatus -match 'change-requests/') 'The preview export action must return a locally written relative path.'
 
-    Write-Host 'PASS phase2-ui-browser: Traffic evidence drill-down, pause/resume, case and trial actions, mode comparison, dependency and change-request export, bilingual text, and API recovery.'
+    # Export the actual case, import it for read-only review, then confirm cleanup of only that old import.
+    $caseIdJson = ConvertTo-Json -InputObject $caseId -Compress
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("tab-evidence").click(); true')
+    $null = Wait-Issue3UiValue -Browser $browser -Expression ('Array.prototype.some.call(document.getElementById("evidence-case").options,function(option){return option.value==='+$caseIdJson+'})') -Predicate { param($value) $value -eq $true }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('var s=document.getElementById("evidence-case"); s.value='+$caseIdJson+'; s.dispatchEvent(new Event("change",{bubbles:true})); document.getElementById("preview-evidence").click(); true')
+    $previewText = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("evidence-preview").textContent' -Predicate { param($value) [string]$value -match 'redaction preview' }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("export-evidence").click(); true'
+    $evidenceExportStatus = [string](Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 45 -Expression 'document.getElementById("evidence-job-status").textContent' -Predicate { param($value) [string]$value -match '^Export complete: ' -and [string]$value -notmatch 'destination path unavailable' })
+    $bundlePath = $evidenceExportStatus.Substring('Export complete: '.Length).Trim()
+    Assert-MihariTest -Condition ([IO.File]::Exists($bundlePath)) 'Evidence export through the UI must create the selected case bundle on disk.'
+    $bundlePathJson = ConvertTo-Json -InputObject $bundlePath -Compress
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("evidence-source-path").value='+$bundlePathJson+'; document.getElementById("import-evidence").click(); true')
+    $importJobStatus = Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 45 -Expression 'document.getElementById("evidence-job-status").textContent' -Predicate { param($value) [string]$value -match 'Import complete; source hash verified: true' }
+    $offlineText = Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 25 -Expression 'document.getElementById("offline-review").textContent' -Predicate { param($value) [string]$value -match 'Read-only evidence review' -and [string]$value -match 'Source SHA-256' }
+    Assert-MihariTest -Condition ([string]$importJobStatus -match 'unknown records: 0' -and [string]$offlineText -match 'Imported records:' -and [string]$offlineText -match 'eventId:') 'The import UI must verify the bundle hash and render real offline event records as read-only.'
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("retention-before").value="2099-12-31T23:59"; document.getElementById("retention-preview").click(); true'
+    $eligibleText = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("retention-preview-items").textContent' -Predicate { param($value) [string]$value -match 'Eligible import ' }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("cleanup-imports").click(); true'
+    $cleanupConfirmation = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("retention-error").textContent' -Predicate { param($value) [string]$value -match 'Confirm deletion' }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("confirm-import-cleanup").checked=true; document.getElementById("cleanup-imports").click(); true'
+    $cleanupResult = Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 25 -Expression 'document.getElementById("retention-preview-items").textContent' -Predicate { param($value) [string]$value -notmatch 'Eligible import ' -and [string]$value -match 'No import retention records' }
+    Assert-MihariTest -Condition ([string]$eligibleText -match 'case-' -and [string]$cleanupConfirmation -match 'Confirm deletion' -and [string]$cleanupResult -match 'No import retention records') 'Retention preview must identify the imported case, refuse unconfirmed cleanup, then remove that verified import after confirmation.'
+
+    Write-Host 'PASS phase2-ui-browser: Traffic evidence drill-down, pause/resume, case and trial actions, mode comparison, dependency and change-request export, bilingual text, evidence export/import/offline review/retention, and API recovery.'
 }
 finally {
     if ($null -ne $addOperator) { Stop-MihariTestRootConfirmation -Operator $addOperator }
