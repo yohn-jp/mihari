@@ -239,7 +239,8 @@ function Read-MihariHttpMessage {
     param(
         [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
         [Parameter(Mandatory = $true)][ValidateSet('Request', 'Response')][string]$Kind,
-        [string]$RequestMethod
+        [string]$RequestMethod,
+        [switch]$HeadersOnly
     )
 
     $rawHeaderBlock = Read-MihariHttpHeaderBlock -Stream $Stream
@@ -337,21 +338,24 @@ function Read-MihariHttpMessage {
                 $connectionName -ieq 'Transfer-Encoding' -or $connectionName -ieq 'Trailer') {
                 throw [System.IO.InvalidDataException]::new('Connection cannot nominate a framing or routing header.')
             }
-            if ($Kind -eq 'Request' -and $connectionName -ieq 'Upgrade') {
+            if ($Kind -eq 'Request' -and $connectionName -ieq 'Upgrade' -and -not $HeadersOnly) {
                 throw [System.NotSupportedException]::new('HTTP protocol upgrades are outside Mihari HTTP/1.1 support.')
             }
         }
     }
-    if ($Kind -eq 'Request' -and $headers.Contains('Upgrade')) {
+    if ($Kind -eq 'Request' -and $headers.Contains('Upgrade') -and -not $HeadersOnly) {
         throw [System.NotSupportedException]::new('HTTP protocol upgrades are outside Mihari HTTP/1.1 support.')
     }
 
-    if ($Kind -eq 'Request' -and $headers.Contains('Expect')) {
+    if ($Kind -eq 'Request' -and $headers.Contains('Expect') -and -not $HeadersOnly) {
         throw [System.NotSupportedException]::new('HTTP Expect extensions, including 100-continue, are not supported.')
     }
 
-    $body = Read-MihariHttpBody -Stream $Stream -Headers $headers -Kind $Kind `
-        -StatusCode $(if ($null -eq $statusCode) { 0 } else { $statusCode }) -RequestMethod $RequestMethod
+    $body = [byte[]]@()
+    if (-not $HeadersOnly) {
+        $body = Read-MihariHttpBody -Stream $Stream -Headers $headers -Kind $Kind `
+            -StatusCode $(if ($null -eq $statusCode) { 0 } else { $statusCode }) -RequestMethod $RequestMethod
+    }
     $message = [pscustomobject]@{
         Method = $method
         Target = $target
@@ -374,6 +378,16 @@ function Read-MihariHttpMessage {
         $message.Scheme = $resolved.Scheme
     }
     return $message
+}
+
+function Read-MihariHttpHead {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
+        [Parameter(Mandatory = $true)][ValidateSet('Request', 'Response')][string]$Kind,
+        [string]$RequestMethod
+    )
+    return Read-MihariHttpMessage -Stream $Stream -Kind $Kind -RequestMethod $RequestMethod -HeadersOnly
 }
 
 function ConvertTo-MihariAuthority {
@@ -700,7 +714,9 @@ function Write-MihariHttpMessage {
         [string]$RequestTarget,
         [switch]$CloseConnection,
         [switch]$PreserveProxyAuthenticate,
-        [switch]$ForwardProxyAuthorization
+        [switch]$ForwardProxyAuthorization,
+        [switch]$HeadersOnly,
+        [switch]$UpgradeWebSocket
     )
 
     $encoding = [System.Text.Encoding]::GetEncoding(28591)
@@ -735,12 +751,13 @@ function Write-MihariHttpMessage {
     $drop['Proxy-Connection'] = $true
     if (-not $ForwardProxyAuthorization) { $drop['Proxy-Authorization'] = $true }
     if (-not $PreserveProxyAuthenticate) { $drop['Proxy-Authenticate'] = $true }
-    $drop['Upgrade'] = $true
+    if (-not $UpgradeWebSocket) { $drop['Upgrade'] = $true }
     $drop['TE'] = $true
     if ($headers.Contains('Connection')) {
         foreach ($token in ([string]$headers['Connection']).Split(',')) {
             $name = $token.Trim()
-            if ($name -match '^[!#$%&''*+\-.^_`|~0-9A-Za-z]+$') { $drop[$name] = $true }
+            if ($name -match '^[!#$%&''*+\-.^_`|~0-9A-Za-z]+$' -and
+                -not ($UpgradeWebSocket -and $name -ieq 'Upgrade')) { $drop[$name] = $true }
         }
     }
 
@@ -768,10 +785,263 @@ function Write-MihariHttpMessage {
         $connectionClose = $encoding.GetBytes("Connection: close`r`n")
         $Stream.Write($connectionClose, 0, $connectionClose.Length)
     }
+    elseif ($UpgradeWebSocket) {
+        $upgradeConnection = $encoding.GetBytes("Connection: Upgrade`r`n")
+        $Stream.Write($upgradeConnection, 0, $upgradeConnection.Length)
+    }
     $headerTerminator = $encoding.GetBytes("`r`n")
     $Stream.Write($headerTerminator, 0, $headerTerminator.Length)
 
     $body = [byte[]]@()
     if ($null -ne $Message.Body) { $body = [byte[]]$Message.Body }
-    if ($body.Length -gt 0) { $Stream.Write($body, 0, $body.Length) }
+    if (-not $HeadersOnly -and $body.Length -gt 0) { $Stream.Write($body, 0, $body.Length) }
+}
+
+function Write-MihariHttpHead {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
+        [Parameter(Mandatory = $true)]$Message,
+        [string]$RequestTarget,
+        [switch]$CloseConnection,
+        [switch]$PreserveProxyAuthenticate,
+        [switch]$ForwardProxyAuthorization,
+        [switch]$UpgradeWebSocket
+    )
+    $arguments = @{
+        Stream = $Stream; Message = $Message; HeadersOnly = $true
+        CloseConnection = $CloseConnection
+        PreserveProxyAuthenticate = $PreserveProxyAuthenticate
+        ForwardProxyAuthorization = $ForwardProxyAuthorization
+        UpgradeWebSocket = $UpgradeWebSocket
+    }
+    if ($PSBoundParameters.ContainsKey('RequestTarget')) { $arguments.RequestTarget = $RequestTarget }
+    Write-MihariHttpMessage @arguments
+}
+
+# Framing is decided before any body byte is forwarded. This keeps a malformed
+# length/coding combination from becoming a request smuggling ambiguity.
+function Get-MihariHttpBodyFraming {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Message,
+        [Parameter(Mandatory = $true)][ValidateSet('Request', 'Response')][string]$Kind,
+        [string]$RequestMethod
+    )
+    $headers = $Message.Headers
+    $transferEncoding = Get-MihariHeaderText -Headers $headers -Name 'Transfer-Encoding'
+    $contentLength = Get-MihariHeaderText -Headers $headers -Name 'Content-Length'
+    if ($transferEncoding -and $contentLength) {
+        throw [System.IO.InvalidDataException]::new('A message cannot contain both Transfer-Encoding and Content-Length.')
+    }
+    if ($Kind -eq 'Response') {
+        $status = [int]$Message.StatusCode
+        if ($RequestMethod -ieq 'HEAD' -or ($status -ge 100 -and $status -lt 200) -or
+            $status -eq 204 -or $status -eq 205 -or $status -eq 304 -or
+            ($RequestMethod -ieq 'CONNECT' -and $status -ge 200 -and $status -lt 300)) {
+            return [pscustomobject]@{ Kind = 'None'; Length = [long]0; Reusable = ($status -ne 101) }
+        }
+    }
+    if ($transferEncoding) {
+        if ($Message.Version -ne 'HTTP/1.1') {
+            throw [System.IO.InvalidDataException]::new('HTTP/1.0 cannot use chunked transfer coding.')
+        }
+        $codings = @($transferEncoding.Split(',') | ForEach-Object { $_.Trim() })
+        if ($codings.Count -ne 1 -or $codings[0] -ine 'chunked') {
+            throw [System.NotSupportedException]::new('Unsupported HTTP transfer coding.')
+        }
+        return [pscustomobject]@{ Kind = 'Chunked'; Length = $null; Reusable = $true }
+    }
+    if ($contentLength) {
+        $parts = @($contentLength.Split(',') | ForEach-Object { $_.Trim() })
+        if ($parts.Count -eq 0 -or $parts[0] -notmatch '^[0-9]+$') {
+            throw [System.IO.InvalidDataException]::new('The HTTP Content-Length field is malformed.')
+        }
+        foreach ($part in $parts) {
+            if ($part -ne $parts[0]) {
+                throw [System.IO.InvalidDataException]::new('Conflicting HTTP Content-Length values are ambiguous.')
+            }
+        }
+        $length = [long]0
+        if (-not [long]::TryParse($parts[0], [System.Globalization.NumberStyles]::None,
+            [System.Globalization.CultureInfo]::InvariantCulture, [ref]$length)) {
+            throw [System.IO.InvalidDataException]::new('The HTTP Content-Length is outside the supported range.')
+        }
+        return [pscustomobject]@{ Kind = 'ContentLength'; Length = $length; Reusable = $true }
+    }
+    if ($Kind -eq 'Request') {
+        return [pscustomobject]@{ Kind = 'None'; Length = [long]0; Reusable = $true }
+    }
+    return [pscustomobject]@{ Kind = 'CloseDelimited'; Length = $null; Reusable = $false }
+}
+
+function Copy-MihariHttpBody {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][System.IO.Stream]$Source,
+        [Parameter(Mandatory = $true)][System.IO.Stream]$Destination,
+        [Parameter(Mandatory = $true)]$Framing,
+        $Session
+    )
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    [long]$bytes = 0
+    [long]$writeMs = 0
+    $firstByteMs = $null
+    $buffer = [byte[]]::new(16384)
+    $copyExact = {
+        param([long]$Count)
+        [long]$remaining = $Count
+        while ($remaining -gt 0) {
+            if ($null -ne $Session -and (Test-MihariConnectionStopping -Session $Session)) {
+                throw [System.OperationCanceledException]::new('The Mihari session stopped during body relay.')
+            }
+            $wanted = [int][Math]::Min([long]$buffer.Length, $remaining)
+            $read = $Source.Read($buffer, 0, $wanted)
+            if ($read -le 0) {
+                throw [System.IO.EndOfStreamException]::new('The HTTP body ended before its declared framing length.')
+            }
+            if ($null -eq $firstByteMs) { $firstByteMs = $timer.ElapsedMilliseconds }
+            $beforeWrite = $timer.ElapsedMilliseconds
+            $Destination.Write($buffer, 0, $read)
+            $writeMs += ($timer.ElapsedMilliseconds - $beforeWrite)
+            $bytes += $read
+            $remaining -= $read
+        }
+    }
+    switch ([string]$Framing.Kind) {
+        'None' { break }
+        'ContentLength' { . $copyExact ([long]$Framing.Length); break }
+        'CloseDelimited' {
+            while ($true) {
+                if ($null -ne $Session -and (Test-MihariConnectionStopping -Session $Session)) {
+                    throw [System.OperationCanceledException]::new('The Mihari session stopped during body relay.')
+                }
+                $read = $Source.Read($buffer, 0, $buffer.Length)
+                if ($read -le 0) { break }
+                if ($null -eq $firstByteMs) { $firstByteMs = $timer.ElapsedMilliseconds }
+                $beforeWrite = $timer.ElapsedMilliseconds
+                $Destination.Write($buffer, 0, $read)
+                $writeMs += ($timer.ElapsedMilliseconds - $beforeWrite)
+                $bytes += $read
+            }
+            break
+        }
+        'Chunked' {
+            while ($true) {
+                $line = Read-MihariHttpLine -Stream $Source
+                if ($line.Text -notmatch '^[0-9A-Fa-f]+(?:;[^\r\n]*)?$') {
+                    throw [System.IO.InvalidDataException]::new('The HTTP chunk size line is malformed.')
+                }
+                $sizeText = ($line.Text -split ';', 2)[0]
+                [long]$size = 0
+                if (-not [long]::TryParse($sizeText, [System.Globalization.NumberStyles]::AllowHexSpecifier,
+                    [System.Globalization.CultureInfo]::InvariantCulture, [ref]$size) -or $size -lt 0) {
+                    throw [System.IO.InvalidDataException]::new('The HTTP chunk size is outside the supported range.')
+                }
+                $Destination.Write($line.Bytes, 0, $line.Bytes.Length)
+                $bytes += $line.Bytes.Length
+                if ($size -eq 0) {
+                    $trailerBytes = 0
+                    while ($true) {
+                        $trailer = Read-MihariHttpLine -Stream $Source
+                        $trailerBytes += $trailer.Bytes.Length
+                        if ($trailerBytes -gt 65536) {
+                            throw [System.IO.InvalidDataException]::new('The HTTP chunk trailers exceed the 65536 byte limit.')
+                        }
+                        if ($trailer.Text.Length -gt 0) {
+                            if ($trailer.Text -match '^[ \t]' -or
+                                $trailer.Text -notmatch '^([!#$%&''*+\-.^_`|~0-9A-Za-z]+):[ \t]*([^\x00-\x08\x0A-\x1F\x7F]*)$') {
+                                throw [System.IO.InvalidDataException]::new('An HTTP chunk trailer field is malformed.')
+                            }
+                            if ($matches[1] -match '^(?:Host|Content-Length|Transfer-Encoding|Trailer|Connection|Proxy-Connection|Keep-Alive|TE|Upgrade|Authorization|Proxy-Authorization|Cookie|Set-Cookie)$') {
+                                throw [System.IO.InvalidDataException]::new('A forbidden HTTP framing or routing trailer was received.')
+                            }
+                        }
+                        $Destination.Write($trailer.Bytes, 0, $trailer.Bytes.Length)
+                        $bytes += $trailer.Bytes.Length
+                        if ($trailer.Text.Length -eq 0) { break }
+                    }
+                    break
+                }
+                . $copyExact $size
+                $delimiter = [byte[]]::new(2)
+                $offset = 0
+                while ($offset -lt 2) {
+                    $read = $Source.Read($delimiter, $offset, 2 - $offset)
+                    if ($read -le 0) { throw [System.IO.EndOfStreamException]::new('The HTTP chunk data ended before CRLF.') }
+                    $offset += $read
+                }
+                if ($delimiter[0] -ne 13 -or $delimiter[1] -ne 10) {
+                    throw [System.IO.InvalidDataException]::new('The HTTP chunk data is not followed by CRLF.')
+                }
+                $Destination.Write($delimiter, 0, 2)
+                $bytes += 2
+            }
+            break
+        }
+        default { throw [System.IO.InvalidDataException]::new('Unknown HTTP body framing.') }
+    }
+    $timer.Stop()
+    return [pscustomobject]@{
+        Bytes = $bytes; FirstByteMs = $firstByteMs; LastByteMs = $timer.ElapsedMilliseconds
+        ForwardWriteMs = $writeMs; Framing = [string]$Framing.Kind
+    }
+}
+
+function Test-MihariHttpKeepAlive {
+    param([Parameter(Mandatory = $true)]$Message)
+    $connection = Get-MihariHeaderText -Headers $Message.Headers -Name 'Connection'
+    $tokens = @()
+    if ($connection) { $tokens = @($connection.Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() }) }
+    if ($tokens -contains 'close') { return $false }
+    if ([string]$Message.Version -eq 'HTTP/1.0') { return ($tokens -contains 'keep-alive') }
+    return $true
+}
+
+function Test-MihariWebSocketRequest {
+    param([Parameter(Mandatory = $true)]$Message)
+    $upgrade = Get-MihariHeaderText -Headers $Message.Headers -Name 'Upgrade'
+    if (-not $upgrade) { return $false }
+    $connection = Get-MihariHeaderText -Headers $Message.Headers -Name 'Connection'
+    if ($Message.Method -ine 'GET' -or $upgrade -ine 'websocket' -or
+        -not $connection -or @($connection.Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() }) -notcontains 'upgrade') {
+        throw [System.NotSupportedException]::new('Only a valid WebSocket HTTP/1.1 upgrade is supported.')
+    }
+    $key = Get-MihariHeaderText -Headers $Message.Headers -Name 'Sec-WebSocket-Key'
+    $version = Get-MihariHeaderText -Headers $Message.Headers -Name 'Sec-WebSocket-Version'
+    $keyBytes = $null
+    try { $keyBytes = [Convert]::FromBase64String($key) }
+    catch { throw [System.IO.InvalidDataException]::new('The WebSocket key is malformed.') }
+    if ($null -eq $keyBytes -or $keyBytes.Length -ne 16 -or $version -ne '13') {
+        throw [System.IO.InvalidDataException]::new('The WebSocket key or version is invalid.')
+    }
+    return $true
+}
+
+function Test-MihariWebSocketResponse {
+    param(
+        [Parameter(Mandatory = $true)]$Message,
+        $Request
+    )
+    if ([int]$Message.StatusCode -ne 101) { return $false }
+    $upgrade = Get-MihariHeaderText -Headers $Message.Headers -Name 'Upgrade'
+    $connection = Get-MihariHeaderText -Headers $Message.Headers -Name 'Connection'
+    if ($upgrade -ine 'websocket' -or -not $connection -or
+        @($connection.Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() }) -notcontains 'upgrade') {
+        throw [System.IO.InvalidDataException]::new('The upstream WebSocket upgrade response is malformed.')
+    }
+    if ($null -ne $Request) {
+        $requestKey = Get-MihariHeaderText -Headers $Request.Headers -Name 'Sec-WebSocket-Key'
+        $actualAccept = Get-MihariHeaderText -Headers $Message.Headers -Name 'Sec-WebSocket-Accept'
+        $sha1 = [System.Security.Cryptography.SHA1]::Create()
+        try {
+            $inputBytes = [System.Text.Encoding]::ASCII.GetBytes($requestKey + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+            $expectedAccept = [Convert]::ToBase64String($sha1.ComputeHash($inputBytes))
+        }
+        finally { $sha1.Dispose() }
+        if (-not [string]::Equals([string]$actualAccept, $expectedAccept, [System.StringComparison]::Ordinal)) {
+            throw [System.IO.InvalidDataException]::new('The upstream WebSocket accept value does not match the request.')
+        }
+    }
+    return $true
 }
