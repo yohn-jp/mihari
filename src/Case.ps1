@@ -675,7 +675,7 @@ function ConvertTo-MihariEnvironmentReference {
 function New-MihariTrial {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)][Alias('OutputDirectory', 'StoreRoot')][string] $CaseRoot,
+        [Parameter(Mandatory = $true)][Alias('StoreRoot')][string] $CaseRoot,
         [Parameter(Mandatory = $true)][string] $CaseId,
         [Parameter(Mandatory = $true)][string] $SessionId,
         [Parameter(Mandatory = $true)][object] $Profile,
