@@ -551,6 +551,11 @@ function Get-MihariBrowserProfileState {
                 return $base
             }
             if (-not $isRecordedOwnerPid) {
+                if ($processId -lt 1) {
+                    $base.state = 'process_identity_unverified'
+                    $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. Mihari could not verify an Edge process identity, so cleanup is unavailable.'
+                    return $base
+                }
                 # A complete non-owner command line that contains no unique Mihari profile path cannot identify this profile.
                 # The exact-profile cleanup path applies the same boundary; blank command lines above still fail closed.
                 continue

@@ -167,6 +167,15 @@ try {
     $malformedOwnerStatus = Get-MihariBrowserProfileStatus -SessionMetadata $session
     Assert-MihariBrowserProfileTest ($malformedOwnerStatus.profiles[0].state -eq 'process_identity_unverified' -and -not $malformedOwnerStatus.profiles[0].cleanupAvailable -and [System.IO.Directory]::Exists($profilePath)) 'A malformed profile argument on the recorded owner PID remains unverified and blocks cleanup.'
 
+    $unknownProcessIdentity = [pscustomobject]@{
+        ProcessId = 0
+        ExecutablePath = $executablePath
+        CommandLine = ('"{0}" --type=utility' -f $executablePath)
+    }
+    $script:profileProcessInventory = @($unrelatedEdgeChild, $unknownProcessIdentity)
+    $unknownProcessStatus = Get-MihariBrowserProfileStatus -SessionMetadata $session
+    Assert-MihariBrowserProfileTest ($unknownProcessStatus.profiles[0].state -eq 'process_identity_unverified' -and -not $unknownProcessStatus.profiles[0].cleanupAvailable -and [System.IO.Directory]::Exists($profilePath)) 'An Edge process with an unavailable identity fails closed and preserves the profile.'
+
     $ownedProfileProcess = [pscustomobject]@{
         ProcessId = [int]$launch.Pid
         ExecutablePath = $executablePath
