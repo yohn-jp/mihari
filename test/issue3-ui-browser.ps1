@@ -1,4 +1,4 @@
-param()
+param([switch] $LoadHelpersOnly)
 
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') {
@@ -198,6 +198,8 @@ function Stop-Issue3UiEdgeProfile {
         if (Test-Path -LiteralPath $ProfilePath) { throw 'The Edge test profile remained after removal.' }
     }
 }
+
+if ($LoadHelpersOnly) { return }
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('mihari-issue3-ui-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($tempRoot)
