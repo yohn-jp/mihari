@@ -243,6 +243,17 @@ function Get-MihariManagementStatusDocument {
     $managementEndpoint = $null
     if ($managementPort -gt 0) { $managementEndpoint = 'http://127.0.0.1:' + $managementPort + '/' }
     $ca = Get-MihariManagementCaState -Session $Session
+    $findingCounts = $null
+    $findingCoverage = 'unknown'
+    $findingProjectionError = $null
+    if (Get-Command Get-MihariManagementV2FindingPage -ErrorAction SilentlyContinue) {
+        try {
+            $findingPage = Get-MihariManagementV2FindingPage -Session $Session -Limit 1
+            $findingCounts = $findingPage.counts
+            $findingCoverage = [string]$findingPage.coverage
+        }
+        catch { $findingProjectionError = 'finding_projection_failed' }
+    }
 
     $sessionDocument = [pscustomobject][ordered]@{
         id = [string]$Session.Id
@@ -300,6 +311,9 @@ function Get-MihariManagementStatusDocument {
         configurationRevision = [int]$Session.ConfigurationRevision
         activeConnections = $activeConnections
         recentConnections = @($recentConnections | Select-Object -First 100)
+        findingCounts = $findingCounts
+        findingCoverage = $findingCoverage
+        findingProjectionError = $findingProjectionError
         errors = @($errors | Select-Object -First 100)
         cleanupErrors = @($cleanupErrors | Select-Object -First 100)
     }
@@ -609,6 +623,16 @@ function Invoke-MihariManagementApiRequest {
         return (New-MihariManagementJsonResponse -StatusCode 200 -Value ([pscustomobject]@{ events = @($projection.recentEvents) }))
     }
     if ($method -eq 'GET' -and $path -eq '/api/findings') {
+        if (Get-Command Get-MihariManagementV2FindingPage -ErrorAction SilentlyContinue) {
+            try {
+                $page = Get-MihariManagementV2FindingPage -Session $Session -Limit 200
+                return (New-MihariManagementJsonResponse -StatusCode 200 -Value ([pscustomobject]@{
+                    findings = @($page.items); nextCursor = $page.nextCursor; counts = $page.counts
+                    coverage = $page.coverage; freshnessUtc = $page.freshnessUtc
+                }))
+            }
+            catch { return (New-MihariManagementErrorResponse -StatusCode 503 -Code 'finding_projection_failed' -Message 'The canonical finding history could not be projected.') }
+        }
         $projection = Get-MihariManagementProjection -Session $Session -MaximumEvents 200
         return (New-MihariManagementJsonResponse -StatusCode 200 -Value ([pscustomobject]@{ findings = @($projection.findings) }))
     }

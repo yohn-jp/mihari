@@ -32,6 +32,19 @@ function Get-MihariManagementV2TrafficStore {
     finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
 }
 
+function Get-MihariManagementV2FindingPage {
+    param(
+        [Parameter(Mandatory = $true)]$Session,
+        [ValidateRange(1, 200)][int]$Limit = 100,
+        [AllowNull()][string]$Cursor
+    )
+
+    $store = Get-MihariManagementV2TrafficStore -Session $Session
+    $null = Update-MihariTrafficProjectionStore -Store $store
+    $snapshotPath = Join-Path (Join-Path ([string]$Session.OutputDirectory) 'findings-index') 'snapshot.json'
+    return (Get-MihariPersistentFindings -SessionId ([string]$Session.Id) -ProjectionStore $store -SnapshotPath $snapshotPath -Limit $Limit -Cursor $Cursor)
+}
+
 function Invoke-MihariManagementV2TrafficRequest {
     param([Parameter(Mandatory = $true)]$Session, [Parameter(Mandatory = $true)]$Request)
 
@@ -97,6 +110,28 @@ function Invoke-MihariManagementV2Request {
 
     $method = [string]$Request.Method
     $path = [string]$Request.Path
+    if ($method -eq 'GET' -and $path -eq '/api/v2/findings') {
+        try {
+            $query = Get-MihariManagementV2Query -Query ([string]$Request.Query)
+            foreach ($key in $query.Keys) { if ($key -notin @('cursor', 'limit')) { throw 'unsupported_query_field' } }
+            $limit = 100
+            if ($query.Contains('limit')) {
+                if ([string]$query.limit -notmatch '^\d{1,3}$') { throw 'invalid_limit' }
+                $limit = [int]$query.limit
+                if ($limit -lt 1 -or $limit -gt 200) { throw 'invalid_limit' }
+            }
+            $cursor = $null
+            if ($query.Contains('cursor')) { $cursor = [string]$query.cursor }
+            $page = Get-MihariManagementV2FindingPage -Session $Session -Limit $limit -Cursor $cursor
+            return (New-MihariManagementJsonResponse -StatusCode 200 -Value $page)
+        }
+        catch {
+            if ($_.Exception.Data['mihariCode'] -eq 'cursor_invalidated') {
+                return (New-MihariManagementErrorResponse -StatusCode 409 -Code 'cursor_invalidated' -Message 'Findings changed; restart paging from the first page.')
+            }
+            return (New-MihariManagementErrorResponse -StatusCode 503 -Code 'finding_projection_failed' -Message 'The canonical finding history could not be projected; coverage is incomplete.')
+        }
+    }
     $trafficResponse = Invoke-MihariManagementV2TrafficRequest -Session $Session -Request $Request
     if ($null -ne $trafficResponse) { return $trafficResponse }
     $caseResponse = Invoke-MihariManagementV2CaseRequest -Session $Session -Request $Request

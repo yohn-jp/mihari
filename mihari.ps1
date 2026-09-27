@@ -19,7 +19,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $sourceRoot = Join-Path $PSScriptRoot 'src'
-foreach ($name in @('Compatibility', 'Certificate', 'Observation', 'Http', 'Hpack', 'Http2', 'Http2Tls', 'Upstream', 'Tls', 'Environment', 'Connection', 'Listener', 'Diagnosis', 'Comparison', 'TrafficProjection', 'Case', 'Dependencies', 'Evidence', 'Cleanup', 'Session', 'BrowserObservation', 'Browser', 'ManagementProjection', 'ManagementUi', 'Management', 'ManagementV2', 'ManagementV2Cases', 'ManagementV2Evidence', 'Cli')) {
+foreach ($name in @('Compatibility', 'Certificate', 'Observation', 'Http', 'Hpack', 'Http2', 'Http2Tls', 'Upstream', 'Tls', 'Environment', 'Connection', 'Listener', 'Diagnosis', 'Comparison', 'TrafficProjection', 'FindingProjection', 'Case', 'Dependencies', 'Evidence', 'Cleanup', 'Session', 'BrowserObservation', 'Browser', 'ManagementProjection', 'ManagementUi', 'Management', 'ManagementV2', 'ManagementV2Cases', 'ManagementV2Evidence', 'Cli')) {
     . (Join-Path $sourceRoot ($name + '.ps1'))
 }
 
