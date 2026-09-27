@@ -258,6 +258,9 @@ finally { $Accepted.Dispose() }
     }
     Assert-MihariTest -Condition ($completed[1] -eq 'response-1' -and $completed[3] -eq 'response-3') -Message 'Both concurrent h2 streams must preserve their binary response bodies.'
     $clientTls.Dispose(); $clientTls = $null
+    # SslStream leaves the underlying socket open by design. Close it so the
+    # relay sees EOF before waiting for its worker to finish.
+    $client.Dispose(); $client = $null
     Complete-MihariTestNativeWorker -Worker $originWorker -Name 'Origin'
     Complete-MihariTestNativeWorker -Worker $proxyWorker -Name 'Proxy'
     Close-MihariEventWriter -Writer $writer; $writer = $null
@@ -268,7 +271,6 @@ finally { $Accepted.Dispose() }
 
     # Exercise the actual entry point, listener and CONNECT dispatch, including
     # the session CA trust/cleanup path. The origin fixture remains loopback.
-    $client.Dispose(); $client = $null
     $endOriginPowerShell = [PowerShell]::Create()
     $null = $endOriginPowerShell.AddScript($originScript).AddArgument($originListener).AddArgument($fixture.Leaf).AddArgument($sourceRoot)
     $endOriginWorker = [pscustomobject]@{ Powershell = $endOriginPowerShell; Async = $endOriginPowerShell.BeginInvoke() }
