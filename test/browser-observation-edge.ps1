@@ -80,13 +80,31 @@ function Invoke-MihariH2BrowserLaunch {
 
     $metadataPath = Join-Path $script:sessionMetadata.outputDirectory 'session.json'
     $liveMetadata = ConvertFrom-Json -InputObject (Read-MihariTestLiveText -Path $metadataPath) -ErrorAction Stop
-    $endpoint = 'http://127.0.0.1:{0}/api/browser' -f [int]$liveMetadata.actualManagementPort
+    $authority = 'http://127.0.0.1:{0}' -f [int]$liveMetadata.actualManagementPort
+    $pageRequest = [System.Net.HttpWebRequest]::Create($authority + '/')
+    $pageRequest.Proxy = $null
+    $pageRequest.Method = 'GET'
+    $pageRequest.Timeout = 20000
+    $pageResponse = $pageRequest.GetResponse()
+    try {
+        $pageReader = [System.IO.StreamReader]::new($pageResponse.GetResponseStream(), [System.Text.Encoding]::UTF8)
+        try { $pageText = $pageReader.ReadToEnd() }
+        finally { $pageReader.Dispose() }
+    }
+    finally { $pageResponse.Dispose() }
+    $controlTokenMatch = [regex]::Match($pageText, 'var CONTROL_TOKEN="(?<token>[A-Za-z0-9_-]+)";')
+    if (-not $controlTokenMatch.Success) { throw 'The active Mihari page did not provide its in-memory browser-action token.' }
+
+    $endpoint = $authority + '/api/browser'
     $request = [System.Net.HttpWebRequest]::Create($endpoint)
     $request.Proxy = $null
     $request.Method = 'POST'
+    $request.ServicePoint.Expect100Continue = $false
+    $request.KeepAlive = $false
     $request.ContentType = 'application/json; charset=utf-8'
     $request.Timeout = 20000
     $request.ReadWriteTimeout = 20000
+    $request.Headers['X-Mihari-Control-Token'] = $controlTokenMatch.Groups['token'].Value
     $body = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @{ url = $Uri } -Compress -Depth 3))
     $request.ContentLength = $body.Length
     $requestStream = $request.GetRequestStream()
