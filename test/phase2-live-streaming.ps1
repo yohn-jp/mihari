@@ -266,6 +266,10 @@ try {
     Assert-MihariTest -Condition ([Text.Encoding]::ASCII.GetString($upstreamPayload) -eq 'abc') -Message 'The accepted WebSocket mode must remain pinned after mode changes.'
 
     # Stop must cancel the owned long-lived relay and preserve its fact.
+    # The original startup snapshot predates the Inspect action and has no CA
+    # thumbprint. Stop-MihariTestSession needs the current identity to confirm
+    # removal of the root installed by that action.
+    $metadata = ConvertFrom-Json -InputObject (Read-MihariTestLiveText -Path (Join-Path ([string]$metadata.outputDirectory) 'session.json')) -ErrorAction Stop
     $final = Stop-MihariTestSession -Child $child -Metadata $metadata
     $events = @([IO.File]::ReadAllLines([string]$final.eventsPath) | ForEach-Object { ConvertFrom-Json -InputObject $_ -ErrorAction Stop })
     Assert-MihariTest -Condition (@($events | Where-Object { $_.stage -eq 'websocket.relay' -and $_.outcome -eq 'cancelled' }).Count -ge 1) -Message 'Stop must record cancellation of the owned WebSocket relay.'
@@ -282,7 +286,10 @@ finally {
     if ($null -ne $child) {
         if (-not $child.Process.HasExited) {
             try {
-                if ($null -ne $metadata) { $null = Stop-MihariTestSession -Child $child -Metadata $metadata }
+                if ($null -ne $metadata) {
+                    $metadata = ConvertFrom-Json -InputObject (Read-MihariTestLiveText -Path (Join-Path ([string]$metadata.outputDirectory) 'session.json')) -ErrorAction Stop
+                    $null = Stop-MihariTestSession -Child $child -Metadata $metadata
+                }
                 else { $child.Process.Kill(); $child.Process.WaitForExit(5000) }
             }
             catch {
