@@ -97,7 +97,7 @@ try {
     $case = New-MihariCase -CaseRoot $temporaryRoot -Title 'Flow for https://intranet.corp/private?secret=CASE_QUERY_SECRET' -SessionReferences @($sessionId)
     $null = Add-MihariCaseNote -CaseRoot $temporaryRoot -CaseId $case.caseId -Text 'Bearer CASE_NOTE_TOKEN_SECRET; see C:\Users\alice\private.txt'
     $trial = New-MihariTrial -CaseRoot $temporaryRoot -CaseId $case.caseId -SessionId $sessionId -Profile ([pscustomobject]@{ mode = 'Inspect'; protocol = 'HTTP/1.1'; debuggerAddress = 'PROFILE_DEBUG_SECRET' }) -ConfigurationRevision '1'
-    $null = Add-MihariMarker -CaseRoot $temporaryRoot -TrialId $trial.trialId -Boundary 'point' -Label 'Upload started' -Note 'ANNOTATION_SECRET'
+    $null = Add-MihariMarker -CaseRoot $temporaryRoot -TrialId $trial.trialId -Boundary 'point' -Label 'Upload started' -Note 'Bearer ANNOTATION_AUTH_SECRET https://intranet.corp/private/path?token=ANNOTATION_QUERY_SECRET'
 
     $sourceDirectory = Join-Path $repoRoot 'src'
     $escapedSourceDirectory = $sourceDirectory.Replace("'", "''")
@@ -110,7 +110,7 @@ try {
     $session = [pscustomobject]@{
         Id = $sessionId; Mode = 'Inspect'; Profile = 'compatibility'; HttpConnectionPolicy = 'reuse'; ConfigurationRevision = 1
         OutputRoot = $temporaryRoot; OutputDirectory = $sessionDirectory; EventsPath = $eventsPath; StateLock = (New-Object System.Object)
-        ManagementWorkerPool = $pool; ManagementListener = (New-Object System.Object); SourceRoot = $repoRoot
+        ManagementWorkerPool = $pool; ManagementListener = (New-Object System.Object); SourceRoot = $repoRoot; ManagementSourceRoot = $sourceDirectory
         UpstreamProxy = $null; PlatformProxySnapshot = $null; MaxWorkers = 4; CA = $null; PublicCARoot = $null
     }
 
@@ -131,7 +131,7 @@ try {
     $exportJob = Wait-MihariManagementV2EvidenceTestJob -Session $session -JobId ([string]$accepted.jobId)
     Assert-MihariTest -Condition ($exportJob.state -eq 'completed' -and [System.IO.File]::Exists([string]$exportJob.result.destinationPath)) -Message 'The export job must complete into an output-root bundle.'
     $bundleText = Get-MihariManagementV2EvidenceTestZipText -Path ([string]$exportJob.result.destinationPath)
-    foreach ($secret in @('CASE_QUERY_SECRET', 'CASE_NOTE_TOKEN_SECRET', 'EVENT_QUERY_SECRET', 'EVENT_AUTH_SECRET', 'EVENT_COOKIE_SECRET', 'EVENT_BODY_SECRET', 'PROFILE_DEBUG_SECRET', 'ANNOTATION_SECRET', 'intranet.corp', 'classified/customer-77')) {
+    foreach ($secret in @('CASE_QUERY_SECRET', 'CASE_NOTE_TOKEN_SECRET', 'EVENT_QUERY_SECRET', 'EVENT_AUTH_SECRET', 'EVENT_COOKIE_SECRET', 'EVENT_BODY_SECRET', 'PROFILE_DEBUG_SECRET', 'ANNOTATION_AUTH_SECRET', 'ANNOTATION_QUERY_SECRET', 'intranet.corp', 'classified/customer-77')) {
         Assert-MihariTest -Condition (-not $bundleText.Contains($secret)) -Message ('The management export must remove secret sentinel {0}.' -f $secret)
     }
     Assert-MihariTest -Condition ($null -eq $session.CA -and $null -eq $session.PublicCARoot) -Message 'Evidence preview and export must not create or trust a CA.'
