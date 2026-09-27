@@ -11,12 +11,14 @@ permissions:
 
 jobs:
   powershell-tests:
-    name: Tests (${{ matrix.label }})
+    name: Tests (${{ matrix.label }}, ${{ matrix.suite }})
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 8
     strategy:
       fail-fast: false
       matrix:
+        shell: [powershell, pwsh]
+        suite: [certificate, contracts, browser, stale-cleanup, integration]
         include:
           - shell: powershell
             label: Windows PowerShell 5.1
@@ -40,39 +42,19 @@ jobs:
             throw "Expected ${{ matrix.label }}; found PowerShell $actual"
           }
 
-      - name: Certificate capability and TLS 1.2 proof
+      - name: Run ${{ matrix.suite }} suite
         env:
           MIHARI_TEST_ARTIFACT_DIR: ${{ runner.temp }}/mihari-test-artifacts
         run: |
           if (-not (Test-Path -LiteralPath './test/run.ps1' -PathType Leaf)) {
             throw 'Repository test entry point test/run.ps1 is missing.'
           }
-          & ./test/run.ps1 -Suite certificate
-
-      - name: HTTP and diagnosis contracts
-        env:
-          MIHARI_TEST_ARTIFACT_DIR: ${{ runner.temp }}/mihari-test-artifacts
-        run: '& ./test/run.ps1 -Suite contracts'
-
-      - name: Edge discovery
-        env:
-          MIHARI_TEST_ARTIFACT_DIR: ${{ runner.temp }}/mihari-test-artifacts
-        run: '& ./test/run.ps1 -Suite browser'
-
-      - name: Stale root cleanup
-        env:
-          MIHARI_TEST_ARTIFACT_DIR: ${{ runner.temp }}/mihari-test-artifacts
-        run: '& ./test/run.ps1 -Suite stale-cleanup'
-
-      - name: Local end-to-end proxy runtime
-        env:
-          MIHARI_TEST_ARTIFACT_DIR: ${{ runner.temp }}/mihari-test-artifacts
-        run: '& ./test/run.ps1 -Suite integration'
+          & ./test/run.ps1 -Suite '${{ matrix.suite }}'
 
       - name: Upload test artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-artifacts-${{ matrix.shell }}
+          name: test-artifacts-${{ matrix.shell }}-${{ matrix.suite }}
           path: ${{ runner.temp }}/mihari-test-artifacts/
           if-no-files-found: ignore
