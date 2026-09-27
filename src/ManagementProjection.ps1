@@ -67,7 +67,7 @@ function ConvertTo-MihariManagementEvent {
         'certificateChainState', 'hostnameState', 'validityState',
         'ekuState', 'revocationState', 'validationPolicy', 'peerIdentityRole',
         'clientCertificateState', 'protocol', 'initiatorType', 'browserTargetId',
-        'browserRequestId', 'browserConnectionId', 'browserError',
+        'browserRequestId', 'browserConnectionId', 'browserFrameId', 'browserError',
         'browserTimingOrigin', 'requestFraming', 'responseFraming',
         'connectionPolicy', 'framing'
     )
@@ -83,13 +83,13 @@ function ConvertTo-MihariManagementEvent {
     $path = ConvertTo-MihariPath -Value (Get-MihariMemberValue -InputObject $rawData -Names @('path'))
     if ($null -ne $path) { $projectedData['path'] = $path }
 
-    foreach ($name in @('port', 'proxyPort', 'statusCode', 'proxyStatus', 'bytesClientToUpstream', 'bytesUpstreamToClient', 'tlsCipherStrength', 'browserRedirectIndex', 'browserTimingStartMs', 'browserTimingDurationMs', 'requestBytes', 'responseBytes', 'bytes', 'firstByteMs', 'lastByteMs', 'forwardWriteMs', 'workerOccupancy', 'maxWorkers')) {
+    foreach ($name in @('port', 'proxyPort', 'statusCode', 'proxyStatus', 'bytesClientToUpstream', 'bytesUpstreamToClient', 'tlsCipherStrength', 'browserRedirectIndex', 'browserTimingStartMs', 'browserTimingDurationMs', 'requestBytes', 'responseBytes', 'bytes', 'firstByteMs', 'lastByteMs', 'forwardWriteMs', 'workerOccupancy', 'maxWorkers', 'workingSetBytes', 'cpuTotalMs', 'evidenceBytes', 'writerLagMs')) {
         $number = ConvertTo-MihariManagementNumber -Value (Get-MihariMemberValue -InputObject $rawData -Names @($name))
         if ($null -ne $number -and $number -ge 0 -and $number -le [decimal]([long]::MaxValue)) {
             $projectedData[$name] = [long][Math]::Truncate($number)
         }
     }
-    foreach ($name in @('certificateAccepted', 'caTrusted', 'fromDiskCache', 'fromServiceWorker', 'reused', 'queueSaturated')) {
+    foreach ($name in @('certificateAccepted', 'caTrusted', 'fromDiskCache', 'fromServiceWorker', 'reused', 'queueSaturated', 'pendingConnections')) {
         $value = Get-MihariMemberValue -InputObject $rawData -Names @($name)
         if ($value -is [bool]) { $projectedData[$name] = $value }
     }

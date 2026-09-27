@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('all', 'certificate', 'contracts', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference')]
+    [ValidateSet('all', 'certificate', 'contracts', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference', 'phase2-transport')]
     [string] $Suite = 'all'
 )
 
@@ -39,7 +39,7 @@ try {
     Write-Host ("PASS parse: {0} PowerShell files" -f $sourceFiles.Count)
 
     if ($Suite -eq 'all') {
-        $selectedSuites = @('certificate', 'contracts', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference')
+        $selectedSuites = @('certificate', 'contracts', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference', 'phase2-transport')
     }
     else {
         $selectedSuites = @($Suite)
@@ -62,6 +62,10 @@ try {
             'issue3-ui-browser' { & (Join-Path $PSScriptRoot 'issue3-ui-browser.ps1') }
             'issue3-connection' { & (Join-Path $PSScriptRoot 'issue3-connection.ps1') }
             'upstream-self-reference' { & (Join-Path $PSScriptRoot 'upstream-self-reference.ps1') }
+            'phase2-transport' {
+                & (Join-Path $PSScriptRoot 'phase2-streaming.ps1')
+                & (Join-Path $PSScriptRoot 'phase2-tls-environment.ps1')
+            }
         }
     }
 }

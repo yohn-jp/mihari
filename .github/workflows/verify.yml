@@ -51,7 +51,7 @@ jobs:
       fail-fast: false
       matrix:
         shell: [powershell, pwsh]
-        suite: [certificate, contracts, browser, stale-cleanup, runtime-basic, integration, issue3-management, issue3-edge-smoke, issue3-ui-browser, issue3-connection, upstream-self-reference]
+        suite: [certificate, contracts, browser, stale-cleanup, runtime-basic, integration, issue3-management, issue3-edge-smoke, issue3-ui-browser, issue3-connection, upstream-self-reference, phase2-transport]
         include:
           - shell: powershell
             label: Windows PowerShell 5.1

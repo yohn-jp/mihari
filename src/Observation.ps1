@@ -29,6 +29,8 @@ function New-MihariEventWriter {
         SyncRoot = (New-Object System.Object)
         Closed = $false
         Sequence = [long]0
+        LastWriteLagMs = [long]0
+        MaxWriteLagMs = [long]0
     }
     return $writer
 }
@@ -72,7 +74,7 @@ function Write-MihariEvent {
         [string] $Outcome,
 
         [Parameter(Mandatory = $true)]
-        [double] $ElapsedMs,
+        [AllowNull()][Nullable[double]] $ElapsedMs,
 
         [AllowNull()]
         [object] $Data,
@@ -100,7 +102,10 @@ function Write-MihariEvent {
 
     if (-not $PSBoundParameters.ContainsKey('Mode')) { $Mode = [string]$Session.Mode }
     $safeData = ConvertTo-MihariSafeEventData -Data $Data
-    $elapsed = [long][Math]::Max(0, [Math]::Round($ElapsedMs, 0, [MidpointRounding]::AwayFromZero))
+    $elapsed = $null
+    if ($null -ne $ElapsedMs) {
+        $elapsed = [long][Math]::Max(0, [Math]::Round([double]$ElapsedMs, 0, [MidpointRounding]::AwayFromZero))
+    }
     $requestIdValue = $RequestId
     if ([string]::IsNullOrWhiteSpace($requestIdValue)) { $requestIdValue = $null }
     $event = [ordered]@{
@@ -131,8 +136,12 @@ function Write-MihariEvent {
     if ($PSBoundParameters.ContainsKey('ConfigurationRevision')) { $event['configurationRevision'] = $ConfigurationRevision }
     if ($PSBoundParameters.ContainsKey('MonotonicTicks')) { $event['monotonicTicks'] = $MonotonicTicks }
     $writer = $Session.Writer
+    $writeWait = [System.Diagnostics.Stopwatch]::StartNew()
     [System.Threading.Monitor]::Enter($writer.SyncRoot)
     try {
+        $writeWait.Stop()
+        $writer.LastWriteLagMs = [long]$writeWait.ElapsedMilliseconds
+        if ($writer.LastWriteLagMs -gt $writer.MaxWriteLagMs) { $writer.MaxWriteLagMs = $writer.LastWriteLagMs }
         if ($writer.Closed) {
             throw 'The Mihari event writer is closed.'
         }
@@ -165,7 +174,7 @@ function ConvertTo-MihariSafeEventData {
         'certificateChainState', 'hostnameState', 'validityState', 'ekuState',
         'revocationState', 'validationPolicy', 'peerIdentityRole',
         'clientCertificateState', 'protocol', 'initiatorType', 'browserTargetId',
-        'browserRequestId', 'browserConnectionId', 'browserError',
+        'browserRequestId', 'browserConnectionId', 'browserFrameId', 'browserError',
         'browserTimingOrigin', 'requestFraming', 'responseFraming',
         'connectionPolicy', 'framing'
     )
@@ -174,9 +183,10 @@ function ConvertTo-MihariSafeEventData {
         'bytesUpstreamToClient', 'tlsCipherStrength', 'browserRedirectIndex',
         'browserTimingStartMs', 'browserTimingDurationMs', 'requestBytes',
         'responseBytes', 'bytes', 'firstByteMs', 'lastByteMs',
-        'forwardWriteMs', 'workerOccupancy', 'maxWorkers'
+        'forwardWriteMs', 'workerOccupancy', 'maxWorkers', 'workingSetBytes',
+        'cpuTotalMs', 'evidenceBytes', 'writerLagMs'
     )
-    $booleanFields = @('certificateAccepted', 'caTrusted', 'fromDiskCache', 'fromServiceWorker', 'reused', 'queueSaturated')
+    $booleanFields = @('certificateAccepted', 'caTrusted', 'fromDiskCache', 'fromServiceWorker', 'reused', 'queueSaturated', 'pendingConnections')
     $allowed = @{}
     foreach ($name in $stringFields) { $allowed[$name] = 'string' }
     foreach ($name in $integerFields) { $allowed[$name] = 'integer' }
