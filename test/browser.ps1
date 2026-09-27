@@ -46,6 +46,7 @@ try {
     Assert-MihariTest -Condition ($script:capturedEdgeStartInfo.FileName -eq 'C:\MihariTest\msedge.exe') -Message 'Browser launch must start the discovered Edge executable.'
     Assert-MihariTest -Condition ($script:capturedEdgeStartInfo.Arguments.Contains('--proxy-server=http://127.0.0.1:44444')) -Message 'Edge must receive the active Mihari proxy for HTTP and HTTPS.'
     Assert-MihariTest -Condition ($script:capturedEdgeStartInfo.Arguments.Contains('--proxy-bypass-list=<-loopback>')) -Message 'Edge must not implicitly bypass Mihari for loopback fixture targets.'
+    Assert-MihariTest -Condition ($script:capturedEdgeStartInfo.Arguments.Contains('--remote-debugging-port=0')) -Message 'Only the unique Mihari-owned diagnostic profile may request an ephemeral local DevTools endpoint.'
     Assert-MihariTest -Condition ($script:capturedEdgeStartInfo.Arguments.Contains('--disable-quic')) -Message 'Edge must not use unsupported QUIC/HTTP3 transport.'
     Assert-MihariTest -Condition ($script:capturedEdgeStartInfo.Arguments.Contains('--disable-http2')) -Message 'Edge must use the supported HTTP/1.1 protocol baseline.'
     Assert-MihariTest -Condition ($script:capturedEdgeStartInfo.Arguments.Contains('--force-webrtc-ip-handling-policy=disable_non_proxied_udp')) -Message 'Edge must not open an unproxied WebRTC UDP path.'
@@ -55,7 +56,33 @@ try {
     $launchText = [IO.File]::ReadAllText($launchPath)
     Assert-MihariTest -Condition (-not $launchText.Contains('browser-secret')) -Message 'Successful launch metadata must not retain URL query values.'
     $launchMetadata = ConvertFrom-Json -InputObject $launchText -ErrorAction Stop
-    Assert-MihariTest -Condition ($launchMetadata.proxiedSchemes.Count -eq 2 -and $launchMetadata.loopbackBypassDisabled -and $launchMetadata.quicDisabled -and $launchMetadata.http2Disabled -and $launchMetadata.nonProxiedWebRtcUdpDisabled -and $launchMetadata.maximumTlsVersion -eq 'tls1.2') -Message 'Session metadata must report the enforced Edge transport policy.'
+    Assert-MihariTest -Condition ($launchMetadata.proxiedSchemes.Count -eq 2 -and $launchMetadata.loopbackBypassDisabled -and $launchMetadata.quicDisabled -and $launchMetadata.http2Disabled -and $launchMetadata.nonProxiedWebRtcUdpDisabled -and $launchMetadata.maximumTlsVersion -eq 'tls1.2') -Message 'Compatibility metadata must retain the requested Edge transport policy.'
+    Assert-MihariTest -Condition ($launchMetadata.profile -eq 'compatibility' -and $launchMetadata.requestedHttp2Disabled -and $launchMetadata.observationStatus -eq 'launched_but_unverified' -and $launchMetadata.proxyBehaviorVerification -eq 'launched_but_unverified') -Message 'Requested browser switches must remain separate from observed behavior.'
+
+    $h2Metadata = [pscustomobject]@{
+        id = [guid]::NewGuid().ToString('N')
+        profile = 'http2-observe'
+        mode = 'Tunnel'
+        actualPort = 45555
+        outputDirectory = $temporaryDirectory
+    }
+    $h2Launch = Start-MihariBrowser -SessionMetadata $h2Metadata -Url 'https://example.test/h2?token=browser-secret'
+    Assert-MihariTest -Condition ($h2Launch.Success -and $h2Launch.DiagnosticProfile -eq 'http2-observe' -and $h2Launch.RequestedHttpVersion -eq 'allow_h2') -Message 'The HTTP/2 diagnostic profile must be retained in the launch result.'
+    Assert-MihariTest -Condition ($script:capturedEdgeStartInfo.Arguments.Contains('--disable-quic')) -Message 'The HTTP/2 diagnostic profile must keep QUIC disabled.'
+    Assert-MihariTest -Condition (-not $script:capturedEdgeStartInfo.Arguments.Contains('--disable-http2') -and -not $script:capturedEdgeStartInfo.Arguments.Contains('--ssl-version-max=tls1.2')) -Message 'The HTTP/2 diagnostic profile must allow browser-negotiated HTTP/2 and preserve the requested system TLS policy.'
+    $launchText = [IO.File]::ReadAllText($launchPath)
+    $launchMetadata = ConvertFrom-Json -InputObject $launchText -ErrorAction Stop
+    Assert-MihariTest -Condition ($launchMetadata.profile -eq 'http2-observe' -and $launchMetadata.requestedHttp2Enabled -and $launchMetadata.requestedTlsPolicy -eq 'system_default' -and $null -eq $launchMetadata.maximumTlsVersion -and -not $launchMetadata.http2Disabled) -Message 'The HTTP/2 profile must persist requested policy without claiming an observed protocol.'
+
+    $invalidH2Metadata = [pscustomobject]@{
+        id = [guid]::NewGuid().ToString('N')
+        profile = 'http2-observe'
+        mode = 'Inspect'
+        actualPort = 45555
+        outputDirectory = $temporaryDirectory
+    }
+    $invalidH2Launch = Start-MihariBrowser -SessionMetadata $invalidH2Metadata
+    Assert-MihariTest -Condition (-not $invalidH2Launch.Success -and $invalidH2Launch.Reason -match 'requires Tunnel mode') -Message 'The HTTP/2 diagnostic profile must reject an incompatible Inspect session.'
 
     $rawReasonResult = New-MihariBrowserLaunchResult -Success $false -Path $null -ProcessId $null `
         -ProfilePath $null -ProxyEndpoint $null `

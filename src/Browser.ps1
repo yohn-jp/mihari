@@ -123,16 +123,29 @@ function New-MihariBrowserLaunchResult {
         [Nullable[int]] $ProcessId,
         [string] $ProfilePath,
         [string] $ProxyEndpoint,
-        [string] $Reason
+        [string] $Reason,
+        [string] $DiagnosticProfile = 'compatibility',
+        [int] $ProfileVersion = 1,
+        [string] $RequestedHttpVersion = 'http/1.1',
+        [string] $RequestedTlsPolicy = 'maximum_tls_1_2',
+        [string] $ObservationStatus = 'launched_but_unverified',
+        [string] $OwnerStartTimeUtc
     )
 
     return [pscustomobject]@{
-        Success      = $Success
-        Path         = $Path
-        Pid          = $ProcessId
-        ProfilePath  = $ProfilePath
-        ProxyEndpoint = $ProxyEndpoint
-        Reason       = $Reason
+        Success               = $Success
+        Path                  = $Path
+        Pid                   = $ProcessId
+        ProfilePath           = $ProfilePath
+        ProxyEndpoint         = $ProxyEndpoint
+        Reason                = $Reason
+        DiagnosticProfile     = $DiagnosticProfile
+        ProfileVersion        = $ProfileVersion
+        RequestedHttpVersion  = $RequestedHttpVersion
+        RequestedTlsPolicy    = $RequestedTlsPolicy
+        ObservationStatus     = $ObservationStatus
+        OwnerStartTimeUtc     = $OwnerStartTimeUtc
+        ProfileWarning        = $(if (-not [string]::IsNullOrWhiteSpace($ProfilePath)) { 'The diagnostic Edge profile can retain browser-managed cookies and history. Close Edge before cleanup.' } else { $null })
     }
 }
 
@@ -146,7 +159,11 @@ function Get-MihariEdgeLaunchArguments {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [string] $Url
+        [string] $Url,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('compatibility', 'http2-observe')]
+        [string] $DiagnosticProfile = 'compatibility'
     )
 
     # Edge is Chromium based. These switches keep ordinary browser HTTP(S)
@@ -155,13 +172,16 @@ function Get-MihariEdgeLaunchArguments {
     # supported by Mihari, and WebRTC must not create an unproxied UDP path.
     $arguments = @(
         ('--user-data-dir={0}' -f $ProfilePath),
+        '--remote-debugging-port=0',
         ('--proxy-server={0}' -f $ProxyEndpoint),
         '--proxy-bypass-list=<-loopback>',
         '--disable-quic',
-        '--disable-http2',
-        '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
-        '--ssl-version-max=tls1.2'
+        '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'
     )
+    if ($DiagnosticProfile -eq 'compatibility') {
+        $arguments += '--disable-http2'
+        $arguments += '--ssl-version-max=tls1.2'
+    }
     if (-not [string]::IsNullOrWhiteSpace($Url)) {
         $arguments += $Url
     }
@@ -229,8 +249,9 @@ function Complete-MihariBrowserLaunch {
     # Preserve only the safe launch configuration. The requested URL and raw
     # command-line arguments may contain credentials or query values.
     $browserLaunchSucceeded = [bool]$Result.Success
+    $compatibilityProfile = ([string]$Result.DiagnosticProfile -eq 'compatibility')
     $launchMetadata = [pscustomobject]@{
-        schemaVersion = 1
+        schemaVersion = 2
         timestamp = [DateTime]::UtcNow.ToString('o')
         executablePath = $Result.Path
         profilePath = $Result.ProfilePath
@@ -238,9 +259,21 @@ function Complete-MihariBrowserLaunch {
         proxiedSchemes = $(if ($browserLaunchSucceeded) { @('http', 'https') } else { @() })
         loopbackBypassDisabled = $browserLaunchSucceeded
         quicDisabled = $browserLaunchSucceeded
-        http2Disabled = $browserLaunchSucceeded
+        http2Disabled = ($browserLaunchSucceeded -and $compatibilityProfile)
         nonProxiedWebRtcUdpDisabled = $browserLaunchSucceeded
-        maximumTlsVersion = $(if ($browserLaunchSucceeded) { 'tls1.2' } else { $null })
+        maximumTlsVersion = $(if ($browserLaunchSucceeded -and $compatibilityProfile) { 'tls1.2' } else { $null })
+        profile = [string]$Result.DiagnosticProfile
+        profileVersion = [int]$Result.ProfileVersion
+        requestedProxyServer = $browserLaunchSucceeded
+        requestedLoopbackProxying = $browserLaunchSucceeded
+        requestedQuicDisabled = $browserLaunchSucceeded
+        requestedHttp2Disabled = ($browserLaunchSucceeded -and $compatibilityProfile)
+        requestedHttp2Enabled = ($browserLaunchSucceeded -and -not $compatibilityProfile)
+        requestedHttpVersion = [string]$Result.RequestedHttpVersion
+        requestedTlsPolicy = [string]$Result.RequestedTlsPolicy
+        observationStatus = [string]$Result.ObservationStatus
+        proxyBehaviorVerification = 'launched_but_unverified'
+        profileWarning = $Result.ProfileWarning
         processId = $Result.Pid
         success = $Result.Success
         reason = $Result.Reason
@@ -266,6 +299,80 @@ function Complete-MihariBrowserLaunch {
     return $Result
 }
 
+function Get-MihariBrowserProfileSettings {
+    param([Parameter(Mandatory = $true)][object] $SessionMetadata)
+
+    $profileName = [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'profile')
+    if ([string]::IsNullOrWhiteSpace($profileName)) {
+        $profileName = [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'Profile')
+    }
+    if ([string]::IsNullOrWhiteSpace($profileName)) { $profileName = 'compatibility' }
+    if ($profileName -notin @('compatibility', 'http2-observe')) {
+        throw ('Unsupported Mihari diagnostic browser profile: {0}' -f $profileName)
+    }
+    if ($profileName -eq 'http2-observe') {
+        $modeName = [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'mode')
+        if ([string]::IsNullOrWhiteSpace($modeName)) {
+            $modeName = [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'Mode')
+        }
+        if (-not [string]::IsNullOrWhiteSpace($modeName) -and $modeName -ne 'Tunnel') {
+            throw 'The http2-observe diagnostic browser profile requires Tunnel mode.'
+        }
+    }
+
+    $profileVersion = 1
+    $versionValue = Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'profileVersion'
+    if ($null -eq $versionValue) { $versionValue = Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'ProfileVersion' }
+    if ($null -ne $versionValue -and -not [int]::TryParse([string]$versionValue, [ref]$profileVersion)) {
+        throw 'The Mihari diagnostic browser profile version is invalid.'
+    }
+    if ($profileVersion -lt 1) { throw 'The Mihari diagnostic browser profile version must be positive.' }
+
+    if ($profileName -eq 'http2-observe') {
+        return [pscustomobject]@{
+            Name = $profileName
+            Version = $profileVersion
+            RequestedHttpVersion = 'allow_h2'
+            RequestedTlsPolicy = 'system_default'
+        }
+    }
+    return [pscustomobject]@{
+        Name = $profileName
+        Version = $profileVersion
+        RequestedHttpVersion = 'http/1.1'
+        RequestedTlsPolicy = 'maximum_tls_1_2'
+    }
+}
+
+function Get-MihariBrowserProcessStartTimeUtc {
+    param(
+        [Parameter(Mandatory = $true)][int] $ProcessId,
+        [Parameter(Mandatory = $true)][string] $ExpectedExecutable
+    )
+
+    $process = $null
+    try {
+        $process = [System.Diagnostics.Process]::GetProcessById($ProcessId)
+        if ($process.HasExited) { return $null }
+        $actualPath = [string]$process.MainModule.FileName
+        if (-not [string]::Equals(
+                [System.IO.Path]::GetFullPath($actualPath),
+                [System.IO.Path]::GetFullPath($ExpectedExecutable),
+                [StringComparison]::OrdinalIgnoreCase)) {
+            return $null
+        }
+        return $process.StartTime.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    catch {
+        # A PID without readable executable and start-time identity is not
+        # sufficient authority for a DevTools attachment.
+        return $null
+    }
+    finally {
+        if ($null -ne $process) { $process.Dispose() }
+    }
+}
+
 function Start-MihariBrowser {
     [CmdletBinding()]
     param(
@@ -277,6 +384,16 @@ function Start-MihariBrowser {
         [string] $Url
     )
 
+    try {
+        $profile = Get-MihariBrowserProfileSettings -SessionMetadata $SessionMetadata
+    }
+    catch {
+        $result = New-MihariBrowserLaunchResult -Success $false -Path $null -ProcessId $null `
+            -ProfilePath $null -ProxyEndpoint $null -Reason $_.Exception.Message
+        return (Complete-MihariBrowserLaunch -SessionMetadata $SessionMetadata -Result $result `
+            -UrlProvided (-not [string]::IsNullOrWhiteSpace($Url)))
+    }
+
     $portValue = Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'actualPort'
     if ($null -eq $portValue -or [string]::IsNullOrWhiteSpace([string]$portValue)) {
         $portValue = Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'port'
@@ -286,7 +403,9 @@ function Start-MihariBrowser {
     if (-not [int]::TryParse([string]$portValue, [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
         $result = New-MihariBrowserLaunchResult -Success $false -Path $null -ProcessId $null `
             -ProfilePath $null -ProxyEndpoint $null `
-            -Reason 'Session metadata does not contain a valid loopback listener port; configure a browser with the active Mihari endpoint.'
+            -Reason 'Session metadata does not contain a valid loopback listener port; configure a browser with the active Mihari endpoint.' `
+            -DiagnosticProfile $profile.Name -ProfileVersion $profile.Version `
+            -RequestedHttpVersion $profile.RequestedHttpVersion -RequestedTlsPolicy $profile.RequestedTlsPolicy
         return (Complete-MihariBrowserLaunch -SessionMetadata $SessionMetadata -Result $result `
             -UrlProvided (-not [string]::IsNullOrWhiteSpace($Url)))
     }
@@ -296,7 +415,9 @@ function Start-MihariBrowser {
     if ([string]::IsNullOrWhiteSpace([string]$edgePath)) {
         $result = New-MihariBrowserLaunchResult -Success $false -Path $null -ProcessId $null `
             -ProfilePath $null -ProxyEndpoint $proxyEndpoint `
-            -Reason ('Microsoft Edge was not found. Configure a browser manually to use the Mihari proxy at {0}.' -f $proxyEndpoint)
+            -Reason ('Microsoft Edge was not found. Configure a browser manually to use the Mihari proxy at {0}.' -f $proxyEndpoint) `
+            -DiagnosticProfile $profile.Name -ProfileVersion $profile.Version `
+            -RequestedHttpVersion $profile.RequestedHttpVersion -RequestedTlsPolicy $profile.RequestedTlsPolicy
         return (Complete-MihariBrowserLaunch -SessionMetadata $SessionMetadata -Result $result `
             -UrlProvided (-not [string]::IsNullOrWhiteSpace($Url)))
     }
@@ -318,13 +439,15 @@ function Start-MihariBrowser {
     catch {
         $reason = 'Could not create the temporary Edge profile ({0}).' -f $_.Exception.GetType().FullName
         $result = New-MihariBrowserLaunchResult -Success $false -Path $edgePath -ProcessId $null `
-            -ProfilePath $profilePath -ProxyEndpoint $proxyEndpoint -Reason $reason
+            -ProfilePath $profilePath -ProxyEndpoint $proxyEndpoint -Reason $reason `
+            -DiagnosticProfile $profile.Name -ProfileVersion $profile.Version `
+            -RequestedHttpVersion $profile.RequestedHttpVersion -RequestedTlsPolicy $profile.RequestedTlsPolicy
         return (Complete-MihariBrowserLaunch -SessionMetadata $SessionMetadata -Result $result `
             -UrlProvided (-not [string]::IsNullOrWhiteSpace($Url)))
     }
 
     $arguments = Get-MihariEdgeLaunchArguments -ProfilePath $profilePath `
-        -ProxyEndpoint $proxyEndpoint -Url $Url
+        -ProxyEndpoint $proxyEndpoint -Url $Url -DiagnosticProfile $profile.Name
     $quotedArguments = @()
     foreach ($argument in $arguments) {
         $quotedArguments += ConvertTo-MihariWindowsArgument -Value ([string]$argument)
@@ -340,20 +463,51 @@ function Start-MihariBrowser {
         if ($null -eq $processId) {
             $result = New-MihariBrowserLaunchResult -Success $false -Path $edgePath -ProcessId $null `
                 -ProfilePath $profilePath -ProxyEndpoint $proxyEndpoint `
-                -Reason 'Windows did not return a process handle when starting Microsoft Edge.'
+                -Reason 'Windows did not return a process handle when starting Microsoft Edge.' `
+                -DiagnosticProfile $profile.Name -ProfileVersion $profile.Version `
+                -RequestedHttpVersion $profile.RequestedHttpVersion -RequestedTlsPolicy $profile.RequestedTlsPolicy
             return (Complete-MihariBrowserLaunch -SessionMetadata $SessionMetadata -Result $result `
                 -UrlProvided (-not [string]::IsNullOrWhiteSpace($Url)))
         }
+        $ownerStartTimeUtc = Get-MihariBrowserProcessStartTimeUtc -ProcessId ([int]$processId) -ExpectedExecutable $edgePath
         $result = New-MihariBrowserLaunchResult -Success $true -Path $edgePath -ProcessId $processId `
-            -ProfilePath $profilePath -ProxyEndpoint $proxyEndpoint -Reason $null
+            -ProfilePath $profilePath -ProxyEndpoint $proxyEndpoint -Reason $null `
+            -DiagnosticProfile $profile.Name -ProfileVersion $profile.Version `
+            -RequestedHttpVersion $profile.RequestedHttpVersion -RequestedTlsPolicy $profile.RequestedTlsPolicy `
+            -OwnerStartTimeUtc $ownerStartTimeUtc
+        if ($null -ne $ownerStartTimeUtc -and
+            (Get-Command Start-MihariBrowserObservation -CommandType Function -ErrorAction SilentlyContinue)) {
+            $observation = Start-MihariBrowserObservation -Session $SessionMetadata -Launch $result
+            if ($null -ne $observation) {
+                $result.ObservationStatus = [string]$observation.Status
+                if (-not [string]::IsNullOrWhiteSpace([string]$observation.Reason)) {
+                    $result.Reason = [string]$observation.Reason
+                }
+            }
+        }
+        elseif ($null -eq $ownerStartTimeUtc -and
+            $null -ne (Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'Writer')) {
+            $result.ObservationStatus = 'launched_but_unverified'
+            $result.Reason = 'Edge started, but Mihari could not verify process ownership for browser observation.'
+        }
         return (Complete-MihariBrowserLaunch -SessionMetadata $SessionMetadata -Result $result `
             -UrlProvided (-not [string]::IsNullOrWhiteSpace($Url)))
     }
     catch {
         $reason = 'Microsoft Edge could not be started ({0}).' -f $_.Exception.GetType().FullName
         $result = New-MihariBrowserLaunchResult -Success $false -Path $edgePath -ProcessId $null `
-            -ProfilePath $profilePath -ProxyEndpoint $proxyEndpoint -Reason $reason
+            -ProfilePath $profilePath -ProxyEndpoint $proxyEndpoint -Reason $reason `
+            -DiagnosticProfile $profile.Name -ProfileVersion $profile.Version `
+            -RequestedHttpVersion $profile.RequestedHttpVersion -RequestedTlsPolicy $profile.RequestedTlsPolicy
         return (Complete-MihariBrowserLaunch -SessionMetadata $SessionMetadata -Result $result `
             -UrlProvided (-not [string]::IsNullOrWhiteSpace($Url)))
     }
+}
+
+# The observer is a separate runtime responsibility. Loading it here keeps the
+# existing fixed source list compatible while still making the feature available
+# to the main process and management worker runspaces.
+$browserObservationPath = Join-Path $PSScriptRoot 'BrowserObservation.ps1'
+if (Test-Path -LiteralPath $browserObservationPath -PathType Leaf) {
+    . $browserObservationPath
 }
