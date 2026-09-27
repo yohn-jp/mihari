@@ -20,7 +20,7 @@ function New-MihariCaseDependencyEvent {
         [string] $RequestId,
         [Parameter(Mandatory = $true)][string] $ConnectionId,
         [Parameter(Mandatory = $true)][long] $Sequence,
-        [Parameter(Mandatory = $true)][string] $TrialId,
+        [AllowNull()][string] $TrialId,
         [Parameter(Mandatory = $true)][string] $HostName,
         [Parameter(Mandatory = $true)][string] $Path,
         [Parameter(Mandatory = $true)][string] $Method,
