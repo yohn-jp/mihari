@@ -22,6 +22,11 @@ function Invoke-MihariIssue3ManagementRequest {
     $request.Timeout = 10000
     $request.ReadWriteTimeout = 10000
     if ($Method -eq 'POST') {
+        $authority = ([Uri]$Uri).GetLeftPart([UriPartial]::Authority) + '/'
+        $page = Invoke-MihariIssue3ManagementRequest -Uri $authority -Method GET -Body $null
+        $tokenMatch = [regex]::Match([string]$page.Content, 'var CONTROL_TOKEN="(?<token>[A-Za-z0-9_-]+)";')
+        Assert-MihariTest -Condition $tokenMatch.Success -Message 'The owned management page must bootstrap an in-memory action token.'
+        $request.Headers['X-Mihari-Control-Token'] = $tokenMatch.Groups['token'].Value
         # .NET Framework sends Expect: 100-continue by default. The small
         # management listener intentionally does not support that extension.
         $request.ServicePoint.Expect100Continue = $false

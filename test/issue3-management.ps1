@@ -13,7 +13,8 @@ function Invoke-Issue3ManagementRequest {
     param(
         [Parameter(Mandatory = $true)][string]$Endpoint,
         [Parameter(Mandatory = $true)][ValidateSet('GET', 'POST')][string]$Method,
-        [AllowNull()][object]$Body
+        [AllowNull()][object]$Body,
+        [switch]$SkipControlToken
     )
 
     $request = [System.Net.HttpWebRequest][System.Net.WebRequest]::Create($Endpoint)
@@ -24,6 +25,13 @@ function Invoke-Issue3ManagementRequest {
     $request.Timeout = 7000
     $request.ReadWriteTimeout = 7000
     $request.Accept = 'application/json, text/html;q=0.9, */*;q=0.8'
+    if ($Method -eq 'POST' -and -not $SkipControlToken) {
+        $authority = ([Uri]$Endpoint).GetLeftPart([UriPartial]::Authority) + '/'
+        $page = Invoke-Issue3ManagementRequest -Endpoint $authority -Method GET -Body $null
+        $tokenMatch = [regex]::Match([string]$page.Text, 'var CONTROL_TOKEN="(?<token>[A-Za-z0-9_-]+)";')
+        Assert-MihariTest -Condition $tokenMatch.Success -Message 'The owned management page must bootstrap an in-memory action token.'
+        $request.Headers['X-Mihari-Control-Token'] = $tokenMatch.Groups['token'].Value
+    }
     if ($null -ne $Body) {
         $request.ContentType = 'application/json; charset=utf-8'
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Body -Depth 6 -Compress))
@@ -257,6 +265,8 @@ try {
     $healthResponse = Invoke-Issue3ManagementRequest -Endpoint ($managementEndpoint + 'api/health') -Method GET -Body $null
     Assert-MihariTest -Condition ($healthResponse.StatusCode -eq 200) -Message 'The management health endpoint must answer successfully.'
     $pageResponse = Invoke-Issue3ManagementRequest -Endpoint $managementEndpoint -Method GET -Body $null
+    $untrustedAction = Invoke-Issue3ManagementRequest -Endpoint ($managementEndpoint + 'api/mode') -Method POST -Body @{ mode = 'Tunnel' } -SkipControlToken
+    Assert-MihariTest -Condition ($untrustedAction.StatusCode -eq 403 -and $untrustedAction.Json.error -eq 'invalid_control_token') -Message 'Management actions must reject a request without the session control token.'
     Assert-MihariTest -Condition ($pageResponse.StatusCode -eq 200 -and $pageResponse.ContentType -match '(?i)text/html') -Message 'The local management server must serve its HTML page.'
     foreach ($pollEndpoint in @('/api/status', '/api/events', '/api/findings')) {
         Assert-MihariTest -Condition ($pageResponse.Text.Contains($pollEndpoint)) -Message 'The served page must poll current status, event log, and finding data.'

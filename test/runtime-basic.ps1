@@ -42,6 +42,9 @@ function Get-MihariRuntimeBasicEventSummary {
                 $parts.Add(($field + '=' + [string]$value))
             }
         }
+        if ([string]$event.data.errorCode -eq 'worker_failed' -and $event.data.message) {
+            $parts.Add(('message=' + [string]$event.data.message))
+        }
         $summaries.Add(($parts -join ' '))
     }
     if ($summaries.Count -eq 0) { return 'no complete events were written' }

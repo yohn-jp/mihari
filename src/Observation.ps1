@@ -176,7 +176,7 @@ function ConvertTo-MihariSafeEventData {
         'clientCertificateState', 'protocol', 'initiatorType', 'browserTargetId',
         'browserRequestId', 'browserConnectionId', 'browserFrameId', 'browserError',
         'browserTimingOrigin', 'requestFraming', 'responseFraming',
-        'connectionPolicy', 'framing'
+        'connectionPolicy', 'framing', 'httpVersion', 'scope', 'headerSection'
     )
     $integerFields = @(
         'port', 'statusCode', 'proxyStatus', 'proxyPort', 'bytesClientToUpstream',
@@ -184,9 +184,12 @@ function ConvertTo-MihariSafeEventData {
         'browserTimingStartMs', 'browserTimingDurationMs', 'requestBytes',
         'responseBytes', 'bytes', 'firstByteMs', 'lastByteMs',
         'forwardWriteMs', 'workerOccupancy', 'maxWorkers', 'workingSetBytes',
-        'cpuTotalMs', 'evidenceBytes', 'writerLagMs', 'activeLongLivedCount'
+        'cpuTotalMs', 'evidenceBytes', 'writerLagMs', 'activeLongLivedCount',
+        'maxConcurrentStreams', 'maxFrameSize', 'initialWindowSize',
+        'headerTableSize', 'lastStreamId', 'grpcStatus', 'httpStatus',
+        'waitMs', 'durationMs', 'activeStreamsAtClose'
     )
-    $booleanFields = @('certificateAccepted', 'caTrusted', 'fromDiskCache', 'fromServiceWorker', 'reused', 'queueSaturated', 'pendingConnections')
+    $booleanFields = @('certificateAccepted', 'caTrusted', 'fromDiskCache', 'fromServiceWorker', 'reused', 'queueSaturated', 'pendingConnections', 'informational')
     $allowed = @{}
     foreach ($name in $stringFields) { $allowed[$name] = 'string' }
     foreach ($name in $integerFields) { $allowed[$name] = 'integer' }

@@ -245,6 +245,7 @@ function Get-MihariSessionMetadataObject {
         processStartTimeUtc = [string]$Session.ProcessStartTimeUtc
         mode = [string]$Session.Mode
         profile = [string]$Session.Profile
+        profileVersion = [int]$Session.ProfileVersion
         httpConnectionPolicy = [string]$Session.HttpConnectionPolicy
         configurationRevision = [int]$Session.ConfigurationRevision
         localInspectExclusions = @($Session.LocalInspectExclusions)
@@ -383,6 +384,7 @@ function New-MihariSession {
             Id = $id
             Mode = $Mode
             Profile = $Profile
+            ProfileVersion = 1
             HttpConnectionPolicy = $HttpConnectionPolicy
             ConfigurationRevision = 1
             LocalInspectExclusions = @()
@@ -402,6 +404,8 @@ function New-MihariSession {
             UpstreamProxy = $UpstreamProxy
             PlatformProxySnapshot = $platformProxySnapshot
             Writer = $null
+            TrafficProjection = $null
+            TrafficProjectionError = $null
             CA = $null
             PublicCARoot = $null
             LeafCache = [hashtable]::Synchronized(@{})

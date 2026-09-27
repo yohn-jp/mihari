@@ -251,6 +251,7 @@ function Get-MihariManagementStatusDocument {
         effectiveStatus = $effectiveStatus
         mode = [string]$Session.Mode
         profile = [string]$Session.Profile
+        profileVersion = [int]$Session.ProfileVersion
         httpConnectionPolicy = [string]$Session.HttpConnectionPolicy
         configurationRevision = [int]$Session.ConfigurationRevision
         inspectEnabled = ([string]$Session.Mode -eq 'Inspect')
@@ -294,6 +295,7 @@ function Get-MihariManagementStatusDocument {
         upstreamRoute = (Get-MihariManagementUpstreamRoute -Session $Session -Snapshot $projection)
         ca = $ca
         profile = [string]$Session.Profile
+        profileVersion = [int]$Session.ProfileVersion
         httpConnectionPolicy = [string]$Session.HttpConnectionPolicy
         configurationRevision = [int]$Session.ConfigurationRevision
         activeConnections = $activeConnections
@@ -520,8 +522,27 @@ function Test-MihariManagementRequestAuthority {
         $originUri = $null
         if (-not [Uri]::TryCreate($origin, [UriKind]::Absolute, [ref]$originUri)) { return $false }
         if ($originUri.Scheme -ne 'http' -or -not (Test-MihariManagementLoopbackAuthority -Authority $originUri.Authority -ExpectedPort $port)) { return $false }
+        if (-not [string]::Equals($originUri.Authority, [string]$Request.Headers['host'], [StringComparison]::OrdinalIgnoreCase)) { return $false }
     }
     return $true
+}
+
+function Test-MihariManagementActionToken {
+    param(
+        [Parameter(Mandatory = $true)]$Session,
+        [Parameter(Mandatory = $true)]$Request
+    )
+
+    $expected = [string]$Session.ControlToken
+    if ([string]::IsNullOrWhiteSpace($expected) -or
+        -not $Request.Headers.ContainsKey('x-mihari-control-token')) { return $false }
+    $provided = [string]$Request.Headers['x-mihari-control-token']
+    if ($provided.Length -ne $expected.Length) { return $false }
+    $difference = 0
+    for ($index = 0; $index -lt $expected.Length; $index++) {
+        $difference = $difference -bor ([int]$expected[$index] -bxor [int]$provided[$index])
+    }
+    return ($difference -eq 0)
 }
 
 function Read-MihariManagementJsonBody {
@@ -552,11 +573,18 @@ function Invoke-MihariManagementApiRequest {
 
     $method = [string]$Request.Method
     $path = [string]$Request.Path
+    if ($method -eq 'POST' -and -not (Test-MihariManagementActionToken -Session $Session -Request $Request)) {
+        return (New-MihariManagementErrorResponse -StatusCode 403 -Code 'invalid_control_token' -Message 'A session control token is required for management actions.')
+    }
+    if ($path.StartsWith('/api/v2/') -and (Get-Command Invoke-MihariManagementV2Request -ErrorAction SilentlyContinue)) {
+        $v2Response = Invoke-MihariManagementV2Request -Session $Session -Request $Request
+        if ($null -ne $v2Response) { return $v2Response }
+    }
     if ($method -eq 'GET' -and $path -eq '/') {
         if (-not (Get-Command Get-MihariManagementUiHtml -ErrorAction SilentlyContinue)) {
             return (New-MihariManagementErrorResponse -StatusCode 503 -Code 'ui_unavailable' -Message 'The local management UI is unavailable.')
         }
-        $html = [string](Get-MihariManagementUiHtml)
+        $html = [string](Get-MihariManagementUiHtml -ControlToken ([string]$Session.ControlToken))
         $encoding = [System.Text.UTF8Encoding]::new($false)
         $body = $encoding.GetBytes($html)
         if ($body.Length -gt 1048576) { return (New-MihariManagementErrorResponse -StatusCode 500 -Code 'ui_too_large' -Message 'The local management UI exceeded its response limit.') }
@@ -639,6 +667,11 @@ function Invoke-MihariManagementApiRequest {
             pid = $launch.Pid
             profilePath = $launch.ProfilePath
             proxyEndpoint = $launch.ProxyEndpoint
+            diagnosticProfile = $launch.DiagnosticProfile
+            profileVersion = $launch.ProfileVersion
+            requestedHttpVersion = $launch.RequestedHttpVersion
+            requestedTlsPolicy = $launch.RequestedTlsPolicy
+            observationStatus = $launch.ObservationStatus
             reason = $launch.Reason
         }
         return (New-MihariManagementJsonResponse -StatusCode 200 -Value $result)
