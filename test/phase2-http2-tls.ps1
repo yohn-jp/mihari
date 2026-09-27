@@ -330,9 +330,6 @@ finally { $Accepted.Dispose() }
 finally {
     if ($null -ne $clientTls) { $clientTls.Dispose() }
     if ($null -ne $client) { $client.Dispose() }
-    if ($null -ne $proxyWorker) { try { $proxyWorker.Powershell.Stop() } catch { $null = $_ }; $proxyWorker.Powershell.Dispose() }
-    if ($null -ne $originWorker) { try { $originWorker.Powershell.Stop() } catch { $null = $_ }; $originWorker.Powershell.Dispose() }
-    if ($null -ne $endOriginWorker) { try { $endOriginWorker.Powershell.Stop() } catch { $null = $_ }; $endOriginWorker.Powershell.Dispose() }
     if ($null -ne $nativeAddOperator) { Stop-MihariTestRootConfirmation -Operator $nativeAddOperator }
     if ($null -ne $nativeChild) {
         if ($null -ne $nativeMetadata -and $null -eq $nativeChild.PSObject.Properties['StopAttempted']) {
@@ -344,6 +341,9 @@ finally {
     }
     if ($null -ne $proxyListener) { $proxyListener.Stop() }
     if ($null -ne $originListener) { $originListener.Stop() }
+    if ($null -ne $proxyWorker) { try { $proxyWorker.Powershell.Stop() } catch { $null = $_ }; $proxyWorker.Powershell.Dispose() }
+    if ($null -ne $originWorker) { try { $originWorker.Powershell.Stop() } catch { $null = $_ }; $originWorker.Powershell.Dispose() }
+    if ($null -ne $endOriginWorker) { try { $endOriginWorker.Powershell.Stop() } catch { $null = $_ }; $endOriginWorker.Powershell.Dispose() }
     if ($null -ne $writer) { Close-MihariEventWriter -Writer $writer }
     if ($null -ne $fixture) { Remove-MihariTestFixtureTlsIdentity -Identity $fixture }
     if ([IO.Directory]::Exists($temp)) { [IO.Directory]::Delete($temp,$true) }
