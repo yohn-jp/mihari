@@ -64,12 +64,13 @@ function Write-MihariJsonFileAtomic {
         [void][System.IO.Directory]::CreateDirectory($directory)
     }
     $temporaryPath = $Path + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    $backupPath = $Path + '.' + [Guid]::NewGuid().ToString('N') + '.bak'
     $json = ConvertTo-Json -InputObject $Value -Depth 8 -Compress
     $encoding = [System.Text.UTF8Encoding]::new($false)
     try {
         [System.IO.File]::WriteAllText($temporaryPath, $json + [Environment]::NewLine, $encoding)
         if ([System.IO.File]::Exists($Path)) {
-            [System.IO.File]::Replace($temporaryPath, $Path, $null)
+            [System.IO.File]::Replace($temporaryPath, $Path, $backupPath)
         }
         else {
             [System.IO.File]::Move($temporaryPath, $Path)
@@ -78,6 +79,9 @@ function Write-MihariJsonFileAtomic {
     finally {
         if ([System.IO.File]::Exists($temporaryPath)) {
             [System.IO.File]::Delete($temporaryPath)
+        }
+        if ([System.IO.File]::Exists($backupPath)) {
+            [System.IO.File]::Delete($backupPath)
         }
     }
 }
