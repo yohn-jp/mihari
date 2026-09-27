@@ -101,6 +101,9 @@ if ($env:OS -eq 'Windows_NT') {
     $untrustedLeaf = $null
     try {
         $trusted = New-MihariTestFixtureTlsIdentity
+        $trustedStatus = Get-MihariCertificateCleanupStatus -Session $trusted.Session
+        Assert-MihariTest -Condition ($trustedStatus.caTrustCoverage -eq 'observed' -and $trustedStatus.caTrustPresent) -Message 'Cleanup status must identify the exact owned trusted root.'
+        Assert-MihariTest -Condition ($trustedStatus.leafCacheCount -eq 1 -and $trustedStatus.activeLeafLeases -eq 1) -Message 'Cleanup status must report live in-memory leaf leases.'
         $nameMismatch = Invoke-MihariTestValidationHandshake -ServerCertificate $trusted.Leaf -TargetHost 'localhost'
         Assert-MihariTest -Condition (-not $nameMismatch.Succeeded -and $nameMismatch.Capture.Invoked) -Message 'Normal hostname mismatch must reject the TLS peer.'
         Assert-MihariTest -Condition ($nameMismatch.Facts.hostnameState -eq 'failed') -Message 'Name mismatch must be attributed to hostname validation.'
