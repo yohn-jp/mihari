@@ -82,7 +82,7 @@ try {
     Write-MihariHttpMessage -Stream $outputStream -Message $hopRequest
     $outgoing = [System.Text.Encoding]::GetEncoding(28591).GetString($outputStream.ToArray())
     Assert-MihariTest -Condition ($outgoing -notmatch '(?im)^X-Private-Hop:|^Proxy-Connection:|^Connection:') -Message 'Hop-by-hop headers named by Connection must be removed.'
-    Assert-MihariTest -Condition ($outgoing -match '(?im)^X-End-To-End: retain-me$') -Message 'End-to-end headers must be forwarded.'
+    Assert-MihariTest -Condition ($outgoing -match '(?im)^X-End-To-End: retain-me\r?$') -Message 'End-to-end headers must be forwarded.'
 }
 finally { $outputStream.Dispose() }
 

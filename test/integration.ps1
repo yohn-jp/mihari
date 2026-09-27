@@ -277,7 +277,7 @@ function Invoke-MihariTestExplicitProxyStatus {
         $clientResponse = Read-MihariTestHeaderText -Stream $clientStream
         Assert-MihariTest -Condition ($clientResponse.StartsWith("HTTP/1.1 $StatusCode")) -Message ("Mihari must preserve the concrete upstream proxy status {0}." -f $StatusCode)
         if ($StatusCode -eq 407) {
-            Assert-MihariTest -Condition ($clientResponse -match '(?im)^Proxy-Authenticate: Basic realm="mihari-test"$') -Message 'Mihari must preserve the explicit proxy authentication challenge.'
+            Assert-MihariTest -Condition ($clientResponse -match '(?im)^Proxy-Authenticate: Basic realm="mihari-test"\r?$') -Message 'Mihari must preserve the explicit proxy authentication challenge.'
         }
         return $clientResponse
     }
@@ -422,7 +422,7 @@ try {
     $originStream = $originClient.GetStream()
     $originRequest = Read-MihariTestHeaderText -Stream $originStream
     Assert-MihariTest -Condition ($originRequest.StartsWith("GET /http-proxy/path?token=http-secret HTTP/1.1")) -Message 'HTTP proxy must forward an origin-form request target and query.'
-    Assert-MihariTest -Condition ($originRequest -match '(?im)^Authorization: Bearer auth-secret$' -and $originRequest -match '(?im)^Cookie: session=cookie-secret$') -Message 'HTTP proxy must preserve end-to-end request headers to the local origin.'
+    Assert-MihariTest -Condition ($originRequest -match '(?im)^Authorization: Bearer auth-secret\r?$' -and $originRequest -match '(?im)^Cookie: session=cookie-secret\r?$') -Message 'HTTP proxy must preserve end-to-end request headers to the local origin.'
     Write-MihariTestHttpResponse -Stream $originStream
     $plainResponse = Read-MihariTestHttpResponse -Stream $proxyStream
     Assert-MihariTest -Condition ($plainResponse.Headers.StartsWith('HTTP/1.1 200') -and $plainResponse.Body -eq 'ok') -Message 'HTTP proxy must relay the local origin response.'
