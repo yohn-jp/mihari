@@ -13,6 +13,8 @@ param(
     [string] $UpstreamProxy,
     [string] $OutputRoot,
     [int] $MaxWorkers = 16,
+    [ValidateRange(4096, 1099511627776)]
+    [long] $EvidenceByteLimit = 536870912,
     [string] $Url,
     [string] $CompareEventsPath
 )
@@ -29,7 +31,7 @@ switch ($Command) {
         break
     }
     'start' {
-        $session = New-MihariSession -Mode $Mode -Profile $Profile -HttpConnectionPolicy $HttpConnectionPolicy -Port $Port -ManagementPort $UiPort -UpstreamProxy $UpstreamProxy -OutputRoot $OutputRoot -MaxWorkers $MaxWorkers
+        $session = New-MihariSession -Mode $Mode -Profile $Profile -HttpConnectionPolicy $HttpConnectionPolicy -Port $Port -ManagementPort $UiPort -UpstreamProxy $UpstreamProxy -OutputRoot $OutputRoot -MaxWorkers $MaxWorkers -EvidenceByteLimit $EvidenceByteLimit
         try {
             Start-MihariListener -Session $session -OnReady {
                 param($readySession)

@@ -23,6 +23,7 @@ Start options:
   -UpstreamProxy <uri>    Explicit upstream HTTP proxy override.
   -OutputRoot <path>      Session output root.
   -MaxWorkers <count>     Maximum concurrent connection workers. Default: 16.
+  -EvidenceByteLimit <n>  Maximum canonical JSONL bytes per session. Default: 536870912.
 
 Other options:
   browser -Url <url>
