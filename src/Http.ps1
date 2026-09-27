@@ -1,12 +1,22 @@
 function Read-MihariHttpHeaderBlock {
     param(
         [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
-        [int]$MaximumBytes = 65536
+        [int]$MaximumBytes = 65536,
+        [int]$DeadlineMs = 30000
     )
 
     $bytes = New-Object 'System.Collections.Generic.List[byte]'
     $previous = -1
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $originalTimeout = $null
+    if ($Stream.CanTimeout) { $originalTimeout = $Stream.ReadTimeout }
+    try {
     while ($bytes.Count -lt $MaximumBytes) {
+        $remainingMs = $DeadlineMs - [int]$clock.ElapsedMilliseconds
+        if ($remainingMs -le 0) {
+            throw [System.TimeoutException]::new('The HTTP header deadline expired.')
+        }
+        if ($Stream.CanTimeout) { $Stream.ReadTimeout = $remainingMs }
         $next = $Stream.ReadByte()
         if ($next -lt 0) {
             if ($bytes.Count -eq 0) { return $null }
@@ -31,17 +41,31 @@ function Read-MihariHttpHeaderBlock {
     }
 
     throw [System.IO.InvalidDataException]::new("The HTTP header block exceeds the $MaximumBytes byte limit.")
+    }
+    finally {
+        if ($null -ne $originalTimeout) { $Stream.ReadTimeout = $originalTimeout }
+    }
 }
 
 function Read-MihariHttpLine {
     param(
         [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
-        [int]$MaximumBytes = 8192
+        [int]$MaximumBytes = 8192,
+        [int]$DeadlineMs = 30000
     )
 
     $bytes = New-Object 'System.Collections.Generic.List[byte]'
     $previous = -1
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $originalTimeout = $null
+    if ($Stream.CanTimeout) { $originalTimeout = $Stream.ReadTimeout }
+    try {
     while ($bytes.Count -lt $MaximumBytes) {
+        $remainingMs = $DeadlineMs - [int]$clock.ElapsedMilliseconds
+        if ($remainingMs -le 0) {
+            throw [System.TimeoutException]::new('The HTTP chunk line deadline expired.')
+        }
+        if ($Stream.CanTimeout) { $Stream.ReadTimeout = $remainingMs }
         $next = $Stream.ReadByte()
         if ($next -lt 0) {
             throw [System.IO.EndOfStreamException]::new('The HTTP chunk framing ended before CRLF.')
@@ -62,6 +86,10 @@ function Read-MihariHttpLine {
         $previous = $next
     }
     throw [System.IO.InvalidDataException]::new("An HTTP chunk line exceeds the $MaximumBytes byte limit.")
+    }
+    finally {
+        if ($null -ne $originalTimeout) { $Stream.ReadTimeout = $originalTimeout }
+    }
 }
 
 function Read-MihariExactToStream {
@@ -888,6 +916,10 @@ function Copy-MihariHttpBody {
     [long]$writeMs = 0
     $firstByteMs = $null
     $buffer = [byte[]]::new(16384)
+    $lineDeadlineMs = 30000
+    if ($Source.CanTimeout -and $Source.ReadTimeout -gt $lineDeadlineMs) {
+        $lineDeadlineMs = $Source.ReadTimeout
+    }
     $copyExact = {
         param([long]$Count)
         [long]$remaining = $Count
@@ -928,8 +960,8 @@ function Copy-MihariHttpBody {
         }
         'Chunked' {
             while ($true) {
-                $line = Read-MihariHttpLine -Stream $Source
-                if ($line.Text -notmatch '^[0-9A-Fa-f]+(?:;[^\r\n]*)?$') {
+                $line = Read-MihariHttpLine -Stream $Source -DeadlineMs $lineDeadlineMs
+                if ($line.Text -notmatch '^[0-9A-Fa-f]+(?:;[\x20-\x7E]*)?$') {
                     throw [System.IO.InvalidDataException]::new('The HTTP chunk size line is malformed.')
                 }
                 $sizeText = ($line.Text -split ';', 2)[0]
@@ -938,12 +970,15 @@ function Copy-MihariHttpBody {
                     [System.Globalization.CultureInfo]::InvariantCulture, [ref]$size) -or $size -lt 0) {
                     throw [System.IO.InvalidDataException]::new('The HTTP chunk size is outside the supported range.')
                 }
+                if ($null -eq $firstByteMs) { $firstByteMs = $timer.ElapsedMilliseconds }
+                $beforeWrite = $timer.ElapsedMilliseconds
                 $Destination.Write($line.Bytes, 0, $line.Bytes.Length)
+                $writeMs += ($timer.ElapsedMilliseconds - $beforeWrite)
                 $bytes += $line.Bytes.Length
                 if ($size -eq 0) {
                     $trailerBytes = 0
                     while ($true) {
-                        $trailer = Read-MihariHttpLine -Stream $Source
+                        $trailer = Read-MihariHttpLine -Stream $Source -DeadlineMs $lineDeadlineMs
                         $trailerBytes += $trailer.Bytes.Length
                         if ($trailerBytes -gt 65536) {
                             throw [System.IO.InvalidDataException]::new('The HTTP chunk trailers exceed the 65536 byte limit.')
@@ -957,7 +992,9 @@ function Copy-MihariHttpBody {
                                 throw [System.IO.InvalidDataException]::new('A forbidden HTTP framing or routing trailer was received.')
                             }
                         }
+                        $beforeWrite = $timer.ElapsedMilliseconds
                         $Destination.Write($trailer.Bytes, 0, $trailer.Bytes.Length)
+                        $writeMs += ($timer.ElapsedMilliseconds - $beforeWrite)
                         $bytes += $trailer.Bytes.Length
                         if ($trailer.Text.Length -eq 0) { break }
                     }
@@ -974,7 +1011,9 @@ function Copy-MihariHttpBody {
                 if ($delimiter[0] -ne 13 -or $delimiter[1] -ne 10) {
                     throw [System.IO.InvalidDataException]::new('The HTTP chunk data is not followed by CRLF.')
                 }
+                $beforeWrite = $timer.ElapsedMilliseconds
                 $Destination.Write($delimiter, 0, 2)
+                $writeMs += ($timer.ElapsedMilliseconds - $beforeWrite)
                 $bytes += 2
             }
             break
@@ -982,8 +1021,10 @@ function Copy-MihariHttpBody {
         default { throw [System.IO.InvalidDataException]::new('Unknown HTTP body framing.') }
     }
     $timer.Stop()
+    $lastByteMs = $null
+    if ($bytes -gt 0) { $lastByteMs = $timer.ElapsedMilliseconds }
     return [pscustomobject]@{
-        Bytes = $bytes; FirstByteMs = $firstByteMs; LastByteMs = $timer.ElapsedMilliseconds
+        Bytes = $bytes; FirstByteMs = $firstByteMs; LastByteMs = $lastByteMs
         ForwardWriteMs = $writeMs; Framing = [string]$Framing.Kind
     }
 }

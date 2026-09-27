@@ -366,7 +366,8 @@ function Handle-MihariConnection {
         }
         $currentKey = $routeKind + '|' + $hostName + ':' + $targetPort
         if ($routeKind -eq 'ExplicitProxy') { $currentKey += '|' + $route.Host + ':' + $route.Port }
-        $reused = ($null -ne $upstream -and $upstreamKey -eq $currentKey -and $requestKeepAlive)
+        $reused = ($null -ne $upstream -and $upstreamKey -eq $currentKey -and
+            -not $hasCredentials -and -not $webSocket)
         if ($null -ne $upstream -and -not $reused) {
             Unregister-MihariActiveUpstream -Session $Session -ConnectionId $connectionId
             $upstream.Client.Dispose()
@@ -386,11 +387,41 @@ function Handle-MihariConnection {
         if ($routeKind -eq 'ExplicitProxy') { $forwardTarget = $target.AbsoluteTarget }
         $stage = 'upstream.http'
         Write-MihariHttpHead -Stream $upstream.Stream -Message $request -RequestTarget $forwardTarget -CloseConnection:(-not $requestKeepAlive -and -not $webSocket) -ForwardProxyAuthorization:($routeKind -eq 'ExplicitProxy') -UpgradeWebSocket:$webSocket
+        $response = $null
+        $earlyFinal = $false
         if ($expect) {
-            Write-MihariProxyStatus -Stream $clientStream -StatusCode 100 -Reason 'Continue' -ConnectSuccess $true
+            $continueReceived = $false
+            $preBodyResponses = 0
+            while ($upstream.Client.Client.Poll(1000000, [System.Net.Sockets.SelectMode]::SelectRead)) {
+                $response = Read-MihariHttpHead -Stream $upstream.Stream -Kind Response -RequestMethod $request.Method
+                if ($null -eq $response) { throw [System.IO.EndOfStreamException]::new('Upstream closed before the expected HTTP response.') }
+                if ([int]$response.StatusCode -eq 100) {
+                    Write-MihariHttpHead -Stream $clientStream -Message $response
+                    $responseStarted = $true
+                    $continueReceived = $true
+                    $response = $null
+                    break
+                }
+                if ([int]$response.StatusCode -ge 200 -or [int]$response.StatusCode -eq 101) {
+                    $earlyFinal = $true
+                    break
+                }
+                $preBodyResponses++
+                if ($preBodyResponses -gt 8) { throw [System.IO.InvalidDataException]::new('Too many informational HTTP responses.') }
+                Write-MihariHttpHead -Stream $clientStream -Message $response
+                $responseStarted = $true
+                $response = $null
+            }
+            if (-not $continueReceived -and -not $earlyFinal) {
+                Write-MihariProxyStatus -Stream $clientStream -StatusCode 100 -Reason 'Continue' -ConnectSuccess $true
+                $responseStarted = $true
+            }
         }
-        $requestTransfer = Copy-MihariHttpBody -Source $clientStream -Destination $upstream.Stream -Framing $requestFraming -Session $Session
-        $response = Read-MihariHttpHead -Stream $upstream.Stream -Kind Response -RequestMethod $request.Method
+        $requestTransfer = [pscustomobject]@{ Bytes = [long]0 }
+        if (-not $earlyFinal) {
+            $requestTransfer = Copy-MihariHttpBody -Source $clientStream -Destination $upstream.Stream -Framing $requestFraming -Session $Session
+            $response = Read-MihariHttpHead -Stream $upstream.Stream -Kind Response -RequestMethod $request.Method
+        }
         if ($null -eq $response) { throw [System.IO.EndOfStreamException]::new('Upstream closed before an HTTP response.') }
         $informationalCount = 0
         while ([int]$response.StatusCode -ge 100 -and [int]$response.StatusCode -lt 200 -and [int]$response.StatusCode -ne 101) {
@@ -410,7 +441,7 @@ function Handle-MihariConnection {
         if ($webSocket) { $acceptedWebSocket = Test-MihariWebSocketResponse -Message $response -Request $request }
         $responseFraming = Get-MihariHttpBodyFraming -Message $response -Kind Response -RequestMethod $request.Method
         $responseKeepAlive = (Test-MihariHttpKeepAlive -Message $response) -and
-            $response.Version -eq 'HTTP/1.1' -and $responseFraming.Reusable -and $requestKeepAlive -and -not $acceptedWebSocket
+            $response.Version -eq 'HTTP/1.1' -and $responseFraming.Reusable -and $requestKeepAlive -and -not $acceptedWebSocket -and -not $earlyFinal
         $null = Write-MihariEvent -Session $Session -ConfigurationRevision $AcceptedConfigurationRevision -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
             host = $hostName; port = $targetPort; path = $safePath; routeKind = $routeKind; method = $request.Method; statusCode = [int]$response.StatusCode; requestBytes = $requestTransfer.Bytes; responseFraming = $responseFraming.Kind
         }
@@ -445,9 +476,14 @@ function Handle-MihariConnection {
             }
             return
         }
+        $bodyRelayStartedMs = $timer.ElapsedMilliseconds
         $responseTransfer = Copy-MihariHttpBody -Source $upstream.Stream -Destination $clientStream -Framing $responseFraming -Session $Session
+        $firstByteAtMs = $null
+        $lastByteAtMs = $null
+        if ($null -ne $responseTransfer.FirstByteMs) { $firstByteAtMs = $bodyRelayStartedMs + $responseTransfer.FirstByteMs }
+        if ($null -ne $responseTransfer.LastByteMs) { $lastByteAtMs = $bodyRelayStartedMs + $responseTransfer.LastByteMs }
         $null = Write-MihariEvent -Session $Session -ConfigurationRevision $AcceptedConfigurationRevision -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
-            host = $hostName; port = $targetPort; path = $safePath; statusCode = [int]$response.StatusCode; responseBytes = $responseTransfer.Bytes; firstByteMs = $responseTransfer.FirstByteMs; lastByteMs = $responseTransfer.LastByteMs; forwardWriteMs = $responseTransfer.ForwardWriteMs; framing = $responseTransfer.Framing
+            host = $hostName; port = $targetPort; path = $safePath; statusCode = [int]$response.StatusCode; responseBytes = $responseTransfer.Bytes; firstByteMs = $firstByteAtMs; lastByteMs = $lastByteAtMs; forwardWriteMs = $responseTransfer.ForwardWriteMs; framing = $responseTransfer.Framing
         }
         if ($isSse -and $longLivedSlot) {
             Exit-MihariLongLivedSlot -Session $Session
