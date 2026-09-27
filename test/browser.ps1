@@ -12,6 +12,7 @@ $originalOwnerIdentity = (Get-Command Get-MihariBrowserOwnedProfileIdentity -Com
 $originalBrowserObservation = (Get-Command Start-MihariBrowserObservation -CommandType Function).ScriptBlock
 $liveProfilePath = $null
 $failedProfilePath = $null
+$observerFailureProfilePath = $null
 try {
     Set-Item -Path Function:\Find-MihariEdgeExecutable -Value { return $null }
     $metadata = [pscustomobject]@{
@@ -141,6 +142,35 @@ try {
     Assert-MihariTest -Condition (-not $failedIdentityLaunch.Success -and $failedIdentityLaunch.ObservationStatus -eq 'unavailable' -and $failedIdentityLaunch.Reason -match 'requested URL was not opened') -Message 'If the profile owner cannot be verified, deferred navigation must fail clearly instead of opening an unobserved URL.'
     Assert-MihariTest -Condition ($script:capturedEdgeStartInfo.Arguments.Contains('about:blank') -and -not $script:capturedEdgeStartInfo.Arguments.Contains('example.test')) -Message 'An unverified live profile must remain at about:blank.'
 
+    Set-Item -Path Function:\Get-MihariBrowserOwnedProfileIdentity -Value {
+        param([string] $SessionId, [object] $Launch, [int] $TimeoutSeconds)
+        return [pscustomobject]@{
+            Success = $true
+            ProcessId = 5252
+            OwnerStartTimeUtc = '2026-09-01T01:02:03.0000000Z'
+            ErrorCode = $null
+            MatchingProcessCount = 1
+        }
+    }
+    Set-Item -Path Function:\Start-MihariBrowserObservation -Value {
+        param([object] $Session, [object] $Launch, [string] $InitialUrl)
+        return [pscustomobject]@{
+            Status = 'unavailable'
+            ErrorCode = 'profile_owner_unverified'
+            Reason = 'Unsafe ws://127.0.0.1:9222/devtools/browser/private-endpoint?token=control-secret'
+        }
+    }
+    $observerFailureLaunch = Start-MihariBrowser -SessionMetadata $liveMetadata -Url $liveUrl
+    $observerFailureProfilePath = [string]$observerFailureLaunch.ProfilePath
+    Assert-MihariTest -Condition (-not $observerFailureLaunch.Success -and
+        $observerFailureLaunch.ObservationErrorCode -eq 'profile_owner_unverified' -and
+        $observerFailureLaunch.Reason -match 'could not verify the active Edge process' -and
+        -not $observerFailureLaunch.Reason.Contains('9222') -and
+        -not $observerFailureLaunch.Reason.Contains('control-secret')) 'Observer failures must retain only an allowlisted code and fixed safe reason.'
+    $failureLaunchText = [IO.File]::ReadAllText((Join-Path $temporaryDirectory 'browser-launch.json'))
+    Assert-MihariTest -Condition ($failureLaunchText.Contains('profile_owner_unverified') -and
+        -not $failureLaunchText.Contains('control-secret') -and -not $failureLaunchText.Contains('devtools/browser')) 'Launch metadata must expose the safe observer code without debugger-control data.'
+
     $invalidH2InspectMetadata = [pscustomobject]@{
         id = [guid]::NewGuid().ToString('N')
         profile = 'http2-inspect'
@@ -185,7 +215,7 @@ finally {
     Set-Item -Path Function:\Start-MihariEdgeProcess -Value $originalStartProcess
     Set-Item -Path Function:\Get-MihariBrowserOwnedProfileIdentity -Value $originalOwnerIdentity
     Set-Item -Path Function:\Start-MihariBrowserObservation -Value $originalBrowserObservation
-    foreach ($ownedTestProfile in @($liveProfilePath, $failedProfilePath)) {
+    foreach ($ownedTestProfile in @($liveProfilePath, $failedProfilePath, $observerFailureProfilePath)) {
         if (-not [string]::IsNullOrWhiteSpace($ownedTestProfile) -and [IO.Directory]::Exists($ownedTestProfile)) {
             Remove-Item -LiteralPath $ownedTestProfile -Recurse -Force -ErrorAction SilentlyContinue
         }

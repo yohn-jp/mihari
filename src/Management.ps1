@@ -811,6 +811,7 @@ function Invoke-MihariManagementApiRequest {
             requestedHttpVersion = $launch.RequestedHttpVersion
             requestedTlsPolicy = $launch.RequestedTlsPolicy
             observationStatus = $launch.ObservationStatus
+            observationErrorCode = $launch.ObservationErrorCode
             proxyBehaviorVerification = 'launched_but_unverified'
             profileOwnershipId = $launch.ProfileOwnershipId
             profileWarning = $launch.ProfileWarning

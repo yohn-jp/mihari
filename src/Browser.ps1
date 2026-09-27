@@ -145,6 +145,7 @@ function New-MihariBrowserLaunchResult {
         RequestedHttpVersion  = $RequestedHttpVersion
         RequestedTlsPolicy    = $RequestedTlsPolicy
         ObservationStatus     = $ObservationStatus
+        ObservationErrorCode  = $null
         OwnerStartTimeUtc     = $OwnerStartTimeUtc
         ProfileOwnershipId    = $ProfileOwnershipId
         ProfileOwnershipWarning = $null
@@ -152,6 +153,37 @@ function New-MihariBrowserLaunchResult {
         SourceVersion         = $null
         ClockId               = $null
         ProfileWarning        = $(if (-not [string]::IsNullOrWhiteSpace($ProfilePath)) { 'The diagnostic Edge profile can retain browser-managed cookies and history. Close Edge before cleanup.' } else { $null })
+    }
+}
+
+function Get-MihariBrowserObservationFailure {
+    param([AllowNull()][string] $ErrorCode)
+
+    switch ($ErrorCode) {
+        'profile_owner_unverified' {
+            return [pscustomobject]@{ code = 'profile_owner_unverified'; message = 'Mihari could not verify the active Edge process for its diagnostic profile.' }
+        }
+        'profile_owner_changed' {
+            return [pscustomobject]@{ code = 'profile_owner_changed'; message = 'Mihari could not confirm that the diagnostic Edge owner identity stayed unchanged.' }
+        }
+        'profile_marker_unverified' {
+            return [pscustomobject]@{ code = 'profile_marker_unverified'; message = 'Mihari could not verify the diagnostic Edge ownership marker.' }
+        }
+        'observer_limit_reached' {
+            return [pscustomobject]@{ code = 'observer_limit_reached'; message = 'Mihari reached its bounded diagnostic browser observation limit.' }
+        }
+        'observer_worker_unavailable' {
+            return [pscustomobject]@{ code = 'observer_worker_unavailable'; message = 'Mihari could not start its bounded browser observer.' }
+        }
+        'session_writer_unavailable' {
+            return [pscustomobject]@{ code = 'session_writer_unavailable'; message = 'Browser observation requires the live Mihari session event writer.' }
+        }
+        'profile_mode_incompatible' {
+            return [pscustomobject]@{ code = 'profile_mode_incompatible'; message = 'The selected HTTP/2 observation profile requires a Tunnel session.' }
+        }
+        default {
+            return [pscustomobject]@{ code = 'observer_unavailable'; message = 'Mihari could not arm owned-profile observation.' }
+        }
     }
 }
 
@@ -733,6 +765,7 @@ function Complete-MihariBrowserLaunch {
         requestedHttpVersion = [string]$Result.RequestedHttpVersion
         requestedTlsPolicy = [string]$Result.RequestedTlsPolicy
         observationStatus = [string]$Result.ObservationStatus
+        observationErrorCode = [string]$Result.ObservationErrorCode
         proxyBehaviorVerification = 'launched_but_unverified'
         profileWarning = $Result.ProfileWarning
         profileOwnershipId = $Result.ProfileOwnershipId
@@ -990,12 +1023,14 @@ function Start-MihariBrowser {
             [void](Set-MihariBrowserProfileOwnership -SessionMetadata $SessionMetadata -Result $result)
         }
         if ($profileOwnerVerified -and $null -ne $observerCommand) {
+            $observationCallFailed = $false
             if ($liveObserverAvailable) {
                 try {
                     $observation = Start-MihariBrowserObservation -Session $SessionMetadata -Launch $result -InitialUrl $Url
                 }
                 catch {
                     $observation = $null
+                    $observationCallFailed = $true
                 }
             }
             else {
@@ -1003,25 +1038,34 @@ function Start-MihariBrowser {
             }
             if ($null -ne $observation) {
                 $result.ObservationStatus = [string]$observation.Status
-                if (-not [string]::IsNullOrWhiteSpace([string]$observation.Reason)) {
-                    $result.Reason = [string]$observation.Reason
-                }
             }
-            if ($liveObserverAvailable -and -not [string]::IsNullOrWhiteSpace($Url) -and
-                ($null -eq $observation -or [string]$observation.Status -eq 'unavailable' -or
-                    -not [string]::IsNullOrWhiteSpace([string]$observation.Reason))) {
-                $result.Success = $false
-                $result.Reason = 'Edge started on about:blank, but Mihari could not arm owned-profile observation. The requested URL was not opened.'
+            if ($null -eq $observation -or [string]$observation.Status -eq 'unavailable' -or
+                -not [string]::IsNullOrWhiteSpace([string]$observation.Reason)) {
+                $failureCode = 'observer_unavailable'
+                if ($observationCallFailed) { $failureCode = 'observer_worker_unavailable' }
+                elseif ($null -ne $observation -and $null -ne $observation.PSObject.Properties['ErrorCode']) {
+                    $failureCode = [string]$observation.ErrorCode
+                }
+                $failure = Get-MihariBrowserObservationFailure -ErrorCode $failureCode
+                $result.ObservationStatus = 'unavailable'
+                $result.ObservationErrorCode = [string]$failure.code
+                $result.Reason = [string]$failure.message
+                if ($liveObserverAvailable -and -not [string]::IsNullOrWhiteSpace($Url)) {
+                    $result.Success = $false
+                    $result.Reason += ' The requested URL was not opened.'
+                }
             }
         }
         elseif (-not $profileOwnerVerified -and
             $null -ne (Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'Writer')) {
+            $failure = Get-MihariBrowserObservationFailure -ErrorCode 'profile_owner_unverified'
             $result.ObservationStatus = 'launched_but_unverified'
-            $result.Reason = 'Edge started, but Mihari could not verify process ownership for browser observation.'
+            $result.ObservationErrorCode = [string]$failure.code
+            $result.Reason = [string]$failure.message
             if ($liveObserverAvailable -and -not [string]::IsNullOrWhiteSpace($Url)) {
                 $result.Success = $false
                 $result.ObservationStatus = 'unavailable'
-                $result.Reason = 'Edge started on about:blank, but Mihari could not verify its owned process identity. The requested URL was not opened.'
+                $result.Reason += ' The requested URL was not opened.'
             }
         }
         return (Complete-MihariBrowserLaunch -SessionMetadata $SessionMetadata -Result $result `
