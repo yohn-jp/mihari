@@ -1,3 +1,38 @@
+function Get-MihariBrowserUtcIdentityTicks {
+    param([AllowNull()][object] $Value)
+
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [DateTimeOffset]) { return [long]$Value.UtcDateTime.Ticks }
+    if ($Value -is [DateTime]) {
+        if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return $null }
+        return [long]$Value.ToUniversalTime().Ticks
+    }
+
+    $text = [string]$Value
+    if ($text -notmatch '(?i)(?:Z|[+-][0-9]{2}:[0-9]{2})$') { return $null }
+    $parsed = [DateTimeOffset]::MinValue
+    $parsedSuccessfully = [DateTimeOffset]::TryParse(
+        $text,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::None,
+        [ref]$parsed
+    )
+    if (-not $parsedSuccessfully) { return $null }
+    return [long]$parsed.UtcDateTime.Ticks
+}
+
+function Test-MihariBrowserUtcIdentityEqual {
+    param(
+        [AllowNull()][object] $Left,
+        [AllowNull()][object] $Right
+    )
+
+    $leftTicks = Get-MihariBrowserUtcIdentityTicks -Value $Left
+    $rightTicks = Get-MihariBrowserUtcIdentityTicks -Value $Right
+    if ($null -eq $leftTicks -or $null -eq $rightTicks) { return $false }
+    return ([long]$leftTicks -eq [long]$rightTicks)
+}
+
 function Get-MihariBrowserMemberValue {
     param(
         [AllowNull()][object] $InputObject,
@@ -462,8 +497,12 @@ function Get-MihariBrowserOwnedProcessVerification {
         if ([string]$marker.owner -cne 'Mihari' -or [string]$marker.sessionId -cne $SessionId -or
             [int]$marker.processId -ne [int]$Launch.Pid -or
             -not [string]::Equals([string]$marker.profilePath, $profilePath, [StringComparison]::OrdinalIgnoreCase) -or
-            -not [string]::Equals([string]$marker.executablePath, [string]$Launch.Path, [StringComparison]::OrdinalIgnoreCase) -or
-            [string]$marker.processStartTimeUtc -cne [string]$Launch.OwnerStartTimeUtc) { return (& $result $false 'profile_marker_mismatch') }
+            -not [string]::Equals([string]$marker.executablePath, [string]$Launch.Path, [StringComparison]::OrdinalIgnoreCase)) {
+            return (& $result $false 'profile_marker_mismatch')
+        }
+        if (-not (Test-MihariBrowserUtcIdentityEqual -Left $marker.processStartTimeUtc -Right $Launch.OwnerStartTimeUtc)) {
+            return (& $result $false 'profile_marker_mismatch')
+        }
         try {
             $processInventory = @(Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = {0}' -f [int]$Launch.Pid) -ErrorAction Stop)
         }
@@ -484,13 +523,15 @@ function Get-MihariBrowserOwnedProcessVerification {
         try {
             if ($process.HasExited) { return (& $result $false 'process_identity_unavailable') }
             $actualPath = [string]$process.MainModule.FileName
-            $actualStart = $process.StartTime.ToUniversalTime()
-            try { $expectedStart = [DateTime]::Parse([string]$Launch.OwnerStartTimeUtc).ToUniversalTime() }
-            catch { return (& $result $false 'process_start_time_mismatch') }
+            $actualStartTicks = Get-MihariBrowserUtcIdentityTicks -Value $process.StartTime.ToUniversalTime()
+            $expectedStartTicks = Get-MihariBrowserUtcIdentityTicks -Value $Launch.OwnerStartTimeUtc
+            if ($null -eq $actualStartTicks -or $null -eq $expectedStartTicks) {
+                return (& $result $false 'process_start_time_mismatch')
+            }
             if (-not [string]::Equals([System.IO.Path]::GetFullPath($actualPath), [System.IO.Path]::GetFullPath([string]$Launch.Path), [StringComparison]::OrdinalIgnoreCase)) {
                 return (& $result $false 'process_executable_mismatch')
             }
-            if ([Math]::Abs(($actualStart - $expectedStart).TotalSeconds) -gt 1.0) {
+            if ([Math]::Abs([long]$actualStartTicks - [long]$expectedStartTicks) -gt [TimeSpan]::TicksPerSecond) {
                 return (& $result $false 'process_start_time_mismatch')
             }
             return (& $result $true $null)
@@ -1243,7 +1284,7 @@ function Start-MihariBrowserObservation {
         return (New-MihariBrowserObservationUnavailableResult -Session $Session -Launch $Launch -ErrorCode 'profile_owner_unverified')
     }
     if ([int]$Launch.Pid -ne [int]$ownerIdentity.ProcessId -or
-        [string]$Launch.OwnerStartTimeUtc -cne [string]$ownerIdentity.OwnerStartTimeUtc) {
+        -not (Test-MihariBrowserUtcIdentityEqual -Left $Launch.OwnerStartTimeUtc -Right $ownerIdentity.OwnerStartTimeUtc)) {
         return (New-MihariBrowserObservationUnavailableResult -Session $Session -Launch $Launch -ErrorCode 'profile_owner_changed')
     }
     $ownedProcessVerification = $null

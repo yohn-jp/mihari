@@ -78,14 +78,32 @@ try {
         Pid = 765432
         Path = $executablePath
         ProfilePath = $profilePath
-        OwnerStartTimeUtc = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        OwnerStartTimeUtc = '2026-09-01T01:02:03.0000000Z'
         ProfileOwnershipId = $null
     }
     Assert-MihariBrowserProfileTest (Set-MihariBrowserProfileOwnership -SessionMetadata $session -Result $launch) 'A fresh Mihari profile with a verified launch identity receives an ownership record and marker.'
     $ownershipId = [string]$launch.ProfileOwnershipId
     Assert-MihariBrowserProfileTest ($ownershipId -match '^[0-9a-f]{32}$') 'The ownership ID is a generated fixed-format value.'
-    Assert-MihariBrowserProfileTest ([System.IO.File]::Exists((Get-MihariBrowserProfileMarkerPath -ProfilePath $profilePath)) -and
-        (Test-MihariBrowserProfileMarker -Record ((Get-MihariBrowserProfileRecords -SessionMetadata $session)[0]) -SessionId $sessionId)) 'The canonical BrowserObservation ownership marker must match the persisted profile identity.'
+    $profileRecord = (Get-MihariBrowserProfileRecords -SessionMetadata $session)[0]
+    $parsedOwnerTime = (ConvertFrom-Json -InputObject ('{"ownerStartTimeUtc":"' + $launch.OwnerStartTimeUtc + '"}')).ownerStartTimeUtc
+    $equivalentOffsetTime = [DateTimeOffset]::Parse([string]$launch.OwnerStartTimeUtc, [Globalization.CultureInfo]::InvariantCulture).ToOffset([TimeSpan]::FromHours(1)).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    $oneTickLater = [DateTimeOffset]::Parse([string]$launch.OwnerStartTimeUtc, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime.AddTicks(1).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    Assert-MihariBrowserProfileTest ((Test-MihariBrowserUtcIdentityEqual -Left $parsedOwnerTime -Right $launch.OwnerStartTimeUtc) -and
+        (Test-MihariBrowserUtcIdentityEqual -Left $equivalentOffsetTime -Right $launch.OwnerStartTimeUtc) -and
+        -not (Test-MihariBrowserUtcIdentityEqual -Left $oneTickLater -Right $launch.OwnerStartTimeUtc) -and
+        -not (Test-MihariBrowserUtcIdentityEqual -Left '2026-09-01T01:02:03.0000000' -Right $launch.OwnerStartTimeUtc)) 'UTC ownership identity accepts equivalent explicit offsets and rejects drift or timestamps without a zone.'
+    $profileMarkerPath = Get-MihariBrowserProfileMarkerPath -ProfilePath $profilePath
+    Assert-MihariBrowserProfileTest ([System.IO.File]::Exists($profileMarkerPath) -and
+        (Test-MihariBrowserProfileMarker -Record $profileRecord -SessionId $sessionId)) 'The canonical BrowserObservation ownership marker must match the persisted profile identity.'
+    $profileMarker = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($profileMarkerPath, [System.Text.Encoding]::UTF8))
+    $profileMarker.processStartTimeUtc = $equivalentOffsetTime
+    [System.IO.File]::WriteAllText($profileMarkerPath, (ConvertTo-Json -InputObject $profileMarker -Compress), [System.Text.UTF8Encoding]::new($false))
+    Assert-MihariBrowserProfileTest (Test-MihariBrowserProfileMarker -Record $profileRecord -SessionId $sessionId) 'The persisted profile marker must compare equivalent UTC offsets across ConvertFrom-Json runtimes.'
+    $profileMarker.processStartTimeUtc = $oneTickLater
+    [System.IO.File]::WriteAllText($profileMarkerPath, (ConvertTo-Json -InputObject $profileMarker -Compress), [System.Text.UTF8Encoding]::new($false))
+    Assert-MihariBrowserProfileTest (-not (Test-MihariBrowserProfileMarker -Record $profileRecord -SessionId $sessionId)) 'The persisted profile marker must reject a one-tick start-time identity drift.'
+    $profileMarker.processStartTimeUtc = $launch.OwnerStartTimeUtc
+    [System.IO.File]::WriteAllText($profileMarkerPath, (ConvertTo-Json -InputObject $profileMarker -Compress), [System.Text.UTF8Encoding]::new($false))
 
     $unrelatedProfileProcess = [pscustomobject]@{
         ProcessId = 1234
