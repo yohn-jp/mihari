@@ -148,7 +148,13 @@ try {
     $exactFilesResult = @($exactComparison.items | Where-Object { $_.dependencyId -eq $uploadDependency.dependencyId })[0]
     $filesChild = @($projection.items | Where-Object { $_.path -eq '/files/42' })[0]
     $filesChildResult = @($exactComparison.items | Where-Object { $_.dependencyId -eq $filesChild.dependencyId })[0]
-    Assert-MihariTest -Condition ($exactFilesResult.status -eq 'covered' -and $filesChildResult.status -eq 'uncovered') -Message 'Neutral exact path rules must cover only the exact path.'
+    $normalizedExactPolicy = ConvertTo-MihariNeutralPolicyRuleSet -PolicyDocument $exactPolicy
+    $exactPolicyDiagnostics = [pscustomobject]@{
+        exactFiles = $(if ($null -eq $exactFilesResult) { $null } else { [pscustomobject]@{ status = $exactFilesResult.status; reason = $exactFilesResult.reason; path = $exactFilesResult.path } })
+        filesChild = $(if ($null -eq $filesChildResult) { $null } else { [pscustomobject]@{ status = $filesChildResult.status; reason = $filesChildResult.reason; path = $filesChildResult.path } })
+        normalizedPolicy = $normalizedExactPolicy
+    }
+    Assert-MihariTest -Condition ($exactFilesResult.status -eq 'covered' -and $filesChildResult.status -eq 'uncovered') -Message ('Neutral exact path rules must cover only the exact path. Diagnostics: ' + (ConvertTo-Json -InputObject $exactPolicyDiagnostics -Depth 8 -Compress))
     $firstPolicyPage = Compare-MihariDependencyPolicy -Dependencies $projection.items -PolicyDocument $exactPolicy -MaximumItems 1
     Assert-MihariTest -Condition ($null -ne $firstPolicyPage.nextCursor -and $firstPolicyPage.scopeTotal -gt 1) -Message 'Policy comparison needs bounded cursor paging and a full scope total.'
     $secondPolicyPage = Compare-MihariDependencyPolicy -Dependencies $projection.items -PolicyDocument $exactPolicy -MaximumItems 1 -Cursor $firstPolicyPage.nextCursor
