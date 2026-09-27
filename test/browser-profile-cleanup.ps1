@@ -142,6 +142,11 @@ try {
     Set-Item -Path Function:\Get-MihariBrowserProcesses -Value { return @($script:profileProcessInventory) }
     $getStatus = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method GET -Path '/api/browser' -Token $null)
     Assert-MihariBrowserProfileTest ($getStatus.StatusCode -eq 200 -and $getStatus.Value.profiles.Count -eq 1 -and $getStatus.Value.profiles[0].cleanupAvailable) 'GET /api/browser exposes live verified profile state for the UI.'
+    Set-Item -Path Function:\Get-MihariBrowserProcesses -Value { throw 'fixture inventory unavailable' }
+    $unavailableCleanup = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method POST -Path '/api/browser/cleanup' -Token $session.ControlToken -Body ([pscustomobject]@{ profileOwnershipId = $ownershipId; confirmCleanup = $true }))
+    Assert-MihariBrowserProfileTest ($unavailableCleanup.StatusCode -eq 409 -and $unavailableCleanup.Value.errorCode -eq 'profile_cleanup_unavailable' -and
+        $unavailableCleanup.Value.profile.state -eq 'process_state_unavailable' -and [System.IO.Directory]::Exists($profilePath)) 'Cleanup must fail closed and preserve the profile if the shared Edge process inventory is unavailable.'
+    Set-Item -Path Function:\Get-MihariBrowserProcesses -Value { return @($script:profileProcessInventory) }
     $cleaned = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method POST -Path '/api/browser/cleanup' -Token $session.ControlToken -Body ([pscustomobject]@{ profileOwnershipId = $ownershipId; confirmCleanup = $true }))
     $cleanupCode = [string]$cleaned.Value.errorCode
     if ($cleanupCode -notin @('invalid_profile_id', 'profile_not_owned', 'profile_cleanup_unavailable', 'profile_cleanup_failed')) { $cleanupCode = 'none_or_unknown' }
