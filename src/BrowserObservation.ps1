@@ -307,6 +307,108 @@ function New-MihariBrowserProfileOwnerMarker {
     }
 }
 
+function Test-MihariBrowserOwnedProfileArgument {
+    param(
+        [AllowNull()][string] $CommandLine,
+        [Parameter(Mandatory = $true)][string] $ProfilePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine) -or $ProfilePath.Length -gt 4096) { return $false }
+    try { $fullPath = [System.IO.Path]::GetFullPath($ProfilePath) }
+    catch { return $false }
+    $escapedPath = [System.Text.RegularExpressions.Regex]::Escape($fullPath)
+    $pattern = '(?i)(?:^|[\s"])--user-data-dir=(?:' + $escapedPath + '|"' + $escapedPath + '")(?=$|[\s"])'
+    return [System.Text.RegularExpressions.Regex]::IsMatch($CommandLine, $pattern)
+}
+
+function Get-MihariBrowserOwnedProfileIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $SessionId,
+        [Parameter(Mandatory = $true)][object] $Launch,
+        [ValidateRange(1, 15)][int] $TimeoutSeconds = 5
+    )
+
+    $failure = { param($Code, $Count) [pscustomobject]@{ Success = $false; ProcessId = $null; OwnerStartTimeUtc = $null; ErrorCode = $Code; MatchingProcessCount = [int]$Count } }
+    if ($null -eq (Get-Command Get-CimInstance -CommandType Cmdlet -ErrorAction SilentlyContinue)) {
+        return (& $failure 'browser_process_inventory_unavailable' 0)
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$Launch.ProfilePath) -or
+        [string]::IsNullOrWhiteSpace([string]$Launch.Path) -or
+        [string]::IsNullOrWhiteSpace($SessionId)) {
+        return (& $failure 'browser_profile_identity_invalid' 0)
+    }
+
+    $profilePath = $null
+    $executablePath = $null
+    try {
+        $profilePath = [System.IO.Path]::GetFullPath([string]$Launch.ProfilePath)
+        $executablePath = [System.IO.Path]::GetFullPath([string]$Launch.Path)
+    }
+    catch { return (& $failure 'browser_profile_identity_invalid' 0) }
+
+    $safeSessionId = [regex]::Replace($SessionId, '[^A-Za-z0-9_-]', '_')
+    $expectedParent = [System.IO.Path]::GetFullPath((Join-Path ([System.IO.Path]::GetTempPath()) 'Mihari'))
+    $leaf = [System.IO.Path]::GetFileName($profilePath)
+    if (-not [string]::Equals([System.IO.Path]::GetDirectoryName($profilePath), $expectedParent, [StringComparison]::OrdinalIgnoreCase) -or
+        $leaf -notmatch ('^Edge-' + [regex]::Escape($safeSessionId) + '-[0-9a-fA-F]{32}$')) {
+        return (& $failure 'browser_profile_identity_invalid' 0)
+    }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $matchCount = 0
+    do {
+        $processes = @()
+        try {
+            $processes = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'msedge.exe'" -ErrorAction Stop)
+        }
+        catch { return (& $failure 'browser_process_inventory_unavailable' $matchCount) }
+
+        $rootProcesses = New-Object 'System.Collections.Generic.List[object]'
+        $profileMatchCount = 0
+        $unverifiableCount = 0
+        foreach ($processInfo in $processes) {
+            $commandLine = [string]$processInfo.CommandLine
+            if (-not (Test-MihariBrowserOwnedProfileArgument -CommandLine $commandLine -ProfilePath $profilePath)) { continue }
+            $profileMatchCount++
+            $inventoryPath = [string]$processInfo.ExecutablePath
+            if ([string]::IsNullOrWhiteSpace($inventoryPath)) { $unverifiableCount++; continue }
+            try {
+                if (-not [string]::Equals([System.IO.Path]::GetFullPath($inventoryPath), $executablePath, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                $process = [System.Diagnostics.Process]::GetProcessById([int]$processInfo.ProcessId)
+                try {
+                    if ($process.HasExited) { continue }
+                    $actualPath = [string]$process.MainModule.FileName
+                    if (-not [string]::Equals([System.IO.Path]::GetFullPath($actualPath), $executablePath, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                    $startTimeUtc = $process.StartTime.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                    if ([string]::IsNullOrWhiteSpace($startTimeUtc)) { continue }
+                    if ($commandLine -match '(?i)(?:^|[\s"])--type=') { continue }
+                    $rootProcesses.Add([pscustomobject]@{ ProcessId = [int]$processInfo.ProcessId; OwnerStartTimeUtc = $startTimeUtc })
+                }
+                finally { $process.Dispose() }
+            }
+            catch {
+                $unverifiableCount++
+            }
+        }
+
+        $matchCount = $profileMatchCount
+        if ($rootProcesses.Count -eq 1) {
+            $owner = $rootProcesses[0]
+            return [pscustomobject]@{
+                Success = $true; ProcessId = [int]$owner.ProcessId; OwnerStartTimeUtc = [string]$owner.OwnerStartTimeUtc
+                ErrorCode = $null; MatchingProcessCount = $matchCount
+            }
+        }
+        if ($rootProcesses.Count -gt 1) { return (& $failure 'browser_profile_owner_ambiguous' $matchCount) }
+        if ([DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $errorCode = 'browser_profile_process_not_found'
+    if ($matchCount -gt 0 -or $unverifiableCount -gt 0) { $errorCode = 'browser_profile_owner_unverifiable' }
+    return (& $failure $errorCode $matchCount)
+}
+
 function Test-MihariBrowserOwnedProcess {
     param(
         [Parameter(Mandatory = $true)][string] $SessionId,
@@ -327,6 +429,12 @@ function Test-MihariBrowserOwnedProcess {
             -not [string]::Equals([string]$marker.profilePath, $profilePath, [StringComparison]::OrdinalIgnoreCase) -or
             -not [string]::Equals([string]$marker.executablePath, [string]$Launch.Path, [StringComparison]::OrdinalIgnoreCase) -or
             [string]$marker.processStartTimeUtc -cne [string]$Launch.OwnerStartTimeUtc) { return $false }
+        $processInventory = @(Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = {0}' -f [int]$Launch.Pid) -ErrorAction Stop)
+        if ($processInventory.Count -ne 1 -or [string]$processInventory[0].Name -ine 'msedge.exe' -or
+            -not (Test-MihariBrowserOwnedProfileArgument -CommandLine ([string]$processInventory[0].CommandLine) -ProfilePath $profilePath)) { return $false }
+        if ([string]::IsNullOrWhiteSpace([string]$processInventory[0].ExecutablePath) -or
+            -not [string]::Equals([System.IO.Path]::GetFullPath([string]$processInventory[0].ExecutablePath),
+                [System.IO.Path]::GetFullPath([string]$Launch.Path), [StringComparison]::OrdinalIgnoreCase)) { return $false }
         $process = [System.Diagnostics.Process]::GetProcessById([int]$Launch.Pid)
         try {
             if ($process.HasExited) { return $false }
@@ -838,10 +946,12 @@ function Invoke-MihariBrowserObservationWorker {
         if ($_.Exception.Message -eq 'browser_profile_owner_unverified') { $safeFailure = 'profile_owner_unverified' }
         elseif ($_.Exception.Message -eq 'browser_profile_owner_changed') { $safeFailure = 'profile_owner_changed' }
         elseif ($_.Exception.Message -eq 'browser_cdp_message_too_large') { $safeFailure = 'cdp_message_too_large' }
+        $safeErrorType = [string]$_.Exception.GetType().FullName
+        if ($safeErrorType.Length -gt 128) { $safeErrorType = $safeErrorType.Substring(0, 128) }
         try {
             $null = Write-MihariBrowserObservationFact -Session $Session -Launch $Launch -Stage 'browser.observation' `
                 -Outcome 'failed' -ConnectionId ('browser-profile-' + $sourceId) -RequestId $null `
-                -ElapsedMs $watch.Elapsed.TotalMilliseconds -Data @{ browserError = $safeFailure } -Coverage 'unknown'
+                -ElapsedMs $watch.Elapsed.TotalMilliseconds -Data @{ browserError = $safeFailure; errorType = $safeErrorType } -Coverage 'unknown'
         }
         catch {
             Write-Warning ('Mihari could not record browser observation failure ({0}).' -f $_.Exception.GetType().FullName)
@@ -906,8 +1016,16 @@ function Start-MihariBrowserObservation {
     if ([string]$Session.Profile -eq 'http2-observe' -and [string]$Session.Mode -ne 'Tunnel') {
         return [pscustomobject]@{ Status = 'unavailable'; Reason = 'The http2-observe profile requires a Tunnel session.' }
     }
-    if (-not (New-MihariBrowserProfileOwnerMarker -SessionId ([string]$Session.Id) -Launch $Launch)) {
-        return [pscustomobject]@{ Status = 'launched_but_unverified'; Reason = 'Mihari could not establish a safe ownership marker for this Edge profile.' }
+    $ownerIdentity = Get-MihariBrowserOwnedProfileIdentity -SessionId ([string]$Session.Id) -Launch $Launch -TimeoutSeconds 5
+    if (-not $ownerIdentity.Success) {
+        return [pscustomobject]@{ Status = 'unavailable'; Reason = ('Mihari could not verify the active Edge process for its owned profile ({0}).' -f [string]$ownerIdentity.ErrorCode) }
+    }
+    if ([int]$Launch.Pid -ne [int]$ownerIdentity.ProcessId -or
+        [string]$Launch.OwnerStartTimeUtc -cne [string]$ownerIdentity.OwnerStartTimeUtc) {
+        return [pscustomobject]@{ Status = 'unavailable'; Reason = 'Mihari could not verify that the diagnostic Edge owner identity stayed unchanged.' }
+    }
+    if (-not (Test-MihariBrowserOwnedProcess -SessionId ([string]$Session.Id) -Launch $Launch)) {
+        return [pscustomobject]@{ Status = 'unavailable'; Reason = 'Mihari could not verify the diagnostic Edge ownership marker and active process.' }
     }
 
     $lock = Get-MihariBrowserMemberValue -InputObject $Session -Name 'BrowserObservationLock'
@@ -934,9 +1052,6 @@ function Start-MihariBrowserObservation {
         Clear-MihariCompletedBrowserObservationWorkers -Session $Session
         if ($Session.BrowserObservationWorkers.Count -ge 2) {
             return [pscustomobject]@{ Status = 'unavailable'; Reason = 'Mihari reached its bounded diagnostic browser observation limit.' }
-        }
-        if (-not $PSBoundParameters.ContainsKey('InitialUrl')) {
-            $InitialUrl = [string](Get-MihariBrowserMemberValue -InputObject $Launch -Name 'InitialNavigationUrl')
         }
         $launch.SourceIdentity = Get-MihariBrowserScopedId -Scope ([string]$Session.Id) -Value ([string]$Launch.Pid + ':' + [string]$Launch.ProfilePath) -Prefix 'edge'
         $launch.ClockId = 'edge-clock-' + $launch.SourceIdentity

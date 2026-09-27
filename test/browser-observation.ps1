@@ -23,6 +23,13 @@ function Read-MihariBrowserObservationTestText {
 
 $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ('mihari-browser-observation-test-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($temporaryDirectory)
+$testProfilePath = Join-Path (Join-Path $temporaryDirectory 'Edge Profile') 'Edge-owned-0123456789abcdef0123456789abcdef'
+$quotedBrowserCommandLine = '"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" "--user-data-dir={0}" --remote-debugging-port=0' -f $testProfilePath
+$quotedProfileValueCommandLine = '"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --user-data-dir="{0}" --remote-debugging-port=0' -f $testProfilePath
+$neighboringProfileCommandLine = '"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" "--user-data-dir={0}-other" --remote-debugging-port=0' -f $testProfilePath
+Assert-MihariTest -Condition ((Test-MihariBrowserOwnedProfileArgument -CommandLine $quotedBrowserCommandLine -ProfilePath $testProfilePath) -and
+    (Test-MihariBrowserOwnedProfileArgument -CommandLine $quotedProfileValueCommandLine -ProfilePath $testProfilePath) -and
+    -not (Test-MihariBrowserOwnedProfileArgument -CommandLine $neighboringProfileCommandLine -ProfilePath $testProfilePath)) -Message 'Owned Edge verification must parse quoted profile arguments exactly without accepting a neighboring profile path.'
 $writer = $null
 try {
     $target = ConvertTo-MihariBrowserSafeTarget -Url 'https://alice:password@example.test/api/upload?token=browser-query-secret&session=browser-query-secret#fragment'

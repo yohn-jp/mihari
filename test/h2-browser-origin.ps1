@@ -230,8 +230,10 @@ function Invoke-MihariH2FixtureConnection {
         if ($preface -cne "PRI * HTTP/2.0`r`n`r`nSM`r`n`r`n") { throw 'h2 client connection preface was invalid.' }
         Write-MihariH2FixtureFrame -Stream $tls -Type 4 -Flags 0 -StreamId 0 -Payload ([byte[]]@())
 
-        $transactionCount = 0
-        while ($transactionCount -lt 2) {
+        $rootTransactionCount = 0
+        $totalTransactionCount = 0
+        $fixtureDeadline = [DateTime]::UtcNow.AddSeconds(12)
+        while ($rootTransactionCount -lt 2 -and $totalTransactionCount -lt 64 -and [DateTime]::UtcNow -lt $fixtureDeadline) {
             $frame = Read-MihariH2FixtureFrame -Stream $tls
             if ($frame.Type -eq 4 -and ($frame.Flags -band 0x01) -eq 0) {
                 Write-MihariH2FixtureFrame -Stream $tls -Type 4 -Flags 1 -StreamId 0 -Payload ([byte[]]@())
@@ -245,9 +247,10 @@ function Invoke-MihariH2FixtureConnection {
 
             $headerBlock = Get-MihariH2FixtureHeaderBlock -FirstFrame $frame -Stream $tls
             $rootPathObserved = Test-MihariHpackRootPath -HeaderBlock $headerBlock
-            $transactionCount++
+            $totalTransactionCount++
             $body = [byte[]]@()
-            if ($transactionCount -eq 1) {
+            if ($rootPathObserved) { $rootTransactionCount++ }
+            if ($rootPathObserved -and $rootTransactionCount -eq 1) {
                 $page = '<!doctype html><html><body><script>setTimeout(function(){fetch("/")},500)</script>h2 tunnel fixture</body></html>'
                 $body = [System.Text.Encoding]::UTF8.GetBytes($page)
             }
@@ -262,6 +265,7 @@ function Invoke-MihariH2FixtureConnection {
             }
             [System.IO.File]::AppendAllText($TransactionsFile, (ConvertTo-Json -InputObject $record -Compress) + [Environment]::NewLine, [System.Text.Encoding]::UTF8)
         }
+        if ($rootTransactionCount -lt 2) { throw 'The local h2 fixture did not receive the initial root GET and its delayed script fetch within the bounded stream window.' }
     }
     finally {
         if ($null -ne $tls) { $tls.Dispose() }
