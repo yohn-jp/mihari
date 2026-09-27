@@ -248,9 +248,10 @@ try {
         evidenceValid = [bool]$validTlsEvidenceCheck.Valid; evidenceReferenceCount = @($validTlsEvidenceCheck.EvidenceReferences).Count
         normalizedEvidenceHost = $validTlsHost; matchingDependencyCount = $tlsMatchedDependencies.Count
         matchingNecessityStates = @($tlsMatchedDependencies | ForEach-Object { $_.necessityState })
-        hostScopeConfirmationSupplied = [bool]$tlsHostScopeConfirmed; proposals = $tlsProposalDiagnostics
+        hostScopeConfirmationSupplied = [bool]$tlsHostScopeConfirmed
+        unsupportedTlsEvidenceCount = $validTlsProposals.unsupportedTlsEvidenceCount; proposals = $tlsProposalDiagnostics
     }
-    Assert-MihariTest -Condition ($null -ne $tlsProposal -and $tlsProposal.policyDomain -eq 'mihari-local-inspection' -and $tlsProposal.upstreamRoute -eq 'unchanged' -and $tlsProposal.exactHostScopeConfirmed -and $tlsProposal.proposalStatus -eq 'candidate') -Message ('A supported TLS comparison needs separate explicit exact-host local-exclusion confirmation and cannot change the upstream route. Diagnostics: ' + (ConvertTo-Json -InputObject $tlsProposalFailureDetails -Depth 8 -Compress))
+    Assert-MihariTest -Condition ($null -ne $tlsProposal -and $tlsProposal.policyDomain -eq 'mihari-local-inspection' -and $tlsProposal.upstreamRoute -eq 'unchanged' -and $tlsProposal.exactHostScopeConfirmed -and $tlsProposal.proposalStatus -eq 'candidate' -and $validTlsProposals.unsupportedTlsEvidenceCount -eq 0) -Message ('A supported TLS comparison needs separate explicit exact-host local-exclusion confirmation and cannot change the upstream route. Diagnostics: ' + (ConvertTo-Json -InputObject $tlsProposalFailureDetails -Depth 8 -Compress))
     $unconfirmedTlsProposal = New-MihariPolicyProposals -Dependencies @($confirmedChild) -TlsEvidence @($validTlsEvidence)
     Assert-MihariTest -Condition (@($unconfirmedTlsProposal.items)[0].proposalStatus -eq 'requires_confirmation' -and 'exact_host_scope' -in @($unconfirmedTlsProposal.items)[0].requiresConfirmation) -Message 'A host-wide TLS exclusion stays withheld from use until exact-host scope is explicitly confirmed.'
 
