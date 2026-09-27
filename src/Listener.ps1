@@ -71,6 +71,17 @@ function Stop-MihariListener {
     if ($null -ne $Session.Listener) {
         try { $Session.Listener.Stop() } catch { Write-Warning ("Mihari listener stop failed: {0}" -f $_.Exception.Message) }
     }
+    if ($null -ne $Session.PSObject.Properties['ActiveUpstreamClients'] -and
+        $null -ne $Session.ActiveUpstreamClients) {
+        $registry = $Session.ActiveUpstreamClients
+        [System.Threading.Monitor]::Enter($registry.SyncRoot)
+        try { $clients = @($registry.Values) }
+        finally { [System.Threading.Monitor]::Exit($registry.SyncRoot) }
+        foreach ($upstreamClient in $clients) {
+            try { $upstreamClient.Close() }
+            catch { Write-Warning ("Mihari upstream socket cleanup failed: {0}" -f $_.Exception.Message) }
+        }
+    }
 }
 
 function Start-MihariListener {
@@ -99,14 +110,23 @@ function Start-MihariListener {
     $listener = New-Object System.Net.Sockets.TcpListener -ArgumentList @([System.Net.IPAddress]::Loopback, $port)
     $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $maxWorkers)
     $workers = New-Object System.Collections.ArrayList
+    $activeUpstreamClients = [System.Collections.Hashtable]::Synchronized(@{})
+    if ($null -eq $Session.PSObject.Properties['ActiveUpstreamClients']) {
+        $Session | Add-Member -NotePropertyName ActiveUpstreamClients -NotePropertyValue $activeUpstreamClients
+    }
+    else { $Session.ActiveUpstreamClients = $activeUpstreamClients }
+    if ($null -eq $Session.PSObject.Properties['ActiveLongLivedCount']) {
+        $Session | Add-Member -NotePropertyName ActiveLongLivedCount -NotePropertyValue 0
+    }
+    else { $Session.ActiveLongLivedCount = 0 }
     $workerScript = @'
-param($WorkerSession, $WorkerClient, $WorkerSourceRoot, $AcceptedMode)
+param($WorkerSession, $WorkerClient, $WorkerSourceRoot, $AcceptedMode, $AcceptedConfigurationRevision, $AcceptedHttpConnectionPolicy, $AcceptedLocalInspectExclusions)
 $ErrorActionPreference = 'Stop'
 try {
     foreach ($sourceFile in (Get-ChildItem -LiteralPath $WorkerSourceRoot -Filter '*.ps1' -File | Sort-Object Name)) {
         . $sourceFile.FullName
     }
-    Handle-MihariConnection -Session $WorkerSession -Client $WorkerClient -AcceptedMode $AcceptedMode
+    Handle-MihariConnection -Session $WorkerSession -Client $WorkerClient -AcceptedMode $AcceptedMode -AcceptedConfigurationRevision $AcceptedConfigurationRevision -AcceptedHttpConnectionPolicy $AcceptedHttpConnectionPolicy -AcceptedLocalInspectExclusions $AcceptedLocalInspectExclusions
 }
 finally {
     $WorkerClient.Close()
@@ -134,6 +154,8 @@ finally {
         [void](Save-MihariSessionMetadata -Session $Session)
 
         $lastHeartbeatPersist = [DateTime]::MinValue
+        $lastCapacityEvent = [DateTime]::MinValue
+        $lastResourceEvent = [DateTime]::MinValue
 
         while (-not (Test-Path -LiteralPath $Session.StopPath)) {
             $Session.ProxyHeartbeatUtc = [DateTime]::UtcNow.ToString('o')
@@ -160,7 +182,34 @@ finally {
             }
             $Session.ActiveConnectionCount = $workers.Count
 
+            if (([DateTime]::UtcNow - $lastResourceEvent).TotalSeconds -ge 5) {
+                $process = [System.Diagnostics.Process]::GetCurrentProcess()
+                try {
+                    $resourceData = @{
+                        workerOccupancy = $workers.Count
+                        maxWorkers = $maxWorkers
+                        pendingConnections = [bool]$listener.Pending()
+                        workingSetBytes = [long]$process.WorkingSet64
+                        cpuTotalMs = [double]$process.TotalProcessorTime.TotalMilliseconds
+                        evidenceBytes = [long]([System.IO.FileInfo]::new([string]$Session.EventsPath)).Length
+                    }
+                    if ($null -ne $Session.Writer -and
+                        $null -ne $Session.Writer.PSObject.Properties['LastWriteLagMs']) {
+                        $resourceData.writerLagMs = [double]$Session.Writer.LastWriteLagMs
+                    }
+                }
+                finally { $process.Dispose() }
+                $null = Write-MihariEvent -Session $Session -ConnectionId 'session' -Stage 'observer.resource' -Outcome 'success' -ElapsedMs 0 -Data $resourceData
+                $lastResourceEvent = [DateTime]::UtcNow
+            }
+
             if ($workers.Count -ge $maxWorkers) {
+                if ($listener.Pending() -and ([DateTime]::UtcNow - $lastCapacityEvent).TotalSeconds -ge 1) {
+                    $null = Write-MihariEvent -Session $Session -ConnectionId 'session' -Stage 'listener.capacity' -Outcome 'saturated' -ElapsedMs 0 -Data @{
+                        workerOccupancy = $workers.Count; maxWorkers = $maxWorkers; queueSaturated = $true
+                    }
+                    $lastCapacityEvent = [DateTime]::UtcNow
+                }
                 Start-Sleep -Milliseconds 25
                 continue
             }
@@ -171,7 +220,21 @@ finally {
                 }
                 $client = $listener.AcceptTcpClient()
                 [System.Threading.Monitor]::Enter($Session.StateLock)
-                try { $acceptedMode = [string]$Session.Mode }
+                try {
+                    $acceptedMode = [string]$Session.Mode
+                    $acceptedConfigurationRevision = 0
+                    if ($null -ne $Session.PSObject.Properties['ConfigurationRevision']) {
+                        $acceptedConfigurationRevision = [int]$Session.ConfigurationRevision
+                    }
+                    $acceptedHttpConnectionPolicy = 'reuse'
+                    if ($null -ne $Session.PSObject.Properties['HttpConnectionPolicy']) {
+                        $acceptedHttpConnectionPolicy = [string]$Session.HttpConnectionPolicy
+                    }
+                    $acceptedLocalInspectExclusions = [string[]]@()
+                    if ($null -ne $Session.PSObject.Properties['LocalInspectExclusions']) {
+                        $acceptedLocalInspectExclusions = [string[]]@($Session.LocalInspectExclusions)
+                    }
+                }
                 finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
             }
             catch {
@@ -185,7 +248,7 @@ finally {
             try {
                 $powerShell = [System.Management.Automation.PowerShell]::Create()
                 $powerShell.RunspacePool = $pool
-                $null = $powerShell.AddScript($workerScript).AddArgument($Session).AddArgument($client).AddArgument($sourceRoot).AddArgument($acceptedMode)
+                $null = $powerShell.AddScript($workerScript).AddArgument($Session).AddArgument($client).AddArgument($sourceRoot).AddArgument($acceptedMode).AddArgument($acceptedConfigurationRevision).AddArgument($acceptedHttpConnectionPolicy).AddArgument($acceptedLocalInspectExclusions)
                 $asyncResult = $powerShell.BeginInvoke()
                 $null = $workers.Add([pscustomobject]@{
                     PowerShell = $powerShell
@@ -205,6 +268,14 @@ finally {
     finally {
         $listener.Stop()
         $Session.ActiveConnectionCount = 0
+        $registry = $Session.ActiveUpstreamClients
+        [System.Threading.Monitor]::Enter($registry.SyncRoot)
+        try { $upstreamClients = @($registry.Values) }
+        finally { [System.Threading.Monitor]::Exit($registry.SyncRoot) }
+        foreach ($upstreamClient in $upstreamClients) {
+            try { $upstreamClient.Close() }
+            catch { Write-Warning ("Mihari upstream socket cleanup failed: {0}" -f $_.Exception.Message) }
+        }
         foreach ($worker in $workers) {
             try { $worker.Client.Close() } catch { Write-Warning ("Mihari client socket cleanup failed: {0}" -f $_.Exception.Message) }
         }
