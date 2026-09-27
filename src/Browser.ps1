@@ -145,6 +145,9 @@ function New-MihariBrowserLaunchResult {
         RequestedTlsPolicy    = $RequestedTlsPolicy
         ObservationStatus     = $ObservationStatus
         OwnerStartTimeUtc     = $OwnerStartTimeUtc
+        SourceIdentity        = $null
+        SourceVersion         = $null
+        ClockId               = $null
         ProfileWarning        = $(if (-not [string]::IsNullOrWhiteSpace($ProfilePath)) { 'The diagnostic Edge profile can retain browser-managed cookies and history. Close Edge before cleanup.' } else { $null })
     }
 }
@@ -162,7 +165,7 @@ function Get-MihariEdgeLaunchArguments {
         [string] $Url,
 
         [Parameter(Mandatory = $false)]
-        [ValidateSet('compatibility', 'http2-observe')]
+        [ValidateSet('compatibility', 'http2-observe', 'http2-inspect')]
         [string] $DiagnosticProfile = 'compatibility'
     )
 
@@ -250,6 +253,7 @@ function Complete-MihariBrowserLaunch {
     # command-line arguments may contain credentials or query values.
     $browserLaunchSucceeded = [bool]$Result.Success
     $compatibilityProfile = ([string]$Result.DiagnosticProfile -eq 'compatibility')
+    $tls12Profile = $compatibilityProfile -or ([string]$Result.DiagnosticProfile -eq 'http2-inspect')
     $launchMetadata = [pscustomobject]@{
         schemaVersion = 2
         timestamp = [DateTime]::UtcNow.ToString('o')
@@ -261,11 +265,12 @@ function Complete-MihariBrowserLaunch {
         quicDisabled = $browserLaunchSucceeded
         http2Disabled = ($browserLaunchSucceeded -and $compatibilityProfile)
         nonProxiedWebRtcUdpDisabled = $browserLaunchSucceeded
-        maximumTlsVersion = $(if ($browserLaunchSucceeded -and $compatibilityProfile) { 'tls1.2' } else { $null })
+        maximumTlsVersion = $(if ($browserLaunchSucceeded -and $tls12Profile) { 'tls1.2' } else { $null })
         profile = [string]$Result.DiagnosticProfile
         profileVersion = [int]$Result.ProfileVersion
         requestedProxyServer = $browserLaunchSucceeded
         requestedLoopbackProxying = $browserLaunchSucceeded
+        requestedRemoteDebugging = $browserLaunchSucceeded
         requestedQuicDisabled = $browserLaunchSucceeded
         requestedHttp2Disabled = ($browserLaunchSucceeded -and $compatibilityProfile)
         requestedHttp2Enabled = ($browserLaunchSucceeded -and -not $compatibilityProfile)
@@ -307,16 +312,18 @@ function Get-MihariBrowserProfileSettings {
         $profileName = [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'Profile')
     }
     if ([string]::IsNullOrWhiteSpace($profileName)) { $profileName = 'compatibility' }
-    if ($profileName -notin @('compatibility', 'http2-observe')) {
+    if ($profileName -notin @('compatibility', 'http2-observe', 'http2-inspect')) {
         throw ('Unsupported Mihari diagnostic browser profile: {0}' -f $profileName)
     }
-    if ($profileName -eq 'http2-observe') {
+    if ($profileName -in @('http2-observe', 'http2-inspect')) {
         $modeName = [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'mode')
         if ([string]::IsNullOrWhiteSpace($modeName)) {
             $modeName = [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'Mode')
         }
-        if (-not [string]::IsNullOrWhiteSpace($modeName) -and $modeName -ne 'Tunnel') {
-            throw 'The http2-observe diagnostic browser profile requires Tunnel mode.'
+        $requiredMode = 'Tunnel'
+        if ($profileName -eq 'http2-inspect') { $requiredMode = 'Inspect' }
+        if (-not [string]::IsNullOrWhiteSpace($modeName) -and $modeName -ne $requiredMode) {
+            throw ('The {0} diagnostic browser profile requires {1} mode.' -f $profileName, $requiredMode)
         }
     }
 
@@ -334,6 +341,14 @@ function Get-MihariBrowserProfileSettings {
             Version = $profileVersion
             RequestedHttpVersion = 'allow_h2'
             RequestedTlsPolicy = 'system_default'
+        }
+    }
+    if ($profileName -eq 'http2-inspect') {
+        return [pscustomobject]@{
+            Name = $profileName
+            Version = $profileVersion
+            RequestedHttpVersion = 'allow_h2'
+            RequestedTlsPolicy = 'maximum_tls_1_2'
         }
     }
     return [pscustomobject]@{
