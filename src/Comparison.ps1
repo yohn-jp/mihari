@@ -4,13 +4,29 @@ function Get-MihariComparisonProperty {
         [Parameter(Mandatory = $true)][string[]] $Names
     )
 
-    $value = Get-MihariMemberValue -InputObject $Trial -Names $Names
-    if ($null -ne $value) { return $value }
+    $targets = @($Trial)
     foreach ($containerName in @('profile', 'configuration', 'environment', 'browser', 'network')) {
         $container = Get-MihariMemberValue -InputObject $Trial -Names @($containerName)
-        if ($null -ne $container) {
-            $value = Get-MihariMemberValue -InputObject $container -Names $Names
-            if ($null -ne $value) { return $value }
+        if ($null -ne $container) { $targets += $container }
+    }
+    foreach ($target in $targets) {
+        foreach ($name in $Names) {
+            $value = $null
+            if ($target -is [System.Collections.IDictionary]) {
+                foreach ($key in $target.Keys) {
+                    if ([string]::Equals([string]$key, $name, [StringComparison]::OrdinalIgnoreCase)) {
+                        $value = $target[$key]
+                        break
+                    }
+                }
+            }
+            else {
+                $property = $target.PSObject.Properties[$name]
+                if ($null -ne $property) { $value = $property.Value }
+            }
+            if ($null -eq $value) { continue }
+            if ($value -is [System.Array] -or $value -is [System.Collections.IList]) { return ,$value }
+            return $value
         }
     }
     return $null
