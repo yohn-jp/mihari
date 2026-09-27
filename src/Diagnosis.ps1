@@ -170,6 +170,21 @@ function New-MihariObservedFact {
     param([Parameter(Mandatory = $true)] [object] $Record)
 
     $fact = [ordered]@{ eventId = $Record.EventId }
+    $timestamp = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $Record.Event -Data $Record.Data -Names @('timestamp'))
+    if ($null -ne $timestamp) { $fact['timestamp'] = $timestamp }
+    foreach ($name in @('sequence', 'source', 'trialId', 'caseId', 'configurationRevision', 'transportLeg', 'upstreamConnectionId', 'streamId', 'sourceIdentity', 'sourceVersion', 'protocolProfile', 'proxyAuthState', 'cacheState', 'networkFingerprint')) {
+        $value = Get-MihariEventValue -Event $Record.Event -Data $Record.Data -Names @($name)
+        if ($null -ne $value) {
+            if ($name -eq 'sequence') {
+                $sequenceNumber = 0L
+                if ([long]::TryParse([string]$value, [ref]$sequenceNumber) -and $sequenceNumber -gt 0) { $fact[$name] = $sequenceNumber }
+            }
+            else {
+                $safeValue = ConvertTo-MihariDiagnosisSafeText -Value $value
+                if ($null -ne $safeValue) { $fact[$name] = $safeValue }
+            }
+        }
+    }
     foreach ($name in @('stage', 'outcome', 'mode')) {
         $value = $Record.$name
         if ($null -ne $value) { $fact[$name] = $value }
@@ -205,9 +220,12 @@ function New-MihariFinding {
 
     $ids = New-Object 'System.Collections.Generic.List[string]'
     $facts = New-Object 'System.Collections.Generic.List[object]'
+    $evidenceRefs = New-Object 'System.Collections.Generic.List[object]'
     foreach ($record in $Records) {
         if (-not $ids.Contains([string]$record.EventId)) { $ids.Add([string]$record.EventId) }
         $facts.Add((New-MihariObservedFact -Record $record))
+        $evidenceSession = $record.SessionId
+        $evidenceRefs.Add([pscustomobject][ordered]@{ sessionId = $evidenceSession; eventId = $record.EventId })
     }
 
     return [pscustomobject][ordered]@{
@@ -215,9 +233,67 @@ function New-MihariFinding {
         summary = $Summary
         scope = $Scope
         evidenceIds = @($ids.ToArray())
+        evidenceRefs = @($evidenceRefs.ToArray())
         observedFacts = @($facts.ToArray())
+        ruleVersion = 'mihari-diagnosis/1'
+        classification = (Get-MihariFindingClassification -Code $Code)
+        evidenceStrength = (Get-MihariFindingEvidenceStrength -Code $Code)
         interpretation = $Interpretation
         limitations = $Limitations
+        nextCheck = (Get-MihariFindingNextCheck -Code $Code)
+    }
+}
+
+function Get-MihariFindingClassification {
+    param([Parameter(Mandatory = $true)][string] $Code)
+    switch ($Code) {
+        'upstream_proxy_auth_required' { return 'proxy_authentication' }
+        'upstream_proxy_rejected' { return 'upstream_proxy_rejection' }
+        'upstream_route_unresolved' { return 'upstream_route' }
+        'upstream_certificate_invalid' { return 'tls_validation' }
+        'tls_interception_incompatible' { return 'interception_compatibility' }
+        'client_tls_interception_failed' { return 'interception_compatibility' }
+        'unsupported_protocol' { return 'unsupported_transport' }
+        'connection_timeout' { return 'connectivity' }
+        'dns_resolution_failed' { return 'dns' }
+        'tcp_connection_failed' { return 'connectivity' }
+        'upstream_tls_failed' { return 'upstream_tls' }
+        'http_error_response' { return 'http_application_response' }
+        'browser_request_failed' { return 'browser_observation' }
+        'observer_resource_failure' { return 'observer_health' }
+        'self_reference_rejected' { return 'mihari_safety' }
+        'cleanup_incomplete' { return 'cleanup' }
+        default { return 'unclassified_failure' }
+    }
+}
+
+function Get-MihariFindingEvidenceStrength {
+    param([Parameter(Mandatory = $true)][string] $Code)
+    if ($Code -eq 'tls_interception_incompatible') { return 'comparison_supported' }
+    if ($Code -eq 'unclassified_failure') { return 'undetermined' }
+    return 'direct_observation'
+}
+
+function Get-MihariFindingNextCheck {
+    param([Parameter(Mandatory = $true)][string] $Code)
+    switch ($Code) {
+        'upstream_proxy_auth_required' { return 'Confirm the required authentication scheme and identity with the enterprise proxy administrator.' }
+        'upstream_proxy_rejected' { return 'Ask the proxy administrator to identify the request using this event evidence and explain the rejection.' }
+        'upstream_route_unresolved' { return 'Verify the configured Windows or explicit proxy route and its PAC/WPAD result.' }
+        'upstream_certificate_invalid' { return 'Review the recorded certificate and platform validation details, then compare with a trusted endpoint path.' }
+        'tls_interception_incompatible' { return 'Repeat a trial with matching protocol, authentication, cache, and network conditions; collect browser evidence for the failed request.' }
+        'client_tls_interception_failed' { return 'Compare with a Tunnel trial using the same protocol, authentication, cache, and network conditions.' }
+        'unsupported_protocol' { return 'Repeat with a supported diagnostic profile or collect browser-side protocol evidence.' }
+        'connection_timeout' { return 'Repeat the connection attempt and compare DNS, route, and connection-stage evidence.' }
+        'dns_resolution_failed' { return 'Repeat name resolution in the same endpoint and network context, then compare the returned address set.' }
+        'tcp_connection_failed' { return 'Verify endpoint reachability and the selected upstream route with a comparable trial.' }
+        'upstream_tls_failed' { return 'Inspect the upstream TLS stage and certificate-validation state before attributing a cause.' }
+        'http_error_response' { return 'Use the response evidence and request correlation data to identify which visible endpoint returned the status.' }
+        'browser_request_failed' { return 'Inspect the browser-owned request failure and its initiator/cache context.' }
+        'observer_resource_failure' { return 'Check Mihari queue, storage, and writer health before interpreting missing traffic evidence.' }
+        'self_reference_rejected' { return 'Review the selected upstream endpoint and ensure it does not point back to Mihari.' }
+        'cleanup_incomplete' { return 'Review cleanup evidence and remove only artifacts whose Mihari ownership is positively verified.' }
+        default { return 'Collect a comparable trial with request, route, and stage evidence.' }
     }
 }
 
@@ -235,7 +311,7 @@ function Test-MihariSuccessfulOutcome {
     return @('success', 'succeeded', 'complete', 'completed', 'established', 'connected', 'ok') -contains $value
 }
 
-function Get-MihariDiagnosis {
+function Get-MihariDiagnosisInstances {
     [CmdletBinding()]
     param([Parameter(Mandatory = $false)] [AllowEmptyCollection()] [object[]] $Events = @())
 
@@ -298,6 +374,84 @@ function Get-MihariDiagnosis {
                 -Limitations 'The finding does not distinguish expiry, name mismatch, trust-chain, revocation, or interception causes unless the event records that detail.'))
         }
 
+        $failure = Test-MihariFailedOutcome -Record $record
+        $sourceValue = Get-MihariEventValue -Event $record.Event -Data $data -Names @('source')
+        $sourceToken = ''
+        if ($null -ne $sourceValue) { $sourceToken = ([string]$sourceValue -replace '[^A-Za-z]', '').ToLowerInvariant() }
+        $isDnsFailure = $failure -and ($stageToken -eq 'upstreamresolve' -or $errorToken -match 'dns|name.?resolution|host.?not.?found')
+        if ($isDnsFailure) {
+            $scope = 'connection'
+            if ($null -ne $record.RequestId) { $scope = 'request' }
+            $findings.Add((New-MihariFinding -Code 'dns_resolution_failed' `
+                -Summary 'Name resolution failed at the recorded upstream stage.' -Scope $scope -Records @($record) `
+                -Interpretation 'The endpoint observed a name-resolution failure for this attempt.' `
+                -Limitations 'The event does not identify whether the cause is DNS policy, resolver availability, or a transient network condition.'))
+        }
+        elseif ($failure -and $stageToken -match 'upstreamtcp|tcpconnect' -and $errorToken -notmatch 'timeout|timedout') {
+            $scope = 'connection'
+            if ($null -ne $record.RequestId) { $scope = 'request' }
+            $findings.Add((New-MihariFinding -Code 'tcp_connection_failed' `
+                -Summary 'The upstream TCP connection failed.' -Scope $scope -Records @($record) `
+                -Interpretation 'The endpoint observed a TCP connection failure at the recorded upstream stage.' `
+                -Limitations 'The event does not identify which network component caused the connection failure.'))
+        }
+        elseif ($failure -and $stageToken -match 'upstreamtls|upstreamhandshaketls' -and -not $isCertificateFailure) {
+            $scope = 'connection'
+            if ($null -ne $record.RequestId) { $scope = 'request' }
+            $findings.Add((New-MihariFinding -Code 'upstream_tls_failed' `
+                -Summary 'The upstream TLS connection failed.' -Scope $scope -Records @($record) `
+                -Interpretation 'The upstream TLS stage failed according to the recorded endpoint evidence.' `
+                -Limitations 'A generic handshake failure does not prove certificate pinning, mTLS, or a particular upstream policy.'))
+        }
+        elseif ($failure -and ($stageToken -match 'clienttls|tlsclient|inspecttlsclient' -or $errorToken -eq 'clienttlshandshakefailed')) {
+            $scope = 'connection'
+            if ($null -ne $record.RequestId) { $scope = 'request' }
+            $findings.Add((New-MihariFinding -Code 'client_tls_interception_failed' `
+                -Summary 'The client TLS handshake failed during Inspect.' -Scope $scope -Records @($record) `
+                -Interpretation 'Mihari observed a TLS handshake failure on the client-facing Inspect leg.' `
+                -Limitations 'This event alone does not distinguish certificate pinning, mTLS, protocol mismatch, or other client/application behavior.'))
+        }
+
+        if ($null -ne $record.Status -and $record.Status -ge 400 -and $stageToken -match 'httpresponse|upstreamhttp|response' -and
+            -not ($isHttpProxyResponse -and $record.Status -in @(403, 407) -and $record.HasProxyResponseProvenance)) {
+            $scope = 'connection'
+            if ($null -ne $record.RequestId) { $scope = 'request' }
+            $findings.Add((New-MihariFinding -Code 'http_error_response' `
+                -Summary ('An HTTP response with status ' + $record.Status.ToString([Globalization.CultureInfo]::InvariantCulture) + ' was observed.') -Scope $scope -Records @($record) `
+                -Interpretation 'An HTTP error status was visible to Mihari for this exchange.' `
+                -Limitations 'Unless explicit-proxy response provenance is present, the event does not establish whether an origin or intermediary generated the response.'))
+        }
+
+        if ($failure -and $sourceToken -eq 'browser') {
+            $scope = 'request'
+            if ($null -eq $record.RequestId) { $scope = 'connection' }
+            $findings.Add((New-MihariFinding -Code 'browser_request_failed' `
+                -Summary 'The diagnostic browser reported a request failure.' -Scope $scope -Records @($record) `
+                -Interpretation 'A browser-owned observation reported this request as failed.' `
+                -Limitations 'The browser event alone does not prove whether the failure occurred in Mihari, the network path, or the destination.'))
+        }
+
+        if ($failure -and ($errorToken -match 'self.?reference' -or $stageToken -match 'selfreference')) {
+            $findings.Add((New-MihariFinding -Code 'self_reference_rejected' `
+                -Summary 'Mihari rejected a route that would point back to its own listener.' -Scope 'connection' -Records @($record) `
+                -Interpretation 'The safety check detected a self-referential upstream route and prevented forwarding.' `
+                -Limitations 'The event describes Mihari route protection, not a destination or enterprise network rejection.'))
+        }
+
+        if ($failure -and ($stageToken -match 'cleanup' -or $errorToken -match 'cleanup')) {
+            $findings.Add((New-MihariFinding -Code 'cleanup_incomplete' `
+                -Summary 'Session cleanup reported an incomplete operation.' -Scope 'session' -Records @($record) `
+                -Interpretation 'A cleanup action failed or could not confirm its expected completion.' `
+                -Limitations 'Only the artifacts named by the cleanup evidence can be considered affected.'))
+        }
+
+        if ($failure -and ($errorToken -match 'queue|writer|disklimit|storage|resourceexhaust|observer')) {
+            $findings.Add((New-MihariFinding -Code 'observer_resource_failure' `
+                -Summary 'Mihari reported a capture or observer resource failure.' -Scope 'session' -Records @($record) `
+                -Interpretation 'The recorded failure concerns Mihari evidence collection or storage health.' `
+                -Limitations 'The event does not establish that an observed destination request failed.'))
+        }
+
         $unsupportedValue = Get-MihariEventValue -Event $record.Event -Data $data -Names @('unsupportedProtocol', 'protocol')
         $unsupportedToken = ''
         if ($null -ne $unsupportedValue) { $unsupportedToken = ([string]$unsupportedValue -replace '[^A-Za-z0-9]', '').ToLowerInvariant() }
@@ -315,13 +469,32 @@ function Get-MihariDiagnosis {
         }
 
         $isTimeout = ($errorToken -match 'timeout|timedout') -or ($record.ErrorType -match 'TimeoutException|SocketException' -and $stageToken -match 'connect')
-        if ($isTimeout -and (Test-MihariFailedOutcome -Record $record)) {
+        if ($isTimeout -and (Test-MihariFailedOutcome -Record $record) -and -not $isDnsFailure) {
             $scope = 'connection'
             if ($null -ne $record.RequestId) { $scope = 'request' }
             $findings.Add((New-MihariFinding -Code 'connection_timeout' `
                 -Summary 'A connection stage timed out.' -Scope $scope -Records @($record) `
                 -Interpretation 'Mihari observed a timeout at the recorded connection stage.' `
                 -Limitations 'A timeout alone does not identify which network component or policy caused the delay.'))
+        }
+
+        if ($failure -and -not $isDnsFailure -and
+            -not ($stageToken -match 'upstreamtcp|tcpconnect') -and
+            -not ($stageToken -match 'upstreamtls|upstreamhandshaketls') -and
+            -not ($null -ne $record.Status -and $record.Status -ge 400) -and
+            $sourceToken -ne 'browser' -and
+            -not ($errorToken -match 'self.?reference|cleanup|queue|writer|disklimit|storage|resourceexhaust|observer') -and
+            -not $isCertificateFailure -and -not $isUnsupported -and -not $isTimeout -and
+            -not ($stageToken -match 'clienttls|tlsclient|inspecttlsclient' -or $errorToken -eq 'clienttlshandshakefailed') -and
+            -not $isProxyConnectResponse -and
+            -not ($isHttpProxyResponse -and $record.Status -in @(403, 407) -and $record.HasProxyResponseProvenance) -and
+            -not ($errorToken -eq 'upstreamrouteunresolved' -or ($stageToken -eq 'upstreamresolve' -and ([string]$record.RouteKind -eq 'Unsupported')))) {
+            $scope = 'connection'
+            if ($null -ne $record.RequestId) { $scope = 'request' }
+            $findings.Add((New-MihariFinding -Code 'unclassified_failure' `
+                -Summary 'A failure was observed, but no specific diagnosis rule applies.' -Scope $scope -Records @($record) `
+                -Interpretation 'The evidence records a failed stage without a supported more specific classification.' `
+                -Limitations 'The available event fields do not justify attributing the failure to a particular endpoint or policy.'))
         }
     }
 
@@ -347,21 +520,368 @@ function Get-MihariDiagnosis {
 
     foreach ($inspect in $inspectTlsFailures) {
         if ($null -eq $inspect.Host -or $null -eq $inspect.Port) { continue }
+        $inspectTrialId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $inspect.Event -Data $inspect.Data -Names @('trialId'))
+        $inspectCaseId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $inspect.Event -Data $inspect.Data -Names @('caseId'))
+        $inspectProtocolProfile = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $inspect.Event -Data $inspect.Data -Names @('protocolProfile'))
+        $inspectAuthState = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $inspect.Event -Data $inspect.Data -Names @('proxyAuthState', 'authenticationState', 'authState'))
+        $inspectCacheState = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $inspect.Event -Data $inspect.Data -Names @('cacheState', 'cacheCondition'))
+        $inspectNetwork = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $inspect.Event -Data $inspect.Data -Names @('networkFingerprint', 'environmentFingerprint'))
+        if ($null -eq $inspectTrialId -or $null -eq $inspectCaseId -or $null -eq $inspectProtocolProfile -or $null -eq $inspectAuthState -or $null -eq $inspectCacheState -or $null -eq $inspectNetwork) { continue }
         $inspectAuthority = $inspect.Host.ToLowerInvariant() + ':' + $inspect.Port
         foreach ($tunnel in $tunnelSuccesses) {
             if ($null -eq $tunnel.Host -or $null -eq $tunnel.Port) { continue }
             if (($tunnel.Host.ToLowerInvariant() + ':' + $tunnel.Port) -ne $inspectAuthority) { continue }
+            $tunnelTrialId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $tunnel.Event -Data $tunnel.Data -Names @('trialId'))
+            $tunnelCaseId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $tunnel.Event -Data $tunnel.Data -Names @('caseId'))
+            $tunnelProtocolProfile = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $tunnel.Event -Data $tunnel.Data -Names @('protocolProfile'))
+            $tunnelAuthState = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $tunnel.Event -Data $tunnel.Data -Names @('proxyAuthState', 'authenticationState', 'authState'))
+            $tunnelCacheState = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $tunnel.Event -Data $tunnel.Data -Names @('cacheState', 'cacheCondition'))
+            $tunnelNetwork = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariEventValue -Event $tunnel.Event -Data $tunnel.Data -Names @('networkFingerprint', 'environmentFingerprint'))
+            if ($null -eq $tunnelTrialId -or $null -eq $tunnelCaseId -or $inspectTrialId -eq $tunnelTrialId -or $inspectCaseId -ne $tunnelCaseId -or
+                $inspectProtocolProfile -ne $tunnelProtocolProfile -or $inspectAuthState -ne $tunnelAuthState -or
+                $inspectCacheState -ne $tunnelCacheState -or $inspectNetwork -ne $tunnelNetwork) { continue }
 
             $findings.Add((New-MihariFinding -Code 'tls_interception_incompatible' `
-                -Summary ('Inspect failed while Tunnel succeeded for ' + $inspect.Host + ':' + $inspect.Port + '.') `
+                -Summary ('Inspect client TLS failed while the matching Tunnel relay completed for ' + $inspect.Host + ':' + $inspect.Port + '.') `
                 -Scope 'host' -Records @($inspect, $tunnel) `
-                -Interpretation 'The comparable destination succeeded through Tunnel but the client TLS handshake failed during Inspect.' `
-                -Limitations 'This comparison supports an interception-incompatible behavior; it does not distinguish certificate pinning, mTLS, application behavior, or other causes.'))
+                -Interpretation 'The trials recorded the same protocol profile, authentication state, cache state, and network fingerprint. The client TLS handshake failed during Inspect while the opaque Tunnel relay completed.' `
+                -Limitations 'Tunnel relay activity does not prove application success. This supports an interception-incompatible behavior at the observed TLS stage; it does not distinguish certificate pinning, mTLS, or another cause.'))
             break
         }
     }
 
     return @($findings.ToArray())
+}
+
+function Get-MihariStableFindingId {
+    param([Parameter(Mandatory = $true)][object] $Identity)
+
+    $serialized = ConvertTo-Json -InputObject $Identity -Depth 8 -Compress
+    $encoding = [System.Text.UTF8Encoding]::new($false)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $algorithm.ComputeHash($encoding.GetBytes($serialized))
+        $hex = ([System.BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
+        return 'finding-' + $hex.Substring(0, 32)
+    }
+    finally { $algorithm.Dispose() }
+}
+
+function Get-MihariFindingIdentityParts {
+    param([Parameter(Mandatory = $true)][object] $Finding)
+
+    $facts = @($Finding.observedFacts)
+    $fact = $null
+    if ($facts.Count -gt 0) { $fact = $facts[0] }
+    $evidenceRefs = @()
+    if ($null -ne $Finding.PSObject.Properties['evidenceRefs']) { $evidenceRefs = @($Finding.evidenceRefs) }
+    $sessionId = $null
+    $trialId = $null
+    $caseId = $null
+    if ($evidenceRefs.Count -gt 0) { $sessionId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $evidenceRefs[0] -Names @('sessionId')) }
+    if ($null -eq $sessionId -and $null -ne $fact) { $sessionId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('sessionId')) }
+    if ($null -ne $fact) {
+        $trialId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('trialId'))
+        $caseId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('caseId'))
+    }
+    $hostName = $null
+    $port = $null
+    $stage = $null
+    $routeKind = $null
+    $path = $null
+    $method = $null
+    $source = $null
+    $transportLeg = $null
+    $protocolProfile = $null
+    $statusCode = $null
+    if ($null -ne $fact) {
+        $hostName = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('host'))
+        $port = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('port'))
+        $stage = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('stage'))
+        $routeKind = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('routeKind'))
+        $path = ConvertTo-MihariPath -Value (Get-MihariMemberValue -InputObject $fact -Names @('path'))
+        $method = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('method'))
+        $source = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('source'))
+        $transportLeg = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('transportLeg'))
+        $protocolProfile = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('protocolProfile'))
+        $statusCode = Get-MihariMemberValue -InputObject $fact -Names @('statusCode', 'proxyStatus')
+    }
+    if ($null -ne $hostName) { $hostName = $hostName.ToLowerInvariant() }
+    if ($null -ne $method) { $method = $method.ToUpperInvariant() }
+    if ($null -ne $routeKind) { $routeKind = $routeKind.ToLowerInvariant() }
+    $scope = ConvertTo-MihariDiagnosisSafeText -Value $Finding.scope
+    $code = ConvertTo-MihariDiagnosisSafeText -Value $Finding.code
+    if ($null -eq $scope) { $scope = 'session' }
+    if ($null -eq $code) { $code = 'unclassified_failure' }
+    if ($code -eq 'tls_interception_incompatible' -and $facts.Count -gt 1) {
+        $sessionIds = @($evidenceRefs | ForEach-Object { ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $_ -Names @('sessionId')) } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
+        if ($sessionIds.Count -gt 0) { $sessionId = [string]::Join('+', $sessionIds) }
+        $trialIds = @($facts | ForEach-Object { ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $_ -Names @('trialId')) } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
+        if ($trialIds.Count -gt 0) { $trialId = [string]::Join('+', $trialIds) }
+        $caseIds = @($facts | ForEach-Object { ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $_ -Names @('caseId')) } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
+        if ($caseIds.Count -gt 0) { $caseId = [string]::Join('+', $caseIds) }
+        $stage = 'inspect.client-tls+tunnel.transport'
+        $routes = @($facts | ForEach-Object { ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $_ -Names @('routeKind')) } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
+        if ($routes.Count -gt 0) { $routeKind = [string]::Join('+', $routes) }
+    }
+
+    $identity = [ordered]@{
+        ruleVersion = 'mihari-diagnosis/1'
+        sessionId = $sessionId
+        trialId = $trialId
+        caseId = $caseId
+        code = $code
+        scope = $scope
+        host = $hostName
+        port = $port
+        stage = $stage
+        routeKind = $routeKind
+        transportLeg = $transportLeg
+        source = $source
+    }
+    if ($scope -eq 'request' -or $code -eq 'http_error_response') {
+        $identity['path'] = $path
+        $identity['method'] = $method
+    }
+    if ($code -eq 'http_error_response') { $identity['statusCode'] = $statusCode }
+    if ($code -eq 'unsupported_protocol' -or $code -eq 'tls_interception_incompatible') { $identity['protocolProfile'] = $protocolProfile }
+
+    return [pscustomobject][ordered]@{
+        Identity = [pscustomobject]$identity
+        SessionId = $sessionId
+        TrialId = $trialId
+        CaseId = $caseId
+        Host = $hostName
+        Port = $port
+        Stage = $stage
+        RouteKind = $routeKind
+    }
+}
+
+function Get-MihariFindingReferenceKey {
+    param([Parameter(Mandatory = $true)][object] $Reference)
+    $sessionId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $Reference -Names @('sessionId'))
+    $eventId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $Reference -Names @('eventId'))
+    if ($null -eq $sessionId) { $sessionId = '?' }
+    if ($null -eq $eventId) { $eventId = '?' }
+    return $sessionId + ':' + $eventId
+}
+
+function Get-MihariFindingObservedAt {
+    param([Parameter(Mandatory = $true)][object] $Finding)
+    $times = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($fact in @($Finding.observedFacts)) {
+        $timestamp = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('timestamp'))
+        if ($null -eq $timestamp) { continue }
+        $parsed = [DateTimeOffset]::MinValue
+        if ([DateTimeOffset]::TryParse($timestamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) {
+            $times.Add([pscustomobject]@{ Timestamp = $timestamp; UtcTicks = $parsed.UtcDateTime.Ticks })
+        }
+    }
+    if ($times.Count -eq 0) { return [pscustomobject]@{ First = $null; Last = $null } }
+    $orderedTimes = @($times.ToArray() | Sort-Object -Property UtcTicks)
+    return [pscustomobject]@{ First = [string]$orderedTimes[0].Timestamp; Last = [string]$orderedTimes[$orderedTimes.Count - 1].Timestamp }
+}
+
+function Compare-MihariDiagnosisTimestamp {
+    param(
+        [Parameter(Mandatory = $true)][string] $Left,
+        [Parameter(Mandatory = $true)][string] $Right
+    )
+    $leftDate = [DateTimeOffset]::MinValue
+    $rightDate = [DateTimeOffset]::MinValue
+    $leftValid = [DateTimeOffset]::TryParse($Left, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$leftDate)
+    $rightValid = [DateTimeOffset]::TryParse($Right, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$rightDate)
+    if ($leftValid -and $rightValid) { return $leftDate.UtcDateTime.Ticks.CompareTo($rightDate.UtcDateTime.Ticks) }
+    return [string]::CompareOrdinal($Left, $Right)
+}
+
+function Merge-MihariFindingGroups {
+    param(
+        [Parameter(Mandatory = $false)][AllowEmptyCollection()][object[]] $Findings = @(),
+        [Parameter(Mandatory = $false)][AllowEmptyCollection()][object[]] $PreviousFindings = @()
+    )
+
+    $groups = New-Object 'System.Collections.Generic.List[object]'
+    $groupIndex = @{}
+    foreach ($finding in $Findings) {
+        if ($null -eq $finding) { continue }
+        $parts = Get-MihariFindingIdentityParts -Finding $finding
+        $findingId = Get-MihariStableFindingId -Identity $parts.Identity
+        if (-not $groupIndex.ContainsKey($findingId)) {
+            $group = [pscustomobject][ordered]@{
+                findingId = $findingId
+                code = $finding.code
+                summary = $finding.summary
+                scope = $finding.scope
+                ruleVersion = 'mihari-diagnosis/1'
+                evidenceRefs = @()
+                evidenceIds = @()
+                observedFacts = @()
+                occurrenceCount = 0
+                count = 0
+                firstObserved = $null
+                lastObserved = $null
+                classification = $finding.classification
+                evidenceStrength = $finding.evidenceStrength
+                interpretation = $finding.interpretation
+                limitations = $finding.limitations
+                nextCheck = $finding.nextCheck
+                resolutionState = 'open'
+                resolvedAt = $null
+                resolutionEvidence = @()
+            }
+            $groups.Add($group)
+            $groupIndex[$findingId] = $group
+        }
+        $group = $groupIndex[$findingId]
+        $references = New-Object 'System.Collections.Generic.List[object]'
+        $facts = New-Object 'System.Collections.Generic.List[object]'
+        $referenceKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($reference in @($group.evidenceRefs)) {
+            if ($referenceKeys.Add((Get-MihariFindingReferenceKey -Reference $reference))) { $references.Add($reference) }
+        }
+        foreach ($reference in @($finding.evidenceRefs)) {
+            if ($referenceKeys.Add((Get-MihariFindingReferenceKey -Reference $reference))) { $references.Add($reference) }
+        }
+        $group.evidenceRefs = @($references.ToArray())
+        $group.evidenceIds = @($group.evidenceRefs | ForEach-Object { [string]$_.eventId } | Select-Object -Unique)
+        $existingFactKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($fact in @($group.observedFacts)) {
+            $existingFactKeys.Add((Get-MihariFindingReferenceKey -Reference $fact)) | Out-Null
+            $facts.Add($fact)
+        }
+        foreach ($fact in @($finding.observedFacts)) {
+            if ($existingFactKeys.Add((Get-MihariFindingReferenceKey -Reference $fact))) { $facts.Add($fact) }
+        }
+        $group.observedFacts = @($facts.ToArray())
+        $group.occurrenceCount = $group.evidenceRefs.Count
+        $group.count = $group.occurrenceCount
+        $times = Get-MihariFindingObservedAt -Finding $group
+        $findingTimes = Get-MihariFindingObservedAt -Finding $finding
+        if ($null -eq $times.First -or ($null -ne $findingTimes.First -and (Compare-MihariDiagnosisTimestamp -Left $findingTimes.First -Right $times.First) -lt 0)) { $group.firstObserved = $findingTimes.First }
+        else { $group.firstObserved = $times.First }
+        if ($null -eq $times.Last -or ($null -ne $findingTimes.Last -and (Compare-MihariDiagnosisTimestamp -Left $findingTimes.Last -Right $times.Last) -gt 0)) { $group.lastObserved = $findingTimes.Last }
+        else { $group.lastObserved = $times.Last }
+    }
+
+    foreach ($previous in $PreviousFindings) {
+        if ($null -eq $previous -or [string]::IsNullOrWhiteSpace([string]$previous.findingId)) { continue }
+        $findingId = [string]$previous.findingId
+        if (-not $groupIndex.ContainsKey($findingId)) {
+            $groups.Add($previous)
+            $groupIndex[$findingId] = $previous
+            continue
+        }
+
+        $group = $groupIndex[$findingId]
+        $references = New-Object 'System.Collections.Generic.List[object]'
+        $referenceKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($reference in @($previous.evidenceRefs)) {
+            if ($referenceKeys.Add((Get-MihariFindingReferenceKey -Reference $reference))) { $references.Add($reference) }
+        }
+        foreach ($reference in @($group.evidenceRefs)) {
+            if ($referenceKeys.Add((Get-MihariFindingReferenceKey -Reference $reference))) { $references.Add($reference) }
+        }
+        $group.evidenceRefs = @($references.ToArray())
+        $group.evidenceIds = @($group.evidenceRefs | ForEach-Object { [string]$_.eventId } | Select-Object -Unique)
+        $facts = New-Object 'System.Collections.Generic.List[object]'
+        $factKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($fact in @($previous.observedFacts)) {
+            if ($factKeys.Add((Get-MihariFindingReferenceKey -Reference $fact))) { $facts.Add($fact) }
+        }
+        foreach ($fact in @($group.observedFacts)) {
+            if ($factKeys.Add((Get-MihariFindingReferenceKey -Reference $fact))) { $facts.Add($fact) }
+        }
+        $group.observedFacts = @($facts.ToArray())
+        $group.occurrenceCount = $group.evidenceRefs.Count
+        $group.count = $group.occurrenceCount
+        $oldFirst = ConvertTo-MihariDiagnosisSafeText -Value $previous.firstObserved
+        $oldLast = ConvertTo-MihariDiagnosisSafeText -Value $previous.lastObserved
+        if ($null -eq $group.firstObserved -or ($null -ne $oldFirst -and (Compare-MihariDiagnosisTimestamp -Left $oldFirst -Right ([string]$group.firstObserved)) -lt 0)) { $group.firstObserved = $oldFirst }
+        if ($null -eq $group.lastObserved -or ($null -ne $oldLast -and (Compare-MihariDiagnosisTimestamp -Left $oldLast -Right ([string]$group.lastObserved)) -gt 0)) { $group.lastObserved = $oldLast }
+        $previousState = ConvertTo-MihariDiagnosisSafeText -Value $previous.resolutionState
+        if ($previousState -eq 'resolved') {
+            $resolvedAt = ConvertTo-MihariDiagnosisSafeText -Value $previous.resolvedAt
+            $newEvidenceAfterResolution = $false
+            $previousReferenceKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+            foreach ($reference in @($previous.evidenceRefs)) {
+                $previousReferenceKeys.Add((Get-MihariFindingReferenceKey -Reference $reference)) | Out-Null
+            }
+            foreach ($fact in @($group.observedFacts)) {
+                $factReferenceKey = Get-MihariFindingReferenceKey -Reference $fact
+                if ($previousReferenceKeys.Contains($factReferenceKey)) { continue }
+                $factTime = ConvertTo-MihariDiagnosisSafeText -Value $fact.timestamp
+                if ($null -eq $resolvedAt -or $null -eq $factTime -or (Compare-MihariDiagnosisTimestamp -Left $factTime -Right $resolvedAt) -gt 0) { $newEvidenceAfterResolution = $true; break }
+            }
+            if ($newEvidenceAfterResolution) { $group.resolutionState = 'reopened' }
+            else {
+                $group.resolutionState = 'resolved'
+                $group.resolvedAt = $previous.resolvedAt
+                $group.resolutionEvidence = @($previous.resolutionEvidence)
+            }
+        }
+        elseif ($null -ne $previousState -and $previousState -ne 'open') {
+            $group.resolutionState = $previousState
+        }
+    }
+
+    return @($groups.ToArray())
+}
+
+function Get-MihariDiagnosis {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)][AllowEmptyCollection()][object[]] $Events = @(),
+        [Parameter(Mandatory = $false)][AllowEmptyCollection()][object[]] $PreviousFindings = @()
+    )
+    $instances = @(Get-MihariDiagnosisInstances -Events $Events)
+    return @(Merge-MihariFindingGroups -Findings $instances -PreviousFindings $PreviousFindings)
+}
+
+function Get-MihariSessionFindings {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)][AllowEmptyCollection()][object[]] $Events = @(),
+        [Parameter(Mandatory = $false)][AllowEmptyCollection()][object[]] $PreviousFindings = @()
+    )
+    return @(Get-MihariDiagnosis -Events $Events -PreviousFindings $PreviousFindings)
+}
+
+function Set-MihariFindingResolution {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $Finding,
+        [Parameter(Mandatory = $true)][object] $ResolutionEvidence
+    )
+
+    $positive = Get-MihariMemberValue -InputObject $ResolutionEvidence -Names @('positive')
+    $kind = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $ResolutionEvidence -Names @('kind'))
+    $observedAt = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $ResolutionEvidence -Names @('observedAt', 'timestamp'))
+    $references = @(Get-MihariMemberValue -InputObject $ResolutionEvidence -Names @('evidenceRefs'))
+    if ([string]$positive -ne 'True' -or $kind -notin @('successful_comparable_trial', 'operator_verified') -or
+        $null -eq $observedAt -or $references.Count -eq 0) {
+        throw 'Finding resolution requires positive, timestamped evidence references.'
+    }
+
+    $safeReferences = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($reference in $references) {
+        $sessionId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $reference -Names @('sessionId'))
+        $eventId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $reference -Names @('eventId'))
+        if ($null -eq $sessionId -or $null -eq $eventId) { throw 'Finding resolution evidence references require sessionId and eventId.' }
+        $safeReferences.Add([pscustomobject][ordered]@{ sessionId = $sessionId; eventId = $eventId })
+    }
+
+    $resolved = [ordered]@{}
+    foreach ($property in $Finding.PSObject.Properties) { $resolved[$property.Name] = $property.Value }
+    $resolved['resolutionState'] = 'resolved'
+    $resolved['resolvedAt'] = $observedAt
+    $resolved['resolutionEvidence'] = @([pscustomobject][ordered]@{
+        kind = $kind
+        observedAt = $observedAt
+        evidenceRefs = @($safeReferences.ToArray())
+    })
+    return [pscustomobject]$resolved
 }
 
 function New-MihariReportText {

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('all', 'certificate', 'contracts', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference', 'phase2-transport', 'phase2-evidence')]
+    [ValidateSet('all', 'certificate', 'contracts', 'findings-comparison', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference', 'phase2-transport', 'phase2-evidence')]
     [string] $Suite = 'all'
 )
 
@@ -39,7 +39,7 @@ try {
     Write-Host ("PASS parse: {0} PowerShell files" -f $sourceFiles.Count)
 
     if ($Suite -eq 'all') {
-        $selectedSuites = @('certificate', 'contracts', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference', 'phase2-transport', 'phase2-evidence')
+        $selectedSuites = @('certificate', 'contracts', 'findings-comparison', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference', 'phase2-transport', 'phase2-evidence')
     }
     else {
         $selectedSuites = @($Suite)
@@ -53,6 +53,7 @@ try {
         switch ($selectedSuite) {
             'certificate' { & (Join-Path $PSScriptRoot 'certificate.ps1') }
             'contracts' { & (Join-Path $PSScriptRoot 'contracts.ps1') }
+            'findings-comparison' { & (Join-Path $PSScriptRoot 'findings-comparison.ps1') }
             'browser' { & (Join-Path $PSScriptRoot 'browser.ps1') }
             'stale-cleanup' { & (Join-Path $PSScriptRoot 'stale-cleanup.ps1') }
             'runtime-basic' { & (Join-Path $PSScriptRoot 'runtime-basic.ps1') }
