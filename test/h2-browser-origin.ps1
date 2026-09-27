@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory = $true)][string] $ReadyPath,
     [Parameter(Mandatory = $true)][string] $StopPath,
     [Parameter(Mandatory = $true)][string] $TransactionsPath,
-    [Parameter(Mandatory = $true)][string] $ErrorPath
+    [Parameter(Mandatory = $true)][string] $ErrorPath,
+    [switch] $FunctionsOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -207,7 +208,8 @@ function Invoke-MihariH2FixtureConnection {
     param(
         [Parameter(Mandatory = $true)][System.Net.Sockets.TcpClient] $Client,
         [Parameter(Mandatory = $true)][System.Security.Cryptography.X509Certificates.X509Certificate2] $Certificate,
-        [Parameter(Mandatory = $true)][string] $TransactionsFile
+        [Parameter(Mandatory = $true)][string] $TransactionsFile,
+        [Parameter(Mandatory = $true)][object] $TransactionLock
     )
 
     $tls = $null
@@ -261,16 +263,36 @@ function Invoke-MihariH2FixtureConnection {
                 responseHeadersSent = $true
                 responseBodyBytes = [int]$body.Length
             }
-            [System.IO.File]::AppendAllText($TransactionsFile, (ConvertTo-Json -InputObject $record -Compress) + [Environment]::NewLine, [System.Text.Encoding]::UTF8)
-            # Edge may open the script fetch on another h2 connection. Complete
-            # this stream, then send GOAWAY so the serial local fixture accepts
-            # that next connection without holding the first one open.
+            [System.Threading.Monitor]::Enter($TransactionLock)
+            try {
+                [System.IO.File]::AppendAllText($TransactionsFile, (ConvertTo-Json -InputObject $record -Compress) + [Environment]::NewLine, [System.Text.Encoding]::UTF8)
+            }
+            finally { [System.Threading.Monitor]::Exit($TransactionLock) }
+
+            # The script fetch may use a new CONNECT. Retire this connection
+            # cleanly so the bounded fixture pool can serve it independently.
             $goaway = New-Object byte[] 8
             $goaway[0] = [byte](($frame.StreamId -shr 24) -band 0x7f)
             $goaway[1] = [byte](($frame.StreamId -shr 16) -band 0xff)
             $goaway[2] = [byte](($frame.StreamId -shr 8) -band 0xff)
             $goaway[3] = [byte]($frame.StreamId -band 0xff)
             Write-MihariH2FixtureFrame -Stream $tls -Type 7 -Flags 0 -StreamId 0 -Payload $goaway
+            $tls.ShutdownAsync().GetAwaiter().GetResult()
+            $tls.ReadTimeout = 3000
+            $closeBuffer = New-Object byte[] 4096
+            $closeDeadline = [DateTime]::UtcNow.AddSeconds(3)
+            while ([DateTime]::UtcNow -lt $closeDeadline) {
+                try {
+                    $closeRead = $tls.Read($closeBuffer, 0, $closeBuffer.Length)
+                    if ($closeRead -le 0) { break }
+                }
+                catch [System.IO.IOException] {
+                    $inner = $_.Exception.InnerException
+                    if ($null -ne $inner -and $inner -is [System.Net.Sockets.SocketException] -and
+                        $inner.SocketErrorCode -eq [System.Net.Sockets.SocketError]::TimedOut) { break }
+                    throw
+                }
+            }
             return
         }
         throw 'The local h2 fixture did not receive a request HEADERS frame within its bounded stream window.'
@@ -281,10 +303,38 @@ function Invoke-MihariH2FixtureConnection {
     }
 }
 
+function Get-MihariH2FixtureErrorRecord {
+    param([Parameter(Mandatory = $true)][System.Exception] $Exception)
+
+    $cause = $Exception
+    while ($null -ne $cause.InnerException -and $cause -is [System.IO.IOException]) { $cause = $cause.InnerException }
+    $errorType = [string]$cause.GetType().FullName
+    if ($errorType -notmatch '^[A-Za-z_][A-Za-z0-9_.+`]*$') { $errorType = 'unknown' }
+    $socketCode = ''
+    if ($cause -is [System.Net.Sockets.SocketException]) { $socketCode = [string]$cause.SocketErrorCode }
+    $errorCode = 'fixture_error'
+    if ($cause -is [System.Net.Sockets.SocketException]) {
+        if ($socketCode -in @('ConnectionReset', 'ConnectionAborted', 'Shutdown', 'OperationAborted', 'NotConnected')) {
+            $errorCode = 'fixture_peer_closed'
+        }
+        else { $errorCode = 'fixture_socket_error' }
+    }
+    elseif ($cause -is [System.Security.Authentication.AuthenticationException]) { $errorCode = 'fixture_tls_error' }
+    elseif ($cause -is [System.TimeoutException] -or $cause -is [System.IO.IOException]) { $errorCode = 'fixture_io_error' }
+    return [pscustomobject][ordered]@{ errorCode = $errorCode; errorType = $errorType }
+}
+
+if ($FunctionsOnly) { return }
+
 $ca = $null
 $leafSession = $null
 $leaf = $null
 $listener = $null
+$workerPool = $null
+$workerScript = $null
+$pendingAccept = $null
+$transactionLock = New-Object object
+$activeWorkers = New-Object 'System.Collections.Generic.List[object]'
 $publicCertificatePath = [System.IO.Path]::ChangeExtension($ReadyPath, '.cer')
 $errorDocument = $null
 try {
@@ -309,26 +359,96 @@ try {
     }
     [System.IO.File]::WriteAllText($ReadyPath, (ConvertTo-Json -InputObject $ready -Compress), [System.Text.Encoding]::UTF8)
 
-    while (-not [System.IO.File]::Exists($StopPath)) {
-        $accept = $listener.AcceptTcpClientAsync()
-        if (-not $accept.Wait(250)) { continue }
-        $client = $accept.Result
-        try { Invoke-MihariH2FixtureConnection -Client $client -Certificate $leaf -TransactionsFile $TransactionsPath }
-        catch {
-            if (-not [System.IO.File]::Exists($StopPath)) {
-                $errorDocument = [pscustomobject]@{ errorType = $_.Exception.GetType().FullName; message = $_.Exception.Message }
-                [System.IO.File]::WriteAllText($ErrorPath, (ConvertTo-Json -InputObject $errorDocument -Compress), [System.Text.Encoding]::UTF8)
-            }
-        }
-    }
+    $workerPool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, 4)
+    $workerPool.Open()
+    $workerScript = @'
+param($FixtureScriptPath, $ReadyFile, $StopFile, $TransactionsFile, $ErrorFile, $Client, $Certificate, $TransactionLock)
+$ErrorActionPreference = 'Stop'
+. $FixtureScriptPath -ReadyPath $ReadyFile -StopPath $StopFile -TransactionsPath $TransactionsFile -ErrorPath $ErrorFile -FunctionsOnly
+try {
+    Invoke-MihariH2FixtureConnection -Client $Client -Certificate $Certificate -TransactionsFile $TransactionsFile -TransactionLock $TransactionLock
+    [pscustomobject]@{ outcome = 'completed'; errorCode = ''; errorType = '' }
 }
 catch {
-    $errorDocument = [pscustomobject]@{ errorType = $_.Exception.GetType().FullName; message = $_.Exception.Message }
+    Get-MihariH2FixtureErrorRecord -Exception $_.Exception
+}
+'@
+    while (-not [System.IO.File]::Exists($StopPath)) {
+        for ($workerIndex = $activeWorkers.Count - 1; $workerIndex -ge 0; $workerIndex--) {
+            $worker = $activeWorkers[$workerIndex]
+            if (-not $worker.Handle.IsCompleted) { continue }
+            $workerResult = $null
+            try {
+                $workerOutput = $worker.PowerShell.EndInvoke($worker.Handle)
+                if ($workerOutput.Count -gt 0) { $workerResult = $workerOutput[$workerOutput.Count - 1] }
+            }
+            catch { $workerResult = Get-MihariH2FixtureErrorRecord -Exception $_.Exception }
+            if ($null -ne $workerResult -and [string]$workerResult.errorCode -and
+                [string]$workerResult.errorCode -ne 'fixture_peer_closed' -and -not [System.IO.File]::Exists($ErrorPath)) {
+                $errorDocument = [pscustomobject]@{ errorCode = [string]$workerResult.errorCode; errorType = [string]$workerResult.errorType }
+                [System.IO.File]::WriteAllText($ErrorPath, (ConvertTo-Json -InputObject $errorDocument -Compress), [System.Text.Encoding]::UTF8)
+            }
+            $worker.PowerShell.Dispose()
+            $activeWorkers.RemoveAt($workerIndex)
+        }
+        if ($activeWorkers.Count -ge 4) { Start-Sleep -Milliseconds 25; continue }
+        if ($null -eq $pendingAccept) { $pendingAccept = $listener.AcceptTcpClientAsync() }
+        if (-not $pendingAccept.Wait(100)) { continue }
+        $client = $pendingAccept.Result
+        $pendingAccept = $null
+        $powerShell = [System.Management.Automation.PowerShell]::Create()
+        $powerShell.RunspacePool = $workerPool
+        $null = $powerShell.AddScript($workerScript)
+        $null = $powerShell.AddArgument($PSCommandPath)
+        $null = $powerShell.AddArgument($ReadyPath)
+        $null = $powerShell.AddArgument($StopPath)
+        $null = $powerShell.AddArgument($TransactionsPath)
+        $null = $powerShell.AddArgument($ErrorPath)
+        $null = $powerShell.AddArgument($client)
+        $null = $powerShell.AddArgument($leaf)
+        $null = $powerShell.AddArgument($transactionLock)
+        $handle = $powerShell.BeginInvoke()
+        [void]$activeWorkers.Add([pscustomobject]@{ PowerShell = $powerShell; Handle = $handle; Client = $client })
+    }
+
+    $workerDeadline = [DateTime]::UtcNow.AddSeconds(12)
+    while ($activeWorkers.Count -gt 0 -and [DateTime]::UtcNow -lt $workerDeadline) {
+        for ($workerIndex = $activeWorkers.Count - 1; $workerIndex -ge 0; $workerIndex--) {
+            $worker = $activeWorkers[$workerIndex]
+            if (-not $worker.Handle.IsCompleted) { continue }
+            $workerResult = $null
+            try {
+                $workerOutput = $worker.PowerShell.EndInvoke($worker.Handle)
+                if ($workerOutput.Count -gt 0) { $workerResult = $workerOutput[$workerOutput.Count - 1] }
+            }
+            catch { $workerResult = Get-MihariH2FixtureErrorRecord -Exception $_.Exception }
+            if ($null -ne $workerResult -and [string]$workerResult.errorCode -and
+                [string]$workerResult.errorCode -ne 'fixture_peer_closed' -and -not [System.IO.File]::Exists($ErrorPath)) {
+                $errorDocument = [pscustomobject]@{ errorCode = [string]$workerResult.errorCode; errorType = [string]$workerResult.errorType }
+                [System.IO.File]::WriteAllText($ErrorPath, (ConvertTo-Json -InputObject $errorDocument -Compress), [System.Text.Encoding]::UTF8)
+            }
+            $worker.PowerShell.Dispose()
+            $activeWorkers.RemoveAt($workerIndex)
+        }
+        if ($activeWorkers.Count -gt 0) { Start-Sleep -Milliseconds 25 }
+    }
+    foreach ($worker in $activeWorkers) {
+        $worker.Client.Close()
+        try { $worker.PowerShell.Stop() }
+        catch { Write-Warning ('Could not stop an h2 fixture connection worker ({0}).' -f $_.Exception.GetType().FullName) }
+        try { $worker.PowerShell.Dispose() }
+        catch { Write-Warning ('Could not dispose an h2 fixture connection worker ({0}).' -f $_.Exception.GetType().FullName) }
+    }
+    $activeWorkers.Clear()
+}
+catch {
+    $errorDocument = Get-MihariH2FixtureErrorRecord -Exception $_.Exception
     try { [System.IO.File]::WriteAllText($ErrorPath, (ConvertTo-Json -InputObject $errorDocument -Compress), [System.Text.Encoding]::UTF8) }
     catch { Write-Warning ('Could not record local h2 fixture error ({0}).' -f $_.Exception.GetType().FullName) }
 }
 finally {
     if ($null -ne $listener) { $listener.Stop() }
+    if ($null -ne $workerPool) { $workerPool.Close(); $workerPool.Dispose() }
     if ($null -ne $leaf -and $null -ne $leafSession) {
         try { Release-MihariLeaf -Session $leafSession -Certificate $leaf }
         catch { Write-Warning ('Could not release local h2 fixture leaf ({0}).' -f $_.Exception.GetType().FullName) }

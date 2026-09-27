@@ -221,12 +221,13 @@ function Get-MihariBrowserH2TimeoutDiagnostics {
             $errorRecord = ConvertFrom-Json -InputObject (Read-MihariTestLiveText -Path $ErrorPath) -ErrorAction Stop
             $errorType = [string]$errorRecord.errorType
             if ($errorType -notmatch '^[A-Za-z_][A-Za-z0-9_.+`]*$') { $errorType = 'unknown' }
-            $errorCode = 'fixture_error'
+            $errorCode = [string]$errorRecord.errorCode
+            if ($errorCode -notmatch '^fixture_[a-z_]{1,64}$') { $errorCode = 'fixture_error' }
             switch -Regex ($errorType) {
-                '(^|\.)SocketException$' { $errorCode = 'fixture_socket_error'; break }
-                '(^|\.)TimeoutException$' { $errorCode = 'fixture_timeout'; break }
-                '(^|\.)AuthenticationException$' { $errorCode = 'fixture_tls_error'; break }
-                '(^|\.)IOException$' { $errorCode = 'fixture_io_error'; break }
+                '(^|\.)SocketException$' { if ($errorCode -eq 'fixture_error') { $errorCode = 'fixture_socket_error' }; break }
+                '(^|\.)TimeoutException$' { if ($errorCode -eq 'fixture_error') { $errorCode = 'fixture_timeout' }; break }
+                '(^|\.)AuthenticationException$' { if ($errorCode -eq 'fixture_error') { $errorCode = 'fixture_tls_error' }; break }
+                '(^|\.)IOException$' { if ($errorCode -eq 'fixture_error') { $errorCode = 'fixture_io_error' }; break }
             }
             $fixtureError = [pscustomobject][ordered]@{
                 errorCode = $errorCode
