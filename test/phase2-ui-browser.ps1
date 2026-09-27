@@ -271,11 +271,17 @@ try {
     Assert-MihariTest -Condition ([string]$importJobStatus -match 'unknown records: 0' -and [string]$offlineText -match 'Imported records:' -and [string]$offlineText -match 'eventId:') 'The import UI must verify the bundle hash and render real offline event records as read-only.'
     $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("retention-before").value="2099-12-31T23:59"; document.getElementById("retention-preview").click(); true'
     $eligibleText = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("retention-preview-items").textContent' -Predicate { param($value) [string]$value -match 'Eligible import ' }
+    $retentionCutoffUtc = [string](Invoke-Issue3UiEvaluate -Browser $browser -Expression 'new Date(Date.parse(document.getElementById("retention-before").value)).toISOString()')
+    $retentionUri = $managementUrl + 'api/v2/evidence/retention?scope=imports&olderThanUtc=' + [Uri]::EscapeDataString($retentionCutoffUtc)
+    $retentionResponse = Get-Issue3UiHttpJson -Uri $retentionUri
+    $eligibleBundles = @($retentionResponse.eligible)
+    Assert-MihariTest -Condition ($eligibleBundles.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace([string]$eligibleBundles[0].bundleId)) -Message 'The retention API must identify exactly the imported bundle shown in this isolated session.'
+    $eligibleBundleId = [string]$eligibleBundles[0].bundleId
     $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("cleanup-imports").click(); true'
     $cleanupConfirmation = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("retention-error").textContent' -Predicate { param($value) [string]$value -match 'Confirm deletion' }
     $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("confirm-import-cleanup").checked=true; document.getElementById("cleanup-imports").click(); true'
     $cleanupResult = Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 25 -Expression 'document.getElementById("retention-preview-items").textContent' -Predicate { param($value) [string]$value -notmatch 'Eligible import ' -and [string]$value -match 'No import retention records' }
-    Assert-MihariTest -Condition ([string]$eligibleText -match 'case-' -and [string]$cleanupConfirmation -match 'Confirm deletion' -and [string]$cleanupResult -match 'No import retention records') 'Retention preview must identify the imported case, refuse unconfirmed cleanup, then remove that verified import after confirmation.'
+    Assert-MihariTest -Condition ([string]$eligibleText -match [regex]::Escape($eligibleBundleId) -and [string]$cleanupConfirmation -match 'Confirm deletion' -and [string]$cleanupResult -match 'No import retention records') 'Retention preview must display the exact bundle ID returned by the API, refuse unconfirmed cleanup, then remove that verified import after confirmation.'
 
     Write-Host 'PASS phase2-ui-browser: Traffic evidence drill-down, pause/resume, case and trial actions, mode comparison, dependency and change-request export, bilingual text, evidence export/import/offline review/retention, and API recovery.'
 }
