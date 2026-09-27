@@ -384,6 +384,11 @@ function Get-MihariManagementV2EvidenceJobView {
 function Prune-MihariManagementV2EvidenceJobs {
     param([Parameter(Mandatory = $true)]$Session, [int]$MaximumJobs = 16)
 
+    $workerIds = @()
+    [System.Threading.Monitor]::Enter($Session.StateLock)
+    try { if ($null -ne $Session.EvidenceJobWorkers) { $workerIds = @($Session.EvidenceJobWorkers.Keys) } }
+    finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
+    foreach ($id in $workerIds) { Complete-MihariManagementV2EvidenceWorker -Session $Session -JobId ([string]$id) }
     $remove = New-Object 'System.Collections.Generic.List[string]'
     [System.Threading.Monitor]::Enter($Session.StateLock)
     try {
@@ -391,7 +396,7 @@ function Prune-MihariManagementV2EvidenceJobs {
             $candidateId = $null
             foreach ($id in $Session.EvidenceJobOrder) {
                 if (-not $Session.EvidenceJobs.ContainsKey($id)) { $candidateId = $id; break }
-                if ([string]$Session.EvidenceJobs[$id].state -notin @('accepted', 'queued', 'running')) { $candidateId = $id; break }
+                if ([string]$Session.EvidenceJobs[$id].state -notin @('accepted', 'queued', 'running') -and -not $Session.EvidenceJobWorkers.ContainsKey($id)) { $candidateId = $id; break }
             }
             if ($null -eq $candidateId) { throw 'evidence_job_limit_reached' }
             $Session.EvidenceJobs.Remove($candidateId)
@@ -400,7 +405,6 @@ function Prune-MihariManagementV2EvidenceJobs {
         }
     }
     finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
-    foreach ($id in $remove) { Complete-MihariManagementV2EvidenceWorker -Session $Session -JobId $id }
 }
 
 function Start-MihariManagementV2EvidenceJob {
@@ -421,6 +425,15 @@ function Start-MihariManagementV2EvidenceJob {
         acceptedAtUtc = $now; completedAtUtc = $null; result = $null; errorCode = $null
     }
     $powerShell = [System.Management.Automation.PowerShell]::Create()
+    $jobScript = @'
+param($WorkerSession, $WorkerJobId, $WorkerOperation, $WorkerParameters)
+$ErrorActionPreference = 'Stop'
+$sourceRoot = [string]$WorkerSession.ManagementSourceRoot
+if (Test-Path -LiteralPath (Join-Path $sourceRoot 'src') -PathType Container) { $sourceRoot = Join-Path $sourceRoot 'src' }
+if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot 'ManagementV2Evidence.ps1') -PathType Leaf)) { throw 'The evidence management worker source is unavailable.' }
+foreach ($sourceFile in (Get-ChildItem -LiteralPath $sourceRoot -Filter '*.ps1' | Sort-Object -Property Name)) { . $sourceFile.FullName }
+Invoke-MihariManagementV2EvidenceJob -Session $WorkerSession -JobId $WorkerJobId -Operation $WorkerOperation -Parameters $WorkerParameters
+'@
     [System.Threading.Monitor]::Enter($Session.StateLock)
     try {
         if (@($Session.EvidenceJobs.Values | Where-Object { [string]$_.state -in @('accepted', 'queued', 'running') }).Count -gt 0) {
@@ -429,7 +442,7 @@ function Start-MihariManagementV2EvidenceJob {
         $Session.EvidenceJobs[$jobId] = $job
         $Session.EvidenceJobOrder.Add($jobId)
         $powerShell.RunspacePool = $Session.ManagementWorkerPool
-        $null = $powerShell.AddCommand('Invoke-MihariManagementV2EvidenceJob').AddParameter('Session', $Session).AddParameter('JobId', $jobId).AddParameter('Operation', $Operation).AddParameter('Parameters', $Parameters)
+        $null = $powerShell.AddScript($jobScript).AddArgument($Session).AddArgument($jobId).AddArgument($Operation).AddArgument($Parameters)
         $asyncResult = $powerShell.BeginInvoke()
         $Session.EvidenceJobWorkers[$jobId] = [pscustomobject]@{ PowerShell = $powerShell; AsyncResult = $asyncResult; Finalizing = $false }
     }
@@ -585,8 +598,21 @@ function Stop-MihariManagementV2EvidenceJobs {
     if ($null -eq $Session.PSObject.Properties['EvidenceJobWorkers'] -or $null -eq $Session.EvidenceJobWorkers) {
         return [pscustomobject]@{ success = $true; errors = @() }
     }
-    foreach ($jobId in @($Session.EvidenceJobWorkers.Keys)) {
-        $worker = $Session.EvidenceJobWorkers[$jobId]
+    $workers = New-Object 'System.Collections.Generic.List[object]'
+    [System.Threading.Monitor]::Enter($Session.StateLock)
+    try {
+        foreach ($jobId in @($Session.EvidenceJobWorkers.Keys)) {
+            $worker = $Session.EvidenceJobWorkers[$jobId]
+            if (-not [bool]$worker.Finalizing) {
+                $worker.Finalizing = $true
+                $workers.Add([pscustomobject]@{ JobId = [string]$jobId; Worker = $worker })
+            }
+        }
+    }
+    finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
+    foreach ($entry in $workers) {
+        $jobId = [string]$entry.JobId
+        $worker = $entry.Worker
         try {
             if (-not $worker.AsyncResult.IsCompleted) { $worker.PowerShell.Stop() }
         }
@@ -596,7 +622,9 @@ function Stop-MihariManagementV2EvidenceJobs {
         if ($null -ne $Session.EvidenceJobs -and $Session.EvidenceJobs.ContainsKey($jobId) -and [string]$Session.EvidenceJobs[$jobId].state -in @('accepted', 'queued', 'running')) {
             Set-MihariManagementV2EvidenceJobState -Session $Session -JobId $jobId -State 'cancelled' -Phase 'session_stopped' -CompletedStages 0 -TotalStages 1 -ErrorCode 'session_stopped'
         }
-        $null = $Session.EvidenceJobWorkers.Remove($jobId)
+        [System.Threading.Monitor]::Enter($Session.StateLock)
+        try { $null = $Session.EvidenceJobWorkers.Remove($jobId) }
+        finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
     }
     return [pscustomobject]@{ success = ($errors.Count -eq 0); errors = [string[]]$errors.ToArray() }
 }
