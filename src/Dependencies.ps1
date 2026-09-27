@@ -1009,18 +1009,18 @@ function New-MihariPolicyProposals {
     }
 
     $seenTlsProposalScopes = New-MihariOrdinalHashtable
-    foreach ($tlsEvidence in $TlsEvidence) {
-        $validated = Test-MihariTlsExclusionEvidence -Evidence $tlsEvidence
+    foreach ($tlsComparisonEvidence in $TlsEvidence) {
+        $validated = Test-MihariTlsExclusionEvidence -Evidence $tlsComparisonEvidence
         if (-not $validated.Valid) { continue }
-        $tlsHost = ConvertTo-MihariNeutralPolicyHost -HostValue (Get-MihariDependencyValue -InputObject $tlsEvidence -Names @('host', 'destinationHost'))
+        $tlsHost = ConvertTo-MihariNeutralPolicyHost -HostValue (Get-MihariDependencyValue -InputObject $tlsComparisonEvidence -Names @('host', 'destinationHost'))
         if ($null -eq $tlsHost) { continue }
-        $caseId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $tlsEvidence -Names @('caseId')) -MaximumLength 128
+        $caseId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $tlsComparisonEvidence -Names @('caseId')) -MaximumLength 128
         $matchingDependencies = @($Dependencies | Where-Object {
                 (ConvertTo-MihariNeutralPolicyHost -HostValue (Get-MihariDependencyValue -InputObject $_ -Names @('host'))) -eq $tlsHost -and
                 ($null -eq $caseId -or [string](Get-MihariDependencyValue -InputObject $_ -Names @('caseId')) -eq $caseId)
             })
         if ($matchingDependencies.Count -eq 0) { continue }
-        $comparisonId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $tlsEvidence -Names @('comparisonId')) -MaximumLength 128
+        $comparisonId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $tlsComparisonEvidence -Names @('comparisonId')) -MaximumLength 128
         if ($null -eq $comparisonId) { $comparisonId = 'comparison-' + (Get-MihariDependencyHash -Text ($validated.InspectTrialId + [char]0 + $validated.TunnelTrialId + [char]0 + $tlsHost)).Substring(0, 24) }
         $scopeKey = [string]$caseId + [char]0 + $comparisonId + [char]0 + $tlsHost
         if ($seenTlsProposalScopes.ContainsKey($scopeKey)) { continue }
