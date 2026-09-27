@@ -299,3 +299,11 @@ The first usable release is complete when all of the following work on Windows:
 11. An Edge diagnostic browser can be launched with a temporary profile and Mihari as its process-specific proxy.
 12. HTTP/3/QUIC/TLS 1.3-only behavior is reported as unsupported rather than being silently interpreted as an allowlist/proxy failure.
 13. Runtime use requires no third-party package or binary.
+
+## 15. Local management session (Issue #3)
+
+A running session owns two distinct loopback listeners: the diagnostic proxy and a local HTTP management server. `start` prints both live endpoints, persists them in session metadata, and `status` reports their health based on listener/runtime evidence rather than the owner PID alone. `stop` closes both listeners and performs normal certificate cleanup.
+
+The management UI presents live session, proxy, upstream route, certificate trust, connection, observation, finding, and error state. A small local HTTP API supplies those views and invokes the canonical browser launcher and mode control. The UI can launch diagnostic Edge and switch the behavior of newly accepted CONNECT connections between Inspect and Tunnel; existing connections keep their accepted mode. Enabling Inspect requires session CA trust before inspection is offered. The CA remains session scoped and is removed on final stop.
+
+Mihari captures its platform upstream resolver before launching the diagnostic browser. The browser's process-specific loopback proxy is never reused as the enterprise upstream route. Routes to Mihari's own listener are rejected with an explicit self-reference fact. Edge is forced through Mihari for HTTP and HTTPS and cannot silently use unsupported browser transport in the diagnostic profile. The management surface remains loopback only and retains the privacy defaults above.

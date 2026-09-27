@@ -19,7 +19,7 @@ One foreground Mihari process owns one active session.
 
 The process contains:
 
-- the loopback listener;
+- the loopback proxy and management listeners;
 - a bounded connection worker pool;
 - the session CA private key;
 - the in-memory leaf certificate cache and its temporary Windows user-key files;
@@ -27,6 +27,8 @@ The process contains:
 - session state.
 
 Session state that must survive an abnormal process exit is limited to non-secret metadata needed for cleanup and diagnosis.
+
+The management listener belongs to the same foreground lifecycle. It serves a fixed local UI and bounded API, not a general file server. The proxy's accepted connection mode is captured before dispatch so a UI mode change applies only to later connections.
 
 Do not persist CA private keys.
 
@@ -50,6 +52,8 @@ src/
   Observation.ps1
   Diagnosis.ps1
   Browser.ps1
+  Management.ps1
+  ManagementUi.ps1
   Cleanup.ps1
 test/
   unit/
@@ -102,6 +106,7 @@ Suggested persistent metadata:
 - process ID;
 - mode;
 - listener endpoint;
+- management endpoint and listener health;
 - CA public certificate thumbprint;
 - CA subject;
 - output schema version.
@@ -227,6 +232,8 @@ reason: ...
 
 The resolver must be separable from the socket/HTTP forwarding code.
 
+Capture the inherited platform resolver before launching the diagnostic browser. Edge's process-specific loopback proxy is a client setting and must not become Mihari's upstream route. Reject a direct destination or explicit upstream proxy that resolves to Mihari's own listener and record `upstream_route_self_reference`.
+
 Resolution order:
 
 1. explicit Mihari command-line/config override;
@@ -320,6 +327,8 @@ Launch with:
 
 - a dedicated temporary user-data directory;
 - a process-specific `--proxy-server=http://127.0.0.1:<port>`;
+- explicit HTTP and HTTPS routing through Mihari, with no direct fallback;
+- browser settings that suppress unsupported transports in the diagnostic profile;
 - no certificate-error bypass flag;
 - optional URL supplied by the user.
 
@@ -400,7 +409,7 @@ A final smoke test should start Mihari, run local traffic through it, stop it, a
 
 Do not add these merely because they may be useful later:
 
-- GUI/Web UI;
+- remote management UI;
 - Windows service installation;
 - WFP/filter drivers;
 - system-wide proxy mutation;
