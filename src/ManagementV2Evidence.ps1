@@ -413,7 +413,7 @@ function Prune-MihariManagementV2EvidenceJobs {
 function Start-MihariManagementV2EvidenceJob {
     param(
         [Parameter(Mandatory = $true)]$Session,
-        [Parameter(Mandatory = $true)][ValidateSet('export', 'import')][string]$Operation,
+        [Parameter(Mandatory = $true)][ValidateSet('export', 'import', 'browser-import')][string]$Operation,
         [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Parameters
     )
 
@@ -422,9 +422,12 @@ function Start-MihariManagementV2EvidenceJob {
     Prune-MihariManagementV2EvidenceJobs -Session $Session
     $jobId = [Guid]::NewGuid().ToString('N').ToLowerInvariant()
     $now = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    $totalStages = 3
+    if ($Operation -eq 'export') { $totalStages = 4 }
+    elseif ($Operation -eq 'browser-import') { $totalStages = 2 }
     $job = [pscustomobject][ordered]@{
         jobId = $jobId; operation = $Operation; state = 'queued'; phase = 'queued'
-        progress = [pscustomobject]@{ completedStages = 0; totalStages = $(if ($Operation -eq 'export') { 4 } else { 3 }) }
+        progress = [pscustomobject]@{ completedStages = 0; totalStages = $totalStages }
         acceptedAtUtc = $now; completedAtUtc = $null; result = $null; errorCode = $null
     }
     $powerShell = [System.Management.Automation.PowerShell]::Create()
@@ -463,11 +466,13 @@ function Invoke-MihariManagementV2EvidenceJob {
     param(
         [Parameter(Mandatory = $true)]$Session,
         [Parameter(Mandatory = $true)][string]$JobId,
-        [Parameter(Mandatory = $true)][ValidateSet('export', 'import')][string]$Operation,
+        [Parameter(Mandatory = $true)][ValidateSet('export', 'import', 'browser-import')][string]$Operation,
         [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Parameters
     )
 
-    $totalStages = $(if ($Operation -eq 'export') { 4 } else { 3 })
+    $totalStages = 3
+    if ($Operation -eq 'export') { $totalStages = 4 }
+    elseif ($Operation -eq 'browser-import') { $totalStages = 2 }
     Set-MihariManagementV2EvidenceJobState -Session $Session -JobId $JobId -State 'running' -Phase 'preparing' -CompletedStages 0 -TotalStages $totalStages
     try {
         if ($Operation -eq 'export') {
@@ -484,6 +489,48 @@ function Invoke-MihariManagementV2EvidenceJob {
                 sha256 = [string]$exported.sha256; preview = $exported.preview
             }
             Set-MihariManagementV2EvidenceJobState -Session $Session -JobId $JobId -State 'completed' -Phase 'completed' -CompletedStages 4 -TotalStages 4 -Result $result
+            return
+        }
+
+        if ($Operation -eq 'browser-import') {
+            Set-MihariManagementV2EvidenceJobState -Session $Session -JobId $JobId -State 'running' -Phase 'importing_browser_evidence' -CompletedStages 1 -TotalStages $totalStages
+            if (-not (Get-Command Import-MihariBrowserEvidence -CommandType Function -ErrorAction SilentlyContinue)) { throw 'browser_import_source_unavailable' }
+            $imported = Import-MihariBrowserEvidence -Session $Session -Format ([string]$Parameters.format) -Path ([string]$Parameters.path)
+            if ($null -eq $imported -or $imported.supported -isnot [bool]) { throw 'browser_import_source_unavailable' }
+            $importedCount = 0
+            $unsupportedCount = 0
+            if (-not [int]::TryParse([string]$imported.importedCount, [ref]$importedCount) -or
+                -not [int]::TryParse([string]$imported.unsupportedCount, [ref]$unsupportedCount) -or
+                $importedCount -lt 0 -or $unsupportedCount -lt 0 -or ($importedCount + $unsupportedCount) -gt 20000) {
+                throw 'browser_import_source_unavailable'
+            }
+            $coverage = [string]$imported.coverage
+            if ($coverage -notin @('observed', 'partial', 'unsupported')) { throw 'browser_import_source_unavailable' }
+            $sourceIdentity = $null
+            $sourceVersion = $null
+            if ([bool]$imported.supported) {
+                $sourceIdentityCandidate = [string]$imported.sourceIdentity
+                if ($sourceIdentityCandidate -notmatch '^[0-9a-f]{32}$') { throw 'browser_import_source_unavailable' }
+                $sourceIdentity = $sourceIdentityCandidate
+                $sourceVersionCandidate = [string]$imported.sourceVersion
+                $expectedSourceVersion = 'har-1.2'
+                if ([string]$Parameters.format -eq 'netlog') { $expectedSourceVersion = 'chromium-netlog-json-recognized-events-v1' }
+                if ($sourceVersionCandidate -ne $expectedSourceVersion) { throw 'browser_import_source_unavailable' }
+                $sourceVersion = $expectedSourceVersion
+            }
+            elseif ($importedCount -ne 0 -or $coverage -ne 'unsupported' -or
+                -not [string]::IsNullOrEmpty([string]$imported.sourceIdentity) -or
+                -not [string]::IsNullOrEmpty([string]$imported.sourceVersion)) {
+                throw 'browser_import_source_unavailable'
+            }
+            $formatLabel = 'HAR'
+            if ([string]$Parameters.format -eq 'netlog') { $formatLabel = 'Chromium NetLog JSON' }
+            $result = [pscustomobject]@{
+                source = 'import'; format = $formatLabel; supported = [bool]$imported.supported
+                sourceIdentity = $sourceIdentity; sourceVersion = $sourceVersion
+                importedCount = $importedCount; unsupportedCount = $unsupportedCount; coverage = $coverage
+            }
+            Set-MihariManagementV2EvidenceJobState -Session $Session -JobId $JobId -State 'completed' -Phase 'completed' -CompletedStages $totalStages -TotalStages $totalStages -Result $result
             return
         }
 
@@ -516,6 +563,11 @@ function Invoke-MihariManagementV2EvidenceJob {
         elseif ($_.Exception.Message -eq 'invalid_case_id') { $errorCode = 'invalid_case_id' }
         elseif ($_.Exception.Message -eq 'case_event_limit_exceeded' -or $_.Exception.Message -eq 'case_event_byte_limit_exceeded') { $errorCode = 'evidence_scope_limit_exceeded' }
         elseif ($_.Exception.Message -eq 'evidence_import_limit_reached') { $errorCode = 'evidence_import_limit_reached' }
+        elseif ($Operation -eq 'browser-import' -and $_.Exception.Message -in @(
+            'browser_import_source_not_found', 'browser_import_source_too_large', 'browser_import_record_limit',
+            'browser_import_source_unavailable', 'browser_import_invalid_input', 'browser_import_writer_unavailable'
+        )) { $errorCode = $_.Exception.Message }
+        elseif ($Operation -eq 'browser-import') { $errorCode = 'browser_import_failed' }
         Set-MihariManagementV2EvidenceJobState -Session $Session -JobId $JobId -State 'failed' -Phase 'failed' -CompletedStages 0 -TotalStages $totalStages -ErrorCode $errorCode
     }
 }
@@ -723,6 +775,45 @@ function Invoke-MihariManagementV2EvidenceRequest {
             if ($_.Exception.Message -eq 'source_too_large') { return (New-MihariManagementErrorResponse -StatusCode 413 -Code 'evidence_source_too_large' -Message 'The local evidence bundle exceeds the 64 MiB archive limit.') }
             if ($_.Exception.Message -eq 'invalid_source_path') { return (New-MihariManagementErrorResponse -StatusCode 400 -Code 'invalid_source_path' -Message 'An absolute local bundle path is required.') }
             return (New-MihariManagementErrorResponse -StatusCode 503 -Code 'evidence_job_unavailable' -Message 'Mihari could not start the evidence import job.')
+        }
+    }
+    if ($method -eq 'POST' -and $path -eq '/api/v2/browser/import') {
+        $body = $null
+        try { $body = Read-MihariManagementJsonBody -Request $Request }
+        catch {
+            if ($_.Exception.Message -eq 'unsupported_media_type') { return (New-MihariManagementErrorResponse -StatusCode 415 -Code 'unsupported_media_type' -Message 'Send a UTF-8 application/json request body.') }
+            return (New-MihariManagementErrorResponse -StatusCode 400 -Code 'browser_import_invalid_input' -Message 'Supply format and an absolute local evidence file path.')
+        }
+        $format = ([string](Get-MihariEvidenceValue -InputObject $body -Name 'format')).ToLowerInvariant()
+        if ($format -notin @('har', 'netlog')) {
+            return (New-MihariManagementErrorResponse -StatusCode 400 -Code 'browser_import_invalid_format' -Message 'Supported browser evidence formats are har and netlog.')
+        }
+        $sourcePath = [string](Get-MihariEvidenceValue -InputObject $body -Name 'path')
+        if ([string]::IsNullOrWhiteSpace($sourcePath) -or $sourcePath.Length -gt 4096) {
+            return (New-MihariManagementErrorResponse -StatusCode 400 -Code 'browser_import_invalid_input' -Message 'Supply format and an absolute local evidence file path.')
+        }
+        try {
+            if (-not [System.IO.Path]::IsPathRooted($sourcePath)) { throw 'browser_import_invalid_input' }
+            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and $sourcePath -notmatch '^[A-Za-z]:[\\/]') { throw 'browser_import_invalid_input' }
+            $sourcePath = [System.IO.Path]::GetFullPath($sourcePath)
+            if (-not [System.IO.File]::Exists($sourcePath)) { throw 'browser_import_source_not_found' }
+            Assert-MihariEvidencePathHasNoReparsePoint -Path $sourcePath
+            $sourceInfo = New-Object System.IO.FileInfo($sourcePath)
+            if ($sourceInfo.Length -gt 67108864) { throw 'browser_import_source_too_large' }
+        }
+        catch {
+            if ($_.Exception.Message -eq 'browser_import_source_not_found') { return (New-MihariManagementErrorResponse -StatusCode 404 -Code 'browser_import_source_not_found' -Message 'The selected local browser evidence file does not exist.') }
+            if ($_.Exception.Message -eq 'browser_import_source_too_large') { return (New-MihariManagementErrorResponse -StatusCode 413 -Code 'browser_import_source_too_large' -Message 'The selected browser evidence file exceeds the 64 MiB import limit.') }
+            return (New-MihariManagementErrorResponse -StatusCode 400 -Code 'browser_import_invalid_input' -Message 'The selected browser evidence path is invalid or linked.')
+        }
+        try {
+            $job = Start-MihariManagementV2EvidenceJob -Session $Session -Operation 'browser-import' -Parameters @{ format = $format; path = $sourcePath }
+            return (New-MihariManagementJsonResponse -StatusCode 202 -Value $job)
+        }
+        catch {
+            if ($_.Exception.Message -eq 'evidence_job_busy') { return (New-MihariManagementErrorResponse -StatusCode 409 -Code 'evidence_job_busy' -Message 'Another evidence job is running for this session.') }
+            if ($_.Exception.Message -eq 'evidence_job_limit_reached') { return (New-MihariManagementErrorResponse -StatusCode 429 -Code 'evidence_job_limit_reached' -Message 'The bounded evidence job history is full.') }
+            return (New-MihariManagementErrorResponse -StatusCode 503 -Code 'browser_import_unavailable' -Message 'Mihari could not start the browser evidence import job.')
         }
     }
     if ($method -eq 'GET' -and $path -match '^/api/v2/evidence/jobs/([0-9a-f]{32})$') {
