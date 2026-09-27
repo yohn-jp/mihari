@@ -99,7 +99,9 @@ function Invoke-MihariInspect {
         $upstreamTls.ReadTimeout = 30000
         $upstreamTls.WriteTimeout = 30000
         $emptyCerts = New-Object System.Security.Cryptography.X509Certificates.X509CertificateCollection
-        $upstreamTls.AuthenticateAsClient($ConnectHost, $emptyCerts, [System.Security.Authentication.SslProtocols]::Tls12, $true)
+        # Keep .NET's normal chain and hostname checks. Revocation probing is
+        # optional in this overload and blocks local/private CAs without CRLs.
+        $upstreamTls.AuthenticateAsClient($ConnectHost, $emptyCerts, [System.Security.Authentication.SslProtocols]::Tls12, $false)
         $tlsData = @{ host = $ConnectHost; port = $ConnectPort; certificateAccepted = $true; tlsProtocol = $upstreamTls.SslProtocol.ToString(); tlsCipher = $upstreamTls.CipherAlgorithm.ToString() }
         if ($null -ne $upstreamTls.RemoteCertificate) {
             $peer = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList @($upstreamTls.RemoteCertificate)
