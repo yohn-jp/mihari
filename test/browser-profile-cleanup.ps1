@@ -156,7 +156,16 @@ try {
     }
     $script:profileProcessInventory = @($unrelatedEdgeChild, $malformedProfileArgumentProcess)
     $malformedArgumentStatus = Get-MihariBrowserProfileStatus -SessionMetadata $session
-    Assert-MihariBrowserProfileTest ($malformedArgumentStatus.profiles[0].state -eq 'process_identity_unverified' -and -not $malformedArgumentStatus.profiles[0].cleanupAvailable -and [System.IO.Directory]::Exists($profilePath)) 'A malformed user-data-dir switch fails closed because the process may refer to the owned profile.'
+    Assert-MihariBrowserProfileTest ($malformedArgumentStatus.profiles[0].state -eq 'ready' -and $malformedArgumentStatus.profiles[0].cleanupAvailable -and [System.IO.Directory]::Exists($profilePath)) 'A non-owner Edge process with a nonblank malformed profile switch and no exact owned path follows the canonical cleanup boundary.'
+
+    $malformedOwnerArgumentProcess = [pscustomobject]@{
+        ProcessId = [int]$launch.Pid
+        ExecutablePath = $executablePath
+        CommandLine = ('"{0}" --user-data-dir' -f $executablePath)
+    }
+    $script:profileProcessInventory = @($unrelatedEdgeChild, $malformedOwnerArgumentProcess)
+    $malformedOwnerStatus = Get-MihariBrowserProfileStatus -SessionMetadata $session
+    Assert-MihariBrowserProfileTest ($malformedOwnerStatus.profiles[0].state -eq 'process_identity_unverified' -and -not $malformedOwnerStatus.profiles[0].cleanupAvailable -and [System.IO.Directory]::Exists($profilePath)) 'A malformed profile argument from the recorded owner PID still fails closed.'
 
     $ownedProfileProcess = [pscustomobject]@{
         ProcessId = [int]$launch.Pid
@@ -169,7 +178,7 @@ try {
     $runningCleanup = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method POST -Path '/api/browser/cleanup' -Token $session.ControlToken -Body ([pscustomobject]@{ profileOwnershipId = $ownershipId; confirmCleanup = $true }))
     Assert-MihariBrowserProfileTest ($runningCleanup.StatusCode -eq 409 -and [System.IO.Directory]::Exists($profilePath)) 'The protected cleanup route refuses a live profile and preserves its files.'
 
-    $script:profileProcessInventory = @($unrelatedProfileProcess, $unrelatedEdgeChild)
+    $script:profileProcessInventory = @($unrelatedProfileProcess, $unrelatedEdgeChild, $malformedProfileArgumentProcess)
     $missingToken = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method POST -Path '/api/browser/cleanup' -Body ([pscustomobject]@{ profileOwnershipId = $ownershipId; confirmCleanup = $true }))
     Assert-MihariBrowserProfileTest ($missingToken.StatusCode -eq 403 -and [System.IO.Directory]::Exists($profilePath)) 'Cleanup requires the existing session control token.'
     $wrongOrigin = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method POST -Path '/api/browser/cleanup' -Token $session.ControlToken -Origin 'http://127.0.0.1:49124' -Body ([pscustomobject]@{ profileOwnershipId = $ownershipId; confirmCleanup = $true }))

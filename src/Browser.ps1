@@ -540,7 +540,7 @@ function Get-MihariBrowserProfileState {
                 $commandLine,
                 '(?i)(?:^|[\s"])--user-data-dir(?:=|\s|$)'
             )
-            if ($referencesExactProfilePath -or $hasUnparsedProfileArgument) {
+            if ($referencesExactProfilePath -or ($hasUnparsedProfileArgument -and $isRecordedOwnerPid)) {
                 $base.state = 'process_identity_unverified'
                 if ($referencesExactProfilePath) {
                     $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. An Edge process still refers to its exact profile path, so cleanup is unavailable.'
@@ -551,8 +551,13 @@ function Get-MihariBrowserProfileState {
                 return $base
             }
             if (-not $isRecordedOwnerPid) {
+                if ($processId -lt 1) {
+                    $base.state = 'process_identity_unverified'
+                    $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. Mihari could not verify an Edge process identity, so cleanup is unavailable.'
+                    return $base
+                }
                 # A complete non-owner command line that contains no unique Mihari profile path cannot identify this profile.
-                # The exact-profile cleanup path applies the same boundary; blank command lines above still fail closed.
+                # The exact-profile cleanup path applies the same boundary, including for malformed profile switches; blank command lines above still fail closed.
                 continue
             }
             if (-not [string]::Equals([string]$process.ExecutablePath, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase) -or
