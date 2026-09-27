@@ -230,16 +230,20 @@ function Save-MihariSessionMetadata {
     if ($null -eq $Session -or [string]::IsNullOrWhiteSpace([string]$Session.OutputDirectory)) {
         throw 'A session with an output directory is required.'
     }
-    if ($null -ne $Session.ActualPort -and $null -ne $Session.ActualManagementPort -and [string]$Session.Status -eq 'starting') {
-        $Session.Status = 'running'
-    }
-    $document = Get-MihariSessionMetadataObject -Session $Session
-    [System.Threading.Monitor]::Enter($Session.MetadataLock)
+    [System.Threading.Monitor]::Enter($Session.StateLock)
     try {
-        Write-MihariJsonFileAtomic -Path ([string]$Session.MetadataPath) -Value $document
-        Write-MihariJsonFileAtomic -Path ([string]$Session.ActivePath) -Value $document
+        [System.Threading.Monitor]::Enter($Session.MetadataLock)
+        try {
+            if ($null -ne $Session.ActualPort -and $null -ne $Session.ActualManagementPort -and [string]$Session.Status -eq 'starting') {
+                $Session.Status = 'running'
+            }
+            $document = Get-MihariSessionMetadataObject -Session $Session
+            Write-MihariJsonFileAtomic -Path ([string]$Session.MetadataPath) -Value $document
+            Write-MihariJsonFileAtomic -Path ([string]$Session.ActivePath) -Value $document
+        }
+        finally { [System.Threading.Monitor]::Exit($Session.MetadataLock) }
     }
-    finally { [System.Threading.Monitor]::Exit($Session.MetadataLock) }
+    finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
     return $document
 }
 
