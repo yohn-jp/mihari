@@ -247,7 +247,8 @@ function ConvertTo-MihariSafeEventData {
         'maxConcurrentStreams', 'maxFrameSize', 'initialWindowSize',
         'headerTableSize', 'lastStreamId', 'grpcStatus', 'httpStatus',
         'waitMs', 'durationMs', 'activeStreamsAtClose', 'queueLength',
-        'queueCapacity', 'queuePeak', 'saturationCount'
+        'queueCapacity', 'queuePeak', 'saturationCount', 'browserDroppedTargetCount',
+        'browserDroppedRequestCount'
     )
     $booleanFields = @('certificateAccepted', 'caTrusted', 'fromDiskCache', 'fromServiceWorker', 'reused', 'queueSaturated', 'pendingConnections', 'informational')
     $allowed = @{}

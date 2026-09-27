@@ -735,6 +735,63 @@ function Complete-MihariBrowserAttempt {
         -ElapsedMs $fact.ElapsedMs -Data $fact.Data -Coverage $Coverage
 }
 
+function Add-MihariBrowserObserverTarget {
+    param(
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $TargetSessions,
+        [Parameter(Mandatory = $true)][string] $SessionId,
+        [Parameter(Mandatory = $true)][string] $TargetId,
+        [ValidateRange(1, 4096)][int] $MaximumTargets = 64
+    )
+
+    if ($TargetSessions.Contains($SessionId)) {
+        return [pscustomobject]@{ Added = $false; AlreadyTracked = $true; Overflow = $false }
+    }
+    if ($TargetSessions.Count -ge $MaximumTargets) {
+        return [pscustomobject]@{ Added = $false; AlreadyTracked = $false; Overflow = $true }
+    }
+    $TargetSessions[$SessionId] = $TargetId
+    return [pscustomobject]@{ Added = $true; AlreadyTracked = $false; Overflow = $false }
+}
+
+function Add-MihariBrowserObserverAttempt {
+    param(
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $Attempts,
+        [Parameter(Mandatory = $true)][string] $Key,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $Record,
+        [ValidateRange(1, 100000)][int] $MaximumAttempts = 2048
+    )
+
+    if (-not $Attempts.Contains($Key) -and $Attempts.Count -ge $MaximumAttempts) {
+        return [pscustomobject]@{ Added = $false; Overflow = $true }
+    }
+    $Attempts[$Key] = $Record
+    return [pscustomobject]@{ Added = $true; Overflow = $false }
+}
+
+function Write-MihariBrowserObservationLimitFact {
+    param(
+        [Parameter(Mandatory = $true)][object] $Session,
+        [Parameter(Mandatory = $true)][object] $Launch,
+        [Parameter(Mandatory = $true)][ValidateSet('target', 'request')][string] $LimitKind,
+        [Parameter(Mandatory = $true)][long] $DroppedCount
+    )
+
+    if ($DroppedCount -lt 1) { throw 'The browser observation drop count must be positive.' }
+    $errorCode = $LimitKind + '_limit_reached'
+    $data = @{ browserError = $errorCode }
+    if ($LimitKind -eq 'target') { $data.browserDroppedTargetCount = $DroppedCount }
+    else { $data.browserDroppedRequestCount = $DroppedCount }
+    $null = Write-MihariBrowserObservationFact -Session $Session -Launch $Launch -Stage 'browser.observation' `
+        -Outcome 'observer_limit' -ConnectionId ('browser-profile-' + [string]$Launch.SourceIdentity) `
+        -RequestId $null -ElapsedMs $null -Data $data -Coverage 'truncated'
+}
+
+function Test-MihariBrowserLimitCountCheckpoint {
+    param([Parameter(Mandatory = $true)][long] $Count)
+
+    return ($Count -eq 1 -or (($Count -band ($Count - 1)) -eq 0))
+}
+
 function Invoke-MihariBrowserObservationWorker {
     [CmdletBinding()]
     param(
@@ -747,6 +804,10 @@ function Invoke-MihariBrowserObservationWorker {
     $socket = $null
     $sourceId = [string]$Launch.SourceIdentity
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $targetDroppedCount = [long]0
+    $requestDroppedCount = [long]0
+    $lastReportedTargetDroppedCount = [long]0
+    $lastReportedRequestDroppedCount = [long]0
     try {
         if (-not (Test-MihariBrowserOwnedProcess -SessionId ([string]$Session.Id) -Launch $Launch)) {
             throw 'browser_profile_owner_unverified'
@@ -789,6 +850,8 @@ function Invoke-MihariBrowserObservationWorker {
 
         $targetSessions = @{}
         $attempts = @{}
+        $maximumTargets = 64
+        $maximumAttempts = 2048
         while (-not $token.IsCancellationRequested -and $socket.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
             $message = Receive-MihariBrowserCdpMessage -Socket $socket -CancellationToken $token
             if ($null -eq $message) { break }
@@ -804,7 +867,19 @@ function Invoke-MihariBrowserObservationWorker {
                     if ($childSession -match '^[A-Za-z0-9._-]{1,128}$' -and
                         $childTarget -match '^[A-Za-z0-9._-]{1,128}$' -and
                         $targetType -in @('page', 'iframe', 'worker', 'service_worker', 'shared_worker')) {
-                        $targetSessions[$childSession] = $childTarget
+                        $targetAdmission = Add-MihariBrowserObserverTarget -TargetSessions $targetSessions `
+                            -SessionId $childSession -TargetId $childTarget -MaximumTargets $maximumTargets
+                        if (-not $targetAdmission.Added) {
+                            if ($targetAdmission.Overflow) {
+                                if ($targetDroppedCount -lt [long]::MaxValue) { $targetDroppedCount++ }
+                                if (Test-MihariBrowserLimitCountCheckpoint -Count $targetDroppedCount) {
+                                    Write-MihariBrowserObservationLimitFact -Session $Session -Launch $Launch `
+                                        -LimitKind 'target' -DroppedCount $targetDroppedCount
+                                    $lastReportedTargetDroppedCount = $targetDroppedCount
+                                }
+                            }
+                            continue
+                        }
                         $nextId = Send-MihariBrowserCdpCommand -Socket $socket -Method 'Network.enable' -Parameters @{} `
                             -SessionId $childSession -NextCommandId $nextId -CancellationToken $token
                         $nextId = Send-MihariBrowserCdpCommand -Socket $socket -Method 'Page.enable' -Parameters @{} `
@@ -871,7 +946,7 @@ function Invoke-MihariBrowserObservationWorker {
                     $startTimestamp = 0.0
                     $hasStart = [double]::TryParse([string](Get-MihariBrowserMemberValue -InputObject $parameters -Name 'timestamp'), [ref]$startTimestamp)
                     if (-not $hasStart) { $startTimestamp = $null }
-                    $attempts[$attemptKey] = [ordered]@{
+                    $attemptRecord = [ordered]@{
                         RequestId = $requestId
                         Request = $safeRequest
                         FrameId = $frameId
@@ -882,6 +957,19 @@ function Invoke-MihariBrowserObservationWorker {
                         Response = $null
                         FromDiskCache = $null
                         FromServiceWorker = $null
+                    }
+                    $attemptAdmission = Add-MihariBrowserObserverAttempt -Attempts $attempts -Key $attemptKey `
+                        -Record $attemptRecord -MaximumAttempts $maximumAttempts
+                    if (-not $attemptAdmission.Added) {
+                        if ($attemptAdmission.Overflow) {
+                            if ($requestDroppedCount -lt [long]::MaxValue) { $requestDroppedCount++ }
+                            if (Test-MihariBrowserLimitCountCheckpoint -Count $requestDroppedCount) {
+                                Write-MihariBrowserObservationLimitFact -Session $Session -Launch $Launch `
+                                    -LimitKind 'request' -DroppedCount $requestDroppedCount
+                                $lastReportedRequestDroppedCount = $requestDroppedCount
+                            }
+                        }
+                        continue
                     }
                 }
                 'Network.responseReceived' {
@@ -958,6 +1046,20 @@ function Invoke-MihariBrowserObservationWorker {
         }
     }
     finally {
+        if ($targetDroppedCount -gt $lastReportedTargetDroppedCount) {
+            try {
+                Write-MihariBrowserObservationLimitFact -Session $Session -Launch $Launch `
+                    -LimitKind 'target' -DroppedCount $targetDroppedCount
+            }
+            catch { Write-Warning ('Mihari could not record the final browser target drop count ({0}).' -f $_.Exception.GetType().FullName) }
+        }
+        if ($requestDroppedCount -gt $lastReportedRequestDroppedCount) {
+            try {
+                Write-MihariBrowserObservationLimitFact -Session $Session -Launch $Launch `
+                    -LimitKind 'request' -DroppedCount $requestDroppedCount
+            }
+            catch { Write-Warning ('Mihari could not record the final browser request drop count ({0}).' -f $_.Exception.GetType().FullName) }
+        }
         if ($null -ne $socket) {
             try {
                 if ($socket.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
@@ -1138,11 +1240,28 @@ function Get-MihariBrowserImportFileText {
     )
 
     $fullPath = [System.IO.Path]::GetFullPath($Path)
-    $item = Get-Item -LiteralPath $fullPath -ErrorAction Stop
-    if (-not $item.PSIsContainer -and $item.Length -le $MaximumBytes) {
-        return [System.IO.File]::ReadAllText($fullPath, [System.Text.Encoding]::UTF8)
+    $stream = $null
+    $reader = $null
+    try {
+        $stream = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        if ($stream.Length -gt $MaximumBytes) { throw 'browser_import_source_too_large' }
+        $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $true, 8192)
+        $builder = New-Object System.Text.StringBuilder
+        $buffer = New-Object char[] 8192
+        while (($count = $reader.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            if ($builder.Length + $count -gt $MaximumBytes) { throw 'browser_import_source_too_large' }
+            [void]$builder.Append($buffer, 0, $count)
+        }
+        return $builder.ToString()
     }
-    throw 'Browser evidence import exceeds the configured size limit or is not a file.'
+    catch {
+        if ($_.Exception.Message -eq 'browser_import_source_too_large') { throw }
+        throw 'browser_import_source_unavailable'
+    }
+    finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        elseif ($null -ne $stream) { $stream.Dispose() }
+    }
 }
 
 function New-MihariImportedBrowserRecord {
@@ -1150,6 +1269,7 @@ function New-MihariImportedBrowserRecord {
         [Parameter(Mandatory = $true)][string] $ImportId,
         [Parameter(Mandatory = $true)][string] $SourceVersion,
         [Parameter(Mandatory = $true)][string] $SourceRecordId,
+        [AllowNull()][string] $SourceRequestId,
         [Parameter(Mandatory = $true)][string] $Outcome,
         [AllowNull()][object] $ElapsedMs,
         [AllowNull()][string] $SourceTimestampUtc,
@@ -1157,12 +1277,16 @@ function New-MihariImportedBrowserRecord {
     )
 
     $safeId = Get-MihariBrowserScopedId -Scope $ImportId -Value $SourceRecordId -Prefix 'im'
+    $requestIdentity = $SourceRecordId
+    if (-not [string]::IsNullOrWhiteSpace($SourceRequestId)) { $requestIdentity = $SourceRequestId }
+    $safeRequestId = Get-MihariBrowserScopedId -Scope $ImportId -Value $requestIdentity -Prefix 'ir'
     $record = [ordered]@{
         source = 'import'
         coverage = 'observed'
         sourceIdentity = $ImportId
         sourceVersion = $SourceVersion
         sourceRecordId = $safeId
+        sourceRequestId = $safeRequestId
         outcome = $Outcome
         elapsedMs = $ElapsedMs
         data = $Data
@@ -1324,10 +1448,27 @@ function ConvertFrom-MihariNetLog {
             $data['browserError'] = ('net_error:' + $netErrorValue)
         }
         $source = Get-MihariBrowserMemberValue -InputObject $event -Name 'source'
-        $localSourceId = Get-MihariBrowserMemberValue -InputObject $source -Name 'id'
-        $safeRecordId = $typeName + ':' + [string]$localSourceId + ':' + [string]$index
+        $localSourceIdValue = Get-MihariBrowserMemberValue -InputObject $source -Name 'id'
+        $sourceTypeValue = Get-MihariBrowserMemberValue -InputObject $source -Name 'type'
+        $localSourceId = $null
+        $sourceType = $null
+        $parsedSourceId = [long]0
+        $parsedSourceType = [long]0
+        if ($null -ne $localSourceIdValue -and [string]$localSourceIdValue -match '^\d{1,19}$' -and
+            [long]::TryParse([string]$localSourceIdValue, [ref]$parsedSourceId) -and $parsedSourceId -ge 0) {
+            $localSourceId = [string]$parsedSourceId
+        }
+        if ($null -ne $sourceTypeValue -and [string]$sourceTypeValue -match '^\d{1,19}$' -and
+            [long]::TryParse([string]$sourceTypeValue, [ref]$parsedSourceType) -and $parsedSourceType -ge 0) {
+            $sourceType = [string]$parsedSourceType
+        }
+        $safeRecordId = $typeName + ':' + $(if ($null -ne $localSourceId) { $localSourceId } else { 'unknown' }) + ':' + [string]$index
+        $sourceRequestId = $safeRecordId
+        if ($null -ne $localSourceId -and $null -ne $sourceType) {
+            $sourceRequestId = 'netlog:' + $sourceType + ':' + $localSourceId
+        }
         $record = New-MihariImportedBrowserRecord -ImportId $importId -SourceVersion 'chromium-netlog-json-recognized-events-v1' `
-            -SourceRecordId $safeRecordId -Outcome 'imported' -ElapsedMs $null -Data $data
+            -SourceRecordId $safeRecordId -SourceRequestId $sourceRequestId -Outcome 'imported' -ElapsedMs $null -Data $data
         [void]$records.Add($record)
     }
     return [pscustomobject]@{
@@ -1338,5 +1479,122 @@ function ConvertFrom-MihariNetLog {
         importedCount = $records.Count
         unsupportedCount = $unsupported
         records = [object[]]$records.ToArray()
+    }
+}
+
+function ConvertTo-MihariBrowserImportEventData {
+    param([Parameter(Mandatory = $true)][object] $InputData)
+
+    $data = [ordered]@{}
+    foreach ($name in @('scheme', 'host', 'path', 'method', 'protocol', 'browserError', 'browserTimingOrigin')) {
+        $value = Get-MihariBrowserMemberValue -InputObject $InputData -Name $name
+        if ($null -eq $value) { continue }
+        $text = [string]$value
+        if ($text.Length -gt 4096) { continue }
+        $valid = $true
+        switch ($name) {
+            'scheme' { if ($text -notin @('http', 'https')) { $valid = $false } }
+            'host' { if ($text -notmatch '^[A-Za-z0-9.-]{1,253}$' -and $text -notmatch '^\[[0-9A-Fa-f:.]{2,45}\]$') { $valid = $false } }
+            'method' { $text = ConvertTo-MihariBrowserSafeMethod -Method $text; if ($null -eq $text) { $valid = $false } }
+            'protocol' { $text = ConvertTo-MihariBrowserSafeProtocol -Protocol $text; if ($null -eq $text) { $valid = $false } }
+            'browserError' {
+                if ($text -notmatch '^(net::ERR_[A-Z0-9_]{1,80}|blocked:[a-z0-9-]{1,80}|cors:[A-Za-z][A-Za-z0-9_]{0,63}|net_error:-?[0-9]{1,10})$') { $valid = $false }
+            }
+            'browserTimingOrigin' { if ($text -notin @('har')) { $valid = $false } }
+            'path' {
+                if (-not $text.StartsWith('/')) { $valid = $false }
+                else { $text = [regex]::Replace($text, '([?&][^=&#\s]+)=([^&#\s]*)', '$1=[REDACTED]') }
+            }
+        }
+        if ($valid -and $null -ne $text) { $data[$name] = $text }
+    }
+    foreach ($name in @('port', 'statusCode')) {
+        $value = Get-MihariBrowserMemberValue -InputObject $InputData -Name $name
+        $parsed = 0
+        if ($null -ne $value -and [int]::TryParse([string]$value, [ref]$parsed)) {
+            if (($name -eq 'port' -and $parsed -ge 1 -and $parsed -le 65535) -or
+                ($name -eq 'statusCode' -and $parsed -ge 100 -and $parsed -le 599)) {
+                $data[$name] = $parsed
+            }
+        }
+    }
+    return [pscustomobject]$data
+}
+
+function Import-MihariBrowserEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $Session,
+        [Parameter(Mandatory = $true)][ValidateSet('har', 'netlog')][string] $Format,
+        [Parameter(Mandatory = $true)][string] $Path
+    )
+
+    if ($Path.Length -gt 4096 -or -not [System.IO.Path]::IsPathRooted($Path)) { throw 'browser_import_source_unavailable' }
+    if (-not [System.IO.File]::Exists($Path)) { throw 'browser_import_source_not_found' }
+    try { $fullPath = [System.IO.Path]::GetFullPath($Path) }
+    catch { throw 'browser_import_source_unavailable' }
+    $writer = Get-MihariBrowserMemberValue -InputObject $Session -Name 'Writer'
+    if ($null -eq $writer -or [bool]$writer.Closed -or $null -eq (Get-MihariBrowserMemberValue -InputObject $Session -Name 'Mode')) {
+        throw 'browser_import_writer_unavailable'
+    }
+
+    $parsed = $null
+    try {
+        if ($Format -eq 'har') {
+            $parsed = ConvertFrom-MihariHar -Path $fullPath -MaximumEntries 20000 -MaximumBytes 67108864
+        }
+        else {
+            $parsed = ConvertFrom-MihariNetLog -Path $fullPath -MaximumEvents 20000 -MaximumBytes 67108864
+        }
+    }
+    catch {
+        switch -Exact ($_.Exception.Message) {
+            'browser_import_source_too_large' { throw 'browser_import_source_too_large' }
+            'HAR entry count exceeds the configured limit.' { throw 'browser_import_record_limit' }
+            'NetLog event count exceeds the configured limit.' { throw 'browser_import_record_limit' }
+            'browser_import_source_unavailable' { throw 'browser_import_source_unavailable' }
+            default { throw 'browser_import_invalid_input' }
+        }
+    }
+
+    $formatName = [string]$parsed.format
+    if (-not [bool]$parsed.supported) {
+        return [pscustomobject][ordered]@{
+            format = $formatName; supported = $false; sourceIdentity = $null; sourceVersion = $null
+            importedCount = 0; unsupportedCount = [int]$parsed.unsupportedCount; coverage = 'unsupported'
+        }
+    }
+    $importId = [string]$parsed.importId
+    if ($importId -notmatch '^[0-9a-f]{32}$' -or @($parsed.records).Count -gt 20000) { throw 'browser_import_invalid_input' }
+    $sourceVersion = if ($Format -eq 'har') { 'har-1.2' } else { 'chromium-netlog-json-recognized-events-v1' }
+    $configurationRevision = Get-MihariBrowserMemberValue -InputObject $Session -Name 'ConfigurationRevision'
+    $writtenCount = 0
+    foreach ($record in @($parsed.records)) {
+        $recordId = [string](Get-MihariBrowserMemberValue -InputObject $record -Name 'sourceRecordId')
+        $requestIdentity = [string](Get-MihariBrowserMemberValue -InputObject $record -Name 'sourceRequestId')
+        if ($recordId -notmatch '^im-[0-9a-f]{24}$') { throw 'browser_import_invalid_input' }
+        if ($requestIdentity -notmatch '^ir-[0-9a-f]{24}$') { $requestIdentity = $recordId }
+        $data = ConvertTo-MihariBrowserImportEventData -InputData (Get-MihariBrowserMemberValue -InputObject $record -Name 'data')
+        $requestId = 'browser-import-' + $requestIdentity
+        $connectionId = 'browser-import-' + $importId + '-' + $recordId
+        $arguments = @{
+            Session = $Session; ConnectionId = $connectionId; RequestId = $requestId
+            Stage = 'browser.network.request'; Outcome = 'imported'
+            ElapsedMs = (Get-MihariBrowserMemberValue -InputObject $record -Name 'elapsedMs')
+            Data = $data; Mode = [string]$Session.Mode; Source = 'import'; Coverage = 'observed'
+            SourceIdentity = $importId; SourceVersion = $sourceVersion
+        }
+        if ($null -ne $configurationRevision) { $arguments.ConfigurationRevision = [int]$configurationRevision }
+        try { $null = Write-MihariEvent @arguments }
+        catch { throw 'browser_import_writer_unavailable' }
+        $writtenCount++
+    }
+    $unsupportedCount = [int]$parsed.unsupportedCount
+    $coverage = 'observed'
+    if ($unsupportedCount -gt 0 -and $writtenCount -eq 0) { $coverage = 'unsupported' }
+    elseif ($unsupportedCount -gt 0) { $coverage = 'partial' }
+    return [pscustomobject][ordered]@{
+        format = $formatName; supported = $true; sourceIdentity = $importId; sourceVersion = $sourceVersion
+        importedCount = $writtenCount; unsupportedCount = $unsupportedCount; coverage = $coverage
     }
 }

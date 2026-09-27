@@ -68,6 +68,22 @@ try {
         -not $oneSidedTimingFact.Data.Contains('browserTimingStartMs') -and
         -not $oneSidedTimingFact.Data.Contains('browserTimingDurationMs')) -Message 'A single monotonic timestamp must not be promoted into a measured duration or timing pair.'
 
+    $targetSessions = @{}
+    $firstTarget = Add-MihariBrowserObserverTarget -TargetSessions $targetSessions -SessionId 'session-1' -TargetId 'target-1' -MaximumTargets 1
+    $duplicateTarget = Add-MihariBrowserObserverTarget -TargetSessions $targetSessions -SessionId 'session-1' -TargetId 'target-1' -MaximumTargets 1
+    $overflowTarget = Add-MihariBrowserObserverTarget -TargetSessions $targetSessions -SessionId 'session-2' -TargetId 'target-2' -MaximumTargets 1
+    Assert-MihariTest -Condition ($firstTarget.Added -and $duplicateTarget.AlreadyTracked -and
+        $overflowTarget.Overflow -and $targetSessions.Count -eq 1) -Message 'Browser observer target maps must be bounded and distinguish tracked, duplicate, and overflow admission.'
+    $pendingAttempts = @{}
+    $firstAttempt = Add-MihariBrowserObserverAttempt -Attempts $pendingAttempts -Key 'target-1/request-1' -Record ([ordered]@{ value = 'first' }) -MaximumAttempts 1
+    $redirectAttempt = Add-MihariBrowserObserverAttempt -Attempts $pendingAttempts -Key 'target-1/request-1' -Record ([ordered]@{ value = 'redirect' }) -MaximumAttempts 1
+    $overflowAttempt = Add-MihariBrowserObserverAttempt -Attempts $pendingAttempts -Key 'target-1/request-2' -Record ([ordered]@{ value = 'second' }) -MaximumAttempts 1
+    Assert-MihariTest -Condition ($firstAttempt.Added -and $redirectAttempt.Added -and
+        $pendingAttempts.Count -eq 1 -and $pendingAttempts['target-1/request-1'].value -eq 'redirect' -and
+        $overflowAttempt.Overflow) -Message 'Browser pending request maps must stay bounded while allowing redirect replacement.'
+    $limitCheckpoints = @(1..8 | Where-Object { Test-MihariBrowserLimitCountCheckpoint -Count $_ })
+    Assert-MihariTest -Condition ([string]::Join(',', [string[]]$limitCheckpoints) -eq '1,2,4,8') -Message 'Browser overflow health checkpoints must grow logarithmically rather than emit an event for every dropped item.'
+
     $writerPath = Join-Path $temporaryDirectory 'browser-events.jsonl'
     $writer = New-MihariEventWriter -Path $writerPath
     $session = [pscustomobject]@{
@@ -88,8 +104,12 @@ try {
     Assert-MihariTest -Condition ($writtenEvents.Count -eq 2 -and $writtenEvents[0].schemaVersion -eq 2 -and $writtenEvents[0].source -eq 'browser' -and $writtenEvents[0].sequence -eq 1) -Message 'Browser producers must write through the canonical sequenced fact writer.'
     Assert-MihariTest -Condition ($null -eq $writtenEvents[1].elapsedMs -and $null -eq $writtenEvents[1].data.PSObject.Properties['browserTimingDurationMs']) -Message 'The canonical event must preserve an unavailable browser duration as null.'
     Assert-MihariTest -Condition (-not $eventText.Contains('browser-query-secret') -and -not $eventText.Contains('password') -and -not $eventText.Contains('raw-request-id')) -Message 'Persisted browser facts must exclude credentials, query values, and raw debugger identifiers.'
-    Close-MihariEventWriter -Writer $writer
-    $writer = $null
+    Write-MihariBrowserObservationLimitFact -Session $session -Launch $launch -LimitKind 'target' -DroppedCount 3
+    Write-MihariBrowserObservationLimitFact -Session $session -Launch $launch -LimitKind 'request' -DroppedCount 2
+    $limitEvents = @((Read-MihariBrowserObservationTestText -Path $writerPath) -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { ConvertFrom-Json -InputObject $_ })
+    Assert-MihariTest -Condition ($limitEvents.Count -eq 4 -and
+        @($limitEvents | Where-Object { $_.stage -eq 'browser.observation' -and $_.outcome -eq 'observer_limit' -and $_.coverage -eq 'truncated' -and $_.data.browserError -eq 'target_limit_reached' -and [long]$_.data.browserDroppedTargetCount -eq 3 }).Count -eq 1 -and
+        @($limitEvents | Where-Object { $_.stage -eq 'browser.observation' -and $_.outcome -eq 'observer_limit' -and $_.coverage -eq 'truncated' -and $_.data.browserError -eq 'request_limit_reached' -and [long]$_.data.browserDroppedRequestCount -eq 2 }).Count -eq 1) -Message 'Browser observer overflow must persist explicit truncated tool-health facts and cumulative target/request drop counts.'
 
     $harPath = Join-Path $temporaryDirectory 'input.har'
     $harJson = @'
@@ -104,11 +124,29 @@ try {
     foreach ($secret in @('har-secret', 'cookie-secret', 'set-cookie-secret', 'body-secret', 'response-body-secret', 'alice', 'password')) {
         Assert-MihariTest -Condition (-not $harText.Contains($secret)) -Message 'HAR import output must not retain secret URL, header, or body sentinels.'
     }
+    $harImport = Import-MihariBrowserEvidence -Session $session -Format har -Path $harPath
+    Assert-MihariTest -Condition ($harImport.supported -and $harImport.sourceIdentity -match '^[0-9a-f]{32}$' -and
+        $harImport.sourceVersion -eq 'har-1.2' -and $harImport.importedCount -eq 1 -and
+        $harImport.unsupportedCount -eq 1 -and $harImport.coverage -eq 'partial') -Message 'Production HAR ingestion must return a bare import identity, source version, safe counts, and partial coverage.'
+    $harImportEvents = @((Read-MihariBrowserObservationTestText -Path $writerPath) -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { ConvertFrom-Json -InputObject $_ })
+    $harImportedEvent = @($harImportEvents | Where-Object { $_.source -eq 'import' -and $_.sourceIdentity -eq $harImport.sourceIdentity -and $_.sourceVersion -eq 'har-1.2' }) | Select-Object -Last 1
+    Assert-MihariTest -Condition ($null -ne $harImportedEvent -and $harImportedEvent.stage -eq 'browser.network.request' -and
+        $harImportedEvent.outcome -eq 'imported' -and $harImportedEvent.data.host -eq 'example.test' -and
+        $harImportedEvent.data.path -eq '/api/upload' -and $harImportedEvent.data.protocol -eq 'h2' -and
+        $harImportedEvent.elapsedMs -eq 43) -Message 'Production HAR ingestion must persist the sanitized request fact through the canonical event writer.'
+    $harEventText = Read-MihariBrowserObservationTestText -Path $writerPath
+    foreach ($secret in @('har-secret', 'cookie-secret', 'set-cookie-secret', 'body-secret', 'response-body-secret', 'password')) {
+        Assert-MihariTest -Condition (-not $harEventText.Contains($secret)) -Message 'Persisted HAR facts must exclude raw query, header, body, and user-info sentinels.'
+    }
 
     $unsupportedHarPath = Join-Path $temporaryDirectory 'unsupported.har'
     [IO.File]::WriteAllText($unsupportedHarPath, '{"log":{"version":"1.1","entries":[]}}', [Text.Encoding]::UTF8)
     $unsupportedHar = ConvertFrom-MihariHar -Path $unsupportedHarPath
     Assert-MihariTest -Condition (-not $unsupportedHar.supported -and $unsupportedHar.unsupportedCount -gt 0) -Message 'Unsupported HAR versions must be reported without being parsed as supported evidence.'
+    $unsupportedHarImport = Import-MihariBrowserEvidence -Session $session -Format har -Path $unsupportedHarPath
+    Assert-MihariTest -Condition (-not $unsupportedHarImport.supported -and $null -eq $unsupportedHarImport.sourceIdentity -and
+        $null -eq $unsupportedHarImport.sourceVersion -and $unsupportedHarImport.importedCount -eq 0 -and
+        $unsupportedHarImport.coverage -eq 'unsupported') -Message 'Unsupported HAR versions must return explicit unsupported coverage without inventing a source version.'
 
     $netLogPath = Join-Path $temporaryDirectory 'input-netlog.json'
     $netLogJson = @'
@@ -122,6 +160,20 @@ try {
     foreach ($secret in @('netlog-secret', 'bearer-secret', 'body-secret', 'response-secret', 'password', 'Authorization')) {
         Assert-MihariTest -Condition (-not $netLogText.Contains($secret)) -Message 'NetLog import output must not retain raw URLs, credential headers, or bodies.'
     }
+    $netLogImport = Import-MihariBrowserEvidence -Session $session -Format netlog -Path $netLogPath
+    Assert-MihariTest -Condition ($netLogImport.supported -and $netLogImport.sourceIdentity -match '^[0-9a-f]{32}$' -and
+        $netLogImport.sourceVersion -eq 'chromium-netlog-json-recognized-events-v1' -and
+        $netLogImport.importedCount -eq 2 -and $netLogImport.unsupportedCount -eq 1 -and
+        $netLogImport.coverage -eq 'partial') -Message 'Production NetLog ingestion must report recognized version, counts, and partial coverage.'
+    $allImportEvents = @((Read-MihariBrowserObservationTestText -Path $writerPath) -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { ConvertFrom-Json -InputObject $_ })
+    $netLogImportEvents = @($allImportEvents | Where-Object { $_.source -eq 'import' -and $_.sourceIdentity -eq $netLogImport.sourceIdentity })
+    Assert-MihariTest -Condition ($netLogImportEvents.Count -eq 2 -and
+        $netLogImportEvents[0].requestId -eq $netLogImportEvents[1].requestId -and
+        $netLogImportEvents[1].data.statusCode -eq 403 -and $netLogImportEvents[1].data.protocol -eq 'h2') -Message 'Production NetLog ingestion must persist sanitized events and preserve source request grouping.'
+    $allImportText = Read-MihariBrowserObservationTestText -Path $writerPath
+    foreach ($secret in @('netlog-secret', 'bearer-secret', 'body-secret', 'response-secret', 'Authorization', 'password')) {
+        Assert-MihariTest -Condition (-not $allImportText.Contains($secret)) -Message 'Persisted NetLog facts must exclude raw URL, credential header, and body sentinels.'
+    }
 
     $largeImportPath = Join-Path $temporaryDirectory 'too-large.har'
     [IO.File]::WriteAllText($largeImportPath, (' ' * 1200), [Text.Encoding]::UTF8)
@@ -130,7 +182,14 @@ try {
     catch { $sizeRejected = $true }
     Assert-MihariTest -Condition $sizeRejected -Message 'Browser evidence imports must enforce a finite file size limit before parsing.'
 
-    Write-Host 'PASS browser-observation: owned-profile facts, privacy-safe HAR/NetLog adapters, scoped IDs, and measured timing'
+    $missingRejected = $false
+    try { $null = Import-MihariBrowserEvidence -Session $session -Format har -Path (Join-Path $temporaryDirectory 'missing.har') }
+    catch { $missingRejected = ($_.Exception.Message -eq 'browser_import_source_not_found') }
+    Assert-MihariTest -Condition $missingRejected -Message 'Production browser import must return a stable missing-source error.'
+
+    Close-MihariEventWriter -Writer $writer
+    $writer = $null
+    Write-Host 'PASS browser-observation: owned-profile facts, bounded maps, canonical HAR/NetLog ingestion, scoped IDs, and measured timing'
 }
 finally {
     if ($null -ne $writer) { Close-MihariEventWriter -Writer $writer }
