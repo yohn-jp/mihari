@@ -591,11 +591,11 @@ function Remove-MihariOwnedBrowserProfile {
         return [pscustomobject]@{ removed = $false; reason = 'ownership_marker_unreadable' }
     }
 
-    if (-not (Get-Command Get-CimInstance -CommandType Cmdlet -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command Get-MihariBrowserProcesses -CommandType Function -ErrorAction SilentlyContinue)) {
         return [pscustomobject]@{ removed = $false; reason = 'browser_process_ownership_unavailable' }
     }
     try {
-        $edgeProcesses = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'msedge.exe'" -ErrorAction Stop)
+        $edgeProcesses = @(Get-MihariBrowserProcesses)
         foreach ($edgeProcess in $edgeProcesses) {
             $commandLine = [string]$edgeProcess.CommandLine
             if ([string]::IsNullOrWhiteSpace($commandLine)) {
