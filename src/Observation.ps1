@@ -126,13 +126,13 @@ function ConvertTo-MihariSafeEventData {
         'clientEndpoint', 'direction', 'tlsProtocol', 'tlsCipher', 'certificateSubject',
         'certificateIssuer', 'certificateThumbprint', 'certificateNotBefore',
         'certificateNotAfter', 'errorType', 'errorCode', 'message', 'reason',
-        'unsupportedProtocol'
+        'unsupportedProtocol', 'mode', 'previousMode'
     )
     $integerFields = @(
         'port', 'statusCode', 'proxyStatus', 'proxyPort', 'bytesClientToUpstream',
         'bytesUpstreamToClient'
     )
-    $booleanFields = @('certificateAccepted')
+    $booleanFields = @('certificateAccepted', 'caTrusted')
     $allowed = @{}
     foreach ($name in $stringFields) { $allowed[$name] = 'string' }
     foreach ($name in $integerFields) { $allowed[$name] = 'integer' }
