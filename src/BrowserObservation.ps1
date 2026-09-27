@@ -357,6 +357,11 @@ function Get-MihariBrowserOwnedProfileIdentity {
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $matchCount = 0
+    $previousOwnerProcessId = 0
+    $previousOwnerStartTimeUtc = $null
+    $stableOwnerPolls = 0
+    $lastRootProcessCount = 0
+    $unverifiableCount = 0
     do {
         $processes = @()
         try {
@@ -393,19 +398,39 @@ function Get-MihariBrowserOwnedProfileIdentity {
         }
 
         $matchCount = $profileMatchCount
+        $lastRootProcessCount = $rootProcesses.Count
         if ($rootProcesses.Count -eq 1) {
             $owner = $rootProcesses[0]
-            return [pscustomobject]@{
-                Success = $true; ProcessId = [int]$owner.ProcessId; OwnerStartTimeUtc = [string]$owner.OwnerStartTimeUtc
-                ErrorCode = $null; MatchingProcessCount = $matchCount
+            if ([int]$owner.ProcessId -eq $previousOwnerProcessId -and
+                [string]$owner.OwnerStartTimeUtc -ceq [string]$previousOwnerStartTimeUtc) {
+                $stableOwnerPolls++
+            }
+            else {
+                $previousOwnerProcessId = [int]$owner.ProcessId
+                $previousOwnerStartTimeUtc = [string]$owner.OwnerStartTimeUtc
+                $stableOwnerPolls = 1
+            }
+            if ($stableOwnerPolls -ge 2) {
+                return [pscustomobject]@{
+                    Success = $true; ProcessId = [int]$owner.ProcessId; OwnerStartTimeUtc = [string]$owner.OwnerStartTimeUtc
+                    ErrorCode = $null; MatchingProcessCount = $matchCount
+                }
             }
         }
-        if ($rootProcesses.Count -gt 1) { return (& $failure 'browser_profile_owner_ambiguous' $matchCount) }
-        if ([DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+        else {
+            $previousOwnerProcessId = 0
+            $previousOwnerStartTimeUtc = $null
+            $stableOwnerPolls = 0
+        }
+        if ([DateTime]::UtcNow -lt $deadline) {
+            if ($rootProcesses.Count -eq 1 -and $stableOwnerPolls -eq 1) { Start-Sleep -Milliseconds 500 }
+            else { Start-Sleep -Milliseconds 100 }
+        }
     } while ([DateTime]::UtcNow -lt $deadline)
 
     $errorCode = 'browser_profile_process_not_found'
-    if ($matchCount -gt 0 -or $unverifiableCount -gt 0) { $errorCode = 'browser_profile_owner_unverifiable' }
+    if ($lastRootProcessCount -gt 1) { $errorCode = 'browser_profile_owner_ambiguous' }
+    elseif ($matchCount -gt 0 -or $unverifiableCount -gt 0) { $errorCode = 'browser_profile_owner_unverifiable' }
     return (& $failure $errorCode $matchCount)
 }
 
@@ -1104,6 +1129,50 @@ function Clear-MihariCompletedBrowserObservationWorkers {
     }
 }
 
+function New-MihariBrowserObservationUnavailableResult {
+    param(
+        [Parameter(Mandatory = $true)][object] $Session,
+        [Parameter(Mandatory = $true)][object] $Launch,
+        [Parameter(Mandatory = $true)][ValidateSet(
+            'profile_owner_unverified', 'profile_owner_changed', 'profile_marker_unverified',
+            'observer_limit_reached', 'observer_worker_unavailable', 'session_writer_unavailable',
+            'profile_mode_incompatible'
+        )][string] $ErrorCode
+    )
+
+    $reason = 'Mihari could not verify or start the owned diagnostic browser observer.'
+    switch ($ErrorCode) {
+        'profile_owner_unverified' { $reason = 'Mihari could not verify the active Edge process for its owned profile.' }
+        'profile_owner_changed' { $reason = 'The active Edge process identity changed while Mihari was arming observation.' }
+        'profile_marker_unverified' { $reason = 'Mihari could not verify the ownership marker and process for its diagnostic Edge profile.' }
+        'observer_limit_reached' { $reason = 'Mihari reached its bounded diagnostic browser observation limit.' }
+        'observer_worker_unavailable' { $reason = 'Mihari could not start its bounded browser observer.' }
+        'session_writer_unavailable' { $reason = 'Browser observation requires the live Mihari session event writer.' }
+        'profile_mode_incompatible' { $reason = 'The http2-observe profile requires a Tunnel session.' }
+    }
+
+    $status = 'unavailable'
+    if ($ErrorCode -eq 'session_writer_unavailable') { $status = 'launched_but_unverified' }
+    $writer = Get-MihariBrowserMemberValue -InputObject $Session -Name 'Writer'
+    if ($null -ne $writer -and -not [bool]$writer.Closed -and
+        (Get-MihariBrowserMemberValue -InputObject $Session -Name 'Mode') -in @('Inspect', 'Tunnel')) {
+        try {
+            if ([string]::IsNullOrWhiteSpace([string]$Launch.SourceIdentity)) {
+                $launchValue = [string]$Launch.Pid + ':' + [string]$Launch.ProfilePath
+                $Launch.SourceIdentity = Get-MihariBrowserScopedId -Scope ([string]$Session.Id) -Value $launchValue -Prefix 'edge'
+                $Launch.ClockId = 'edge-clock-' + [string]$Launch.SourceIdentity
+            }
+            $null = Write-MihariBrowserObservationFact -Session $Session -Launch $Launch -Stage 'browser.observation' `
+                -Outcome 'unavailable' -ConnectionId ('browser-profile-' + [string]$Launch.SourceIdentity) `
+                -RequestId $null -ElapsedMs $null -Data @{ browserError = $ErrorCode } -Coverage 'unknown'
+        }
+        catch {
+            Write-Warning ('Mihari could not record the browser observer start failure ({0}).' -f $_.Exception.GetType().FullName)
+        }
+    }
+    return [pscustomobject]@{ Status = $status; ErrorCode = $ErrorCode; Reason = $reason }
+}
+
 function Start-MihariBrowserObservation {
     [CmdletBinding()]
     param(
@@ -1113,21 +1182,36 @@ function Start-MihariBrowserObservation {
     )
 
     if ($null -eq $Session.Writer -or $null -eq $Session.Cancellation -or $Session.Writer.Closed) {
-        return [pscustomobject]@{ Status = 'launched_but_unverified'; Reason = 'Browser observation requires the live Mihari session event writer.' }
+        return (New-MihariBrowserObservationUnavailableResult -Session $Session -Launch $Launch -ErrorCode 'session_writer_unavailable')
     }
     if ([string]$Session.Profile -eq 'http2-observe' -and [string]$Session.Mode -ne 'Tunnel') {
-        return [pscustomobject]@{ Status = 'unavailable'; Reason = 'The http2-observe profile requires a Tunnel session.' }
+        return (New-MihariBrowserObservationUnavailableResult -Session $Session -Launch $Launch -ErrorCode 'profile_mode_incompatible')
     }
-    $ownerIdentity = Get-MihariBrowserOwnedProfileIdentity -SessionId ([string]$Session.Id) -Launch $Launch -TimeoutSeconds 5
+    # Allow two bounded 3-second owner scan windows at most, plus the 150 ms retry pause and three 100 ms marker checks.
+    $ownerIdentity = Get-MihariBrowserOwnedProfileIdentity -SessionId ([string]$Session.Id) -Launch $Launch -TimeoutSeconds 3
+    if (-not $ownerIdentity.Success -and [string]$ownerIdentity.ErrorCode -in @(
+        'browser_process_inventory_unavailable', 'browser_profile_process_not_found', 'browser_profile_owner_unverifiable'
+    )) {
+        Start-Sleep -Milliseconds 150
+        $ownerIdentity = Get-MihariBrowserOwnedProfileIdentity -SessionId ([string]$Session.Id) -Launch $Launch -TimeoutSeconds 3
+    }
     if (-not $ownerIdentity.Success) {
-        return [pscustomobject]@{ Status = 'unavailable'; Reason = ('Mihari could not verify the active Edge process for its owned profile ({0}).' -f [string]$ownerIdentity.ErrorCode) }
+        return (New-MihariBrowserObservationUnavailableResult -Session $Session -Launch $Launch -ErrorCode 'profile_owner_unverified')
     }
     if ([int]$Launch.Pid -ne [int]$ownerIdentity.ProcessId -or
         [string]$Launch.OwnerStartTimeUtc -cne [string]$ownerIdentity.OwnerStartTimeUtc) {
-        return [pscustomobject]@{ Status = 'unavailable'; Reason = 'Mihari could not verify that the diagnostic Edge owner identity stayed unchanged.' }
+        return (New-MihariBrowserObservationUnavailableResult -Session $Session -Launch $Launch -ErrorCode 'profile_owner_changed')
     }
-    if (-not (Test-MihariBrowserOwnedProcess -SessionId ([string]$Session.Id) -Launch $Launch)) {
-        return [pscustomobject]@{ Status = 'unavailable'; Reason = 'Mihari could not verify the diagnostic Edge ownership marker and active process.' }
+    $ownedProcessVerified = $false
+    for ($verificationAttempt = 0; $verificationAttempt -lt 3; $verificationAttempt++) {
+        if (Test-MihariBrowserOwnedProcess -SessionId ([string]$Session.Id) -Launch $Launch) {
+            $ownedProcessVerified = $true
+            break
+        }
+        if ($verificationAttempt -lt 2) { Start-Sleep -Milliseconds 100 }
+    }
+    if (-not $ownedProcessVerified) {
+        return (New-MihariBrowserObservationUnavailableResult -Session $Session -Launch $Launch -ErrorCode 'profile_marker_unverified')
     }
 
     $lock = Get-MihariBrowserMemberValue -InputObject $Session -Name 'BrowserObservationLock'
@@ -1153,7 +1237,7 @@ function Start-MihariBrowserObservation {
         }
         Clear-MihariCompletedBrowserObservationWorkers -Session $Session
         if ($Session.BrowserObservationWorkers.Count -ge 2) {
-            return [pscustomobject]@{ Status = 'unavailable'; Reason = 'Mihari reached its bounded diagnostic browser observation limit.' }
+            return (New-MihariBrowserObservationUnavailableResult -Session $Session -Launch $Launch -ErrorCode 'observer_limit_reached')
         }
         $launch.SourceIdentity = Get-MihariBrowserScopedId -Scope ([string]$Session.Id) -Value ([string]$Launch.Pid + ':' + [string]$Launch.ProfilePath) -Prefix 'edge'
         $launch.ClockId = 'edge-clock-' + $launch.SourceIdentity
@@ -1190,7 +1274,7 @@ Invoke-MihariBrowserObservationWorker -Session $WorkerSession -Launch $WorkerLau
         return [pscustomobject]@{ Status = 'launched_but_unverified'; Reason = $null }
     }
     catch {
-        return [pscustomobject]@{ Status = 'unavailable'; Reason = 'Mihari could not start its bounded browser observer.' }
+        return (New-MihariBrowserObservationUnavailableResult -Session $Session -Launch $Launch -ErrorCode 'observer_worker_unavailable')
     }
     finally { [System.Threading.Monitor]::Exit($lock) }
 }
