@@ -54,18 +54,7 @@ function Get-MihariIssue3EdgeProcesses {
 }
 
 function Stop-MihariIssue3EdgeProfile {
-    param([string]$ProfilePath, [int]$ProcessId = 0)
-    if ($ProcessId -gt 0) {
-        try {
-            $process = [System.Diagnostics.Process]::GetProcessById([int]$ProcessId)
-            try {
-                if (-not $process.HasExited) { $process.Kill() }
-            }
-            finally { $process.Dispose() }
-        }
-        catch [System.ArgumentException] { $null = $_ }
-        catch [System.InvalidOperationException] { $null = $_ }
-    }
+    param([string]$ProfilePath)
     if ([string]::IsNullOrWhiteSpace($ProfilePath)) { return }
 
     $deadline = [DateTime]::UtcNow.AddSeconds(8)
@@ -73,8 +62,19 @@ function Stop-MihariIssue3EdgeProfile {
         $profileProcesses = @(Get-MihariIssue3EdgeProcesses -ProfilePath $ProfilePath)
         foreach ($processInfo in $profileProcesses) {
             try { Stop-Process -Id ([int]$processInfo.ProcessId) -Force -ErrorAction Stop }
-            catch [System.ArgumentException] { $null = $_ }
-            catch [System.InvalidOperationException] { $null = $_ }
+            catch {
+                # Edge can exit between the CIM snapshot and Stop-Process. Treat
+                # that race as normal only when the unique profile no longer
+                # identifies the process; a surviving process is retried below
+                # and fails the final cleanup assertion if it cannot be stopped.
+                $processIdStillUsesProfile = @(
+                    Get-MihariIssue3EdgeProcesses -ProfilePath $ProfilePath |
+                        Where-Object { [int]$_.ProcessId -eq [int]$processInfo.ProcessId }
+                )
+                if ($processIdStillUsesProfile.Count -gt 0) {
+                    Write-Verbose ('Edge process {0} is still using the test profile; retrying cleanup.' -f $processInfo.ProcessId)
+                }
+            }
         }
         if ($profileProcesses.Count -eq 0) { break }
         Start-Sleep -Milliseconds 200
@@ -267,7 +267,7 @@ finally {
         try { $originListener.Stop() }
         catch { Write-Warning ("Edge fixture listener cleanup failed: {0}" -f $_.Exception.Message) }
     }
-    try { Stop-MihariIssue3EdgeProfile -ProfilePath $browserProfilePath -ProcessId $browserProcessId }
+    try { Stop-MihariIssue3EdgeProfile -ProfilePath $browserProfilePath }
     catch {
         $browserCleanupFailure = $_
         Write-Warning ("Diagnostic Edge process cleanup failed: {0}" -f $_.Exception.Message)
