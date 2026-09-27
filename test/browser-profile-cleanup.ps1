@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $repoRoot 'src/Browser.ps1')
+. (Join-Path $repoRoot 'src/BrowserObservation.ps1')
 . (Join-Path $repoRoot 'src/Management.ps1')
 
 function Assert-MihariBrowserProfileTest {
@@ -44,6 +45,12 @@ $script:profileProcessInventory = @()
 Set-Item -Path Function:\Get-MihariBrowserProcesses -Value {
     return @($script:profileProcessInventory)
 }
+function Get-CimInstance {
+    [CmdletBinding()]
+    param([string]$ClassName, [string]$Filter)
+    if ($ClassName -ne 'Win32_Process') { throw 'Unexpected process inventory query in profile cleanup test.' }
+    return @($script:profileProcessInventory)
+}
 
 $sessionId = 'profile-test-' + [Guid]::NewGuid().ToString('N')
 $session = [pscustomobject]@{
@@ -76,11 +83,13 @@ try {
     Assert-MihariBrowserProfileTest (Set-MihariBrowserProfileOwnership -SessionMetadata $session -Result $launch) 'A fresh Mihari profile with a verified launch identity receives an ownership record and marker.'
     $ownershipId = [string]$launch.ProfileOwnershipId
     Assert-MihariBrowserProfileTest ($ownershipId -match '^[0-9a-f]{32}$') 'The ownership ID is a generated fixed-format value.'
+    Assert-MihariBrowserProfileTest ([System.IO.File]::Exists((Get-MihariBrowserProfileMarkerPath -ProfilePath $profilePath)) -and
+        (Test-MihariBrowserProfileMarker -Record ((Get-MihariBrowserProfileRecords -SessionMetadata $session)[0]) -SessionId $sessionId)) 'The canonical BrowserObservation ownership marker must match the persisted profile identity.'
 
     $unrelatedProfileProcess = [pscustomobject]@{
         ProcessId = 1234
         ExecutablePath = $executablePath
-        CommandLine = ('"'{0}" --user-data-dir="{1}"' -f $executablePath, $unrelatedPath)
+        CommandLine = ('"{0}" --user-data-dir="{1}"' -f $executablePath, $unrelatedPath)
     }
     $script:profileProcessInventory = @($unrelatedProfileProcess)
     $status = Get-MihariBrowserProfileStatus -SessionMetadata $session
@@ -89,7 +98,7 @@ try {
     $ownedProfileProcess = [pscustomobject]@{
         ProcessId = [int]$launch.Pid
         ExecutablePath = $executablePath
-        CommandLine = ('"'{0}" --user-data-dir="{1}"' -f $executablePath, $profilePath)
+        CommandLine = ('"{0}" --user-data-dir="{1}"' -f $executablePath, $profilePath)
     }
     $script:profileProcessInventory = @($unrelatedProfileProcess, $ownedProfileProcess)
     $runningStatus = Get-MihariBrowserProfileStatus -SessionMetadata $session
