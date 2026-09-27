@@ -111,13 +111,15 @@ try {
     $diagnosticEvents = @(
         [pscustomobject]@{ eventId = 'proxy-407'; sessionId = 's1'; connectionId = 'c1'; requestId = 'r1'; mode = 'Tunnel'; stage = 'upstream.proxy.connect'; outcome = 'rejected'; data = [pscustomobject]@{ routeKind = 'ExplicitProxy'; host = 'blocked.test'; port = 443; proxyStatus = 407 } },
         [pscustomobject]@{ eventId = 'proxy-403'; sessionId = 's1'; connectionId = 'c2'; requestId = 'r2'; mode = 'Tunnel'; stage = 'upstream.proxy.connect'; outcome = 'rejected'; data = [pscustomobject]@{ routeKind = 'ExplicitProxy'; host = 'denied.test'; port = 443; proxyStatus = 403 } },
-        [pscustomobject]@{ eventId = 'timeout'; sessionId = 's1'; connectionId = 'c3'; requestId = 'r3'; mode = 'Tunnel'; stage = 'upstream.tcp'; outcome = 'failed'; data = [pscustomobject]@{ routeKind = 'Direct'; host = 'slow.test'; port = 443; errorCode = 'connection_timeout' } }
+        [pscustomobject]@{ eventId = 'timeout'; sessionId = 's1'; connectionId = 'c3'; requestId = 'r3'; mode = 'Tunnel'; stage = 'upstream.tcp'; outcome = 'failed'; data = [pscustomobject]@{ routeKind = 'Direct'; host = 'slow.test'; port = 443; errorCode = 'connection_timeout' } },
+        [pscustomobject]@{ eventId = 'unsupported'; sessionId = 's1'; connectionId = 'c4'; requestId = 'r4'; mode = 'Inspect'; stage = 'client.tls'; outcome = 'failed'; data = [pscustomobject]@{ host = 'tls13.test'; port = 443; errorCode = 'unsupported_protocol'; unsupportedProtocol = 'TLS 1.3' } }
     )
     $findings = @(Get-MihariDiagnosis -Events $diagnosticEvents)
     $codes = @($findings | ForEach-Object { $_.code })
     Assert-MihariTest -Condition ($codes -contains 'upstream_proxy_auth_required') -Message 'A concrete explicit proxy 407 must support auth-required diagnosis.'
     Assert-MihariTest -Condition ($codes -contains 'upstream_proxy_rejected') -Message 'A concrete explicit proxy 403 must support proxy-rejected diagnosis.'
     Assert-MihariTest -Condition ($codes -contains 'connection_timeout') -Message 'A concrete timeout must support timeout diagnosis.'
+    Assert-MihariTest -Condition ($codes -contains 'unsupported_protocol') -Message 'An explicit unsupported protocol fact must support an unsupported-protocol diagnosis.'
     Assert-MihariTest -Condition (@($findings | Where-Object { $_.code -eq 'upstream_proxy_rejected' -and $_.evidenceIds -contains 'proxy-403' }).Count -eq 1) -Message 'Diagnosis must retain evidence event IDs.'
     Assert-MihariTest -Condition (@($findings | Where-Object { $_.code -eq 'upstream_proxy_rejected' -and $_.evidenceIds -contains 'timeout' }).Count -eq 0) -Message 'A timeout must not be described as an upstream proxy rejection.'
 

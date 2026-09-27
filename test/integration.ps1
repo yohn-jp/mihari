@@ -80,16 +80,17 @@ function Wait-MihariTestSession {
 
 function Stop-MihariTestSession {
     param([Parameter(Mandatory = $true)]$Child, [Parameter(Mandatory = $true)]$Metadata)
+    $Child | Add-Member -MemberType NoteProperty -Name StopAttempted -Value $true -Force
     $stopCli = Start-MihariTestProcess -Command stop -OutputRoot $Child.OutputRoot
     try {
-        if (-not $stopCli.Process.WaitForExit(15000)) {
+        if (-not $stopCli.Process.WaitForExit(10000)) {
             throw 'The Mihari stop command did not exit promptly.'
         }
         $stopCli.Process.WaitForExit()
         if ($stopCli.Process.ExitCode -ne 0) {
             throw ("Mihari stop command failed ({0}). stdout={1} stderr={2}" -f $stopCli.Process.ExitCode, $stopCli.Stdout.Result, $stopCli.Stderr.Result)
         }
-        if (-not $Child.Process.WaitForExit(20000)) {
+        if (-not $Child.Process.WaitForExit(15000)) {
             throw 'The foreground Mihari process did not stop after the stop signal.'
         }
         $Child.Process.WaitForExit()
@@ -110,6 +111,10 @@ function Stop-MihariTestSession {
         return $final
     }
     finally {
+        if (-not $stopCli.Process.HasExited) {
+            try { $stopCli.Process.Kill(); $stopCli.Process.WaitForExit(5000) }
+            catch { Write-Warning ("Mihari stop child cleanup failed: {0}" -f $_.Exception.Message) }
+        }
         $stopCli.Process.Dispose()
     }
 }
@@ -143,8 +148,12 @@ function New-MihariTestListener {
 
 function Read-MihariTestHeaderText {
     param([Parameter(Mandatory = $true)][System.IO.Stream] $Stream, [int]$MaximumBytes = 65536)
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
     $text = New-Object System.Text.StringBuilder
     while ($text.Length -lt $MaximumBytes) {
+        $remainingMs = [int][Math]::Max(1, ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'The fixture HTTP header read exceeded its 15 second deadline.' }
+        if ($Stream.CanTimeout) { $Stream.ReadTimeout = $remainingMs }
         $value = $Stream.ReadByte()
         if ($value -lt 0) { throw 'The fixture peer closed before completing an HTTP header.' }
         $character = [char]$value
@@ -160,9 +169,13 @@ function Read-MihariTestHeaderText {
 
 function Read-MihariTestExactBytes {
     param([Parameter(Mandatory = $true)][System.IO.Stream] $Stream, [Parameter(Mandatory = $true)][int]$Count)
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
     $buffer = New-Object 'byte[]' $Count
     $offset = 0
     while ($offset -lt $Count) {
+        $remainingMs = [int][Math]::Max(1, ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'The fixture HTTP body read exceeded its 15 second deadline.' }
+        if ($Stream.CanTimeout) { $Stream.ReadTimeout = $remainingMs }
         $read = $Stream.Read($buffer, $offset, $Count - $offset)
         if ($read -le 0) { throw 'The fixture peer closed before completing an HTTP body.' }
         $offset += $read
@@ -225,6 +238,7 @@ function Complete-MihariTestTlsAuthentication {
 
 function Write-MihariTestHttpResponse {
     param([Parameter(Mandatory = $true)][System.IO.Stream] $Stream, [string]$Body = 'ok')
+    if ($Stream.CanTimeout) { $Stream.WriteTimeout = 10000 }
     $bodyBytes = [System.Text.Encoding]::ASCII.GetBytes($Body)
     $headerBytes = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n")
     $Stream.Write($headerBytes, 0, $headerBytes.Length)
@@ -578,7 +592,7 @@ finally {
                 catch { $finalCleanupFailures.Add("Could not read session metadata during cleanup: $($_.Exception.Message)") }
             }
             if (-not $child.Process.HasExited) {
-                if ($null -ne $active) {
+                if ($null -ne $active -and -not $child.StopAttempted) {
                     try { Stop-MihariTestSession -Child $child -Metadata $active | Out-Null }
                     catch { $finalCleanupFailures.Add("Mihari integration session cleanup failed: $($_.Exception.Message)") }
                 }
