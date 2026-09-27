@@ -100,7 +100,9 @@ try {
     $null = Invoke-MihariHttp2Frame -Context $ctx -State $client -Opposite $upstream -Frame $frame
     Assert-MihariTest -Condition ($client.Settings.maxFrameSize -eq 16777215 -and $upstream.MaxFrame -eq 65536) -Message 'A valid large SETTINGS advertisement must be observed while actual frame buffers stay bounded.'
     $tooLargeFrameHeader = [byte[]]@(1,0,1,0,0,0,0,0,1)
-    Assert-MihariTestH2Rejected -Message 'An actual frame above the local bound must still fail.' -Action { Add-MihariHttp2Input -State $upstream -Bytes $tooLargeFrameHeader -Count $tooLargeFrameHeader.Length }
+    $boundedProbe = New-MihariHttp2Direction -Leg upstream
+    $boundedProbe.MaxFrame = $upstream.MaxFrame
+    Assert-MihariTestH2Rejected -Message 'An actual frame above the local bound must still fail.' -Action { Add-MihariHttp2Input -State $boundedProbe -Bytes $tooLargeFrameHeader -Count $tooLargeFrameHeader.Length }
     $requestEncoder = New-MihariHpackContext -MaxTableSize 4096
     $responseEncoder = New-MihariHpackContext -MaxTableSize 4096
     $requestHeaders = @(
