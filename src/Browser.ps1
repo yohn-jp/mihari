@@ -540,7 +540,7 @@ function Get-MihariBrowserProfileState {
                 $commandLine,
                 '(?i)(?:^|[\s"])--user-data-dir(?:=|\s|$)'
             )
-            if ($referencesExactProfilePath -or $hasUnparsedProfileArgument) {
+            if ($referencesExactProfilePath -or ($hasUnparsedProfileArgument -and $isRecordedOwnerPid)) {
                 $base.state = 'process_identity_unverified'
                 if ($referencesExactProfilePath) {
                     $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. An Edge process still refers to its exact profile path, so cleanup is unavailable.'
