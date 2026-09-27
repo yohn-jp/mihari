@@ -159,7 +159,7 @@ try {
         param($value) [string]$value -eq [string]$metadata.sessionId
     }
     $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'var language=document.getElementById("language-switch"); language.value="ja"; language.dispatchEvent(new Event("change")); true'
-    $null = Wait-Issue3UiValue -Browser $browser -Expression '(document.documentElement.lang==="ja" && document.getElementById("tab-traffic").textContent!=="Traffic Inspector" && document.getElementById("tab-evidence").textContent!=="Evidence" && document.querySelector(".workspace-nav").getAttribute("aria-label")!=="Diagnostic workspaces")' -Predicate {
+    $null = Wait-Issue3UiValue -Browser $browser -Expression '(document.documentElement.lang==="ja" && document.getElementById("tab-traffic").textContent!=="Traffic Inspector" && document.getElementById("tab-evidence").textContent!=="Evidence" && document.getElementById("import-browser-evidence").textContent!=="Import browser evidence" && document.querySelector(".workspace-nav").getAttribute("aria-label")!=="Diagnostic workspaces")' -Predicate {
         param($value) $value -eq $true
     }
     $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'var language=document.getElementById("language-switch"); language.value="en"; language.dispatchEvent(new Event("change")); true'
@@ -379,6 +379,43 @@ try {
     $importJobStatus = Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 45 -Expression 'document.getElementById("evidence-job-status").textContent' -Predicate { param($value) [string]$value -match 'Import complete; source hash verified: true' }
     $offlineText = Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 25 -Expression 'document.getElementById("offline-review").textContent' -Predicate { param($value) [string]$value -match 'Read-only evidence review' -and [string]$value -match 'Source SHA-256' }
     Assert-MihariTest -Condition ([string]$importJobStatus -match 'unknown records: 0' -and [string]$offlineText -match 'Imported records:' -and [string]$offlineText -match 'eventId:') 'The import UI must verify the bundle hash and render real offline event records as read-only.'
+
+    # Import a local HAR through the connected browser evidence UI, then follow its canonical traffic record to event evidence.
+    $browserEvidencePath = Join-Path $tempRoot 'browser-diagnostic.har'
+    $browserEvidenceTrafficPath = '/browser-import-' + [guid]::NewGuid().ToString('N')
+    $browserEvidenceUrl = 'http://127.0.0.1:{0}{1}' -f $originPort, $browserEvidenceTrafficPath
+    $browserHar = [ordered]@{
+        log = [ordered]@{
+            version = '1.2'
+            entries = @([ordered]@{
+                startedDateTime = [DateTime]::UtcNow.ToString('o')
+                time = 17
+                request = [ordered]@{ method = 'GET'; url = $browserEvidenceUrl; headers = @() }
+                response = [ordered]@{ status = 200; httpVersion = 'HTTP/1.1'; headers = @() }
+            })
+        }
+    }
+    [IO.File]::WriteAllText($browserEvidencePath, (ConvertTo-Json -InputObject $browserHar -Depth 12 -Compress), [Text.UTF8Encoding]::new($false))
+    $browserEvidencePathJson = ConvertTo-Json -InputObject $browserEvidencePath -Compress
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("browser-evidence-format").value="har"; document.getElementById("browser-evidence-path").value={0}; document.getElementById("import-browser-evidence").click(); true' -f $browserEvidencePathJson)
+    $browserEvidenceResult = [string](Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 45 -Expression 'document.getElementById("browser-evidence-result").textContent' -Predicate { param($value) [string]$value -match 'Source: import' -and [string]$value -match 'version: har-1.2' -and [string]$value -match 'imported: 1' -and [string]$value -match 'unsupported: 0' -and [string]$value -match 'coverage: observed' })
+    $browserImportReady = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'var button=document.getElementById("view-browser-import-traffic"); button!==null&&!button.hidden&&!button.disabled'
+    Assert-MihariTest -Condition ([string]$browserEvidenceResult -notmatch [regex]::Escape($browserEvidencePath) -and $browserImportReady -eq $true) -Message 'The connected browser import must show safe source/version/count/coverage results without echoing the local path and enable its imported-traffic action.'
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("view-browser-import-traffic").click(); true'
+    $importedTrafficRows = Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 30 -Expression 'document.getElementById("request-rows").textContent' -Predicate { param($value) [string]$value -match [regex]::Escape($browserEvidenceTrafficPath) -and [string]$value -match 'import' }
+    $importedTrafficState = ConvertFrom-Json -InputObject ([string](Invoke-Issue3UiEvaluate -Browser $browser -Expression 'JSON.stringify({visible:document.getElementById("traffic-view").hidden===false,source:document.getElementById("filter-source").value,rows:document.querySelectorAll("#request-rows .traffic-row[data-request-key]").length})'))
+    Assert-MihariTest -Condition ($importedTrafficState.visible -and $importedTrafficState.source -eq 'import' -and $importedTrafficState.rows -ge 1 -and [string]$importedTrafficRows -match [regex]::Escape($browserEvidenceTrafficPath)) -Message 'The result action must open the real Traffic Inspector filtered to imported evidence and show the imported HAR request.'
+    $importedRequestKey = [string](Invoke-Issue3UiEvaluate -Browser $browser -Expression 'var row=document.querySelector("#request-rows .traffic-row[data-request-key]"); if(!row)return ""; var key=row.getAttribute("data-request-key"); row.click(); key')
+    Assert-MihariTest -Condition (-not [string]::IsNullOrWhiteSpace($importedRequestKey)) -Message 'The imported traffic row must expose the canonical stable request key for evidence drill-down.'
+    $null = Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 25 -Expression 'document.getElementById("detail-content").textContent' -Predicate { param($value) [string]$value -match 'Source' -and [string]$value -match 'import' -and [string]$value -match 'browser.network.request' -and [string]$value -match 'Linked evidence' }
+    $importedDetailUri = $managementUrl + 'api/v2/requests/' + [Uri]::EscapeDataString($importedRequestKey)
+    $importedDetail = Get-Issue3UiHttpJson -Uri $importedDetailUri
+    $importedDetailEvents = @($importedDetail.events)
+    Assert-MihariTest -Condition ([string]$importedDetail.request.source -eq 'import' -and [string]$importedDetail.request.path -eq $browserEvidenceTrafficPath -and $importedDetailEvents.Count -eq 1 -and [string]$importedDetailEvents[0].stage -eq 'browser.network.request' -and [string]$importedDetailEvents[0].source -eq 'import' -and [string]$importedDetailEvents[0].eventId -match '^[0-9a-f]{32}$') -Message 'Selecting the imported row must reach the canonical request detail and its actual imported event evidence.'
+    $importedEventIdJson = ConvertTo-Json -InputObject ([string]$importedDetailEvents[0].eventId) -Compress
+    $detailHasImportedEvent = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("detail-content").textContent.indexOf({0})>=0' -f $importedEventIdJson)
+    Assert-MihariTest -Condition ($detailHasImportedEvent -eq $true) -Message 'The Edge request detail rendered from the clicked imported row must show its canonical event ID.'
+
     $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("retention-before").value="2099-12-31T23:59"; document.getElementById("retention-preview").click(); true'
     $eligibleText = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("retention-preview-items").textContent' -Predicate { param($value) [string]$value -match 'Eligible import ' }
     $retentionCutoffUtc = [string](Invoke-Issue3UiEvaluate -Browser $browser -Expression 'new Date(Date.parse(document.getElementById("retention-before").value)).toISOString()')
@@ -393,7 +430,7 @@ try {
     $cleanupResult = Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 25 -Expression 'document.getElementById("retention-preview-items").textContent' -Predicate { param($value) [string]$value -notmatch 'Eligible import ' -and [string]$value -match 'No import retention records' }
     Assert-MihariTest -Condition ([string]$eligibleText -match [regex]::Escape($eligibleBundleId) -and [string]$cleanupConfirmation -match 'Confirm deletion' -and [string]$cleanupResult -match 'No import retention records') 'Retention preview must display the exact bundle ID returned by the API, refuse unconfirmed cleanup, then remove that verified import after confirmation.'
 
-    Write-Host 'PASS phase2-ui-browser: Traffic evidence drill-down, pause/resume, case and trial actions, mode comparison, dependency and change-request export, bilingual text, evidence export/import/offline review/retention, and API recovery.'
+    Write-Host 'PASS phase2-ui-browser: Traffic evidence drill-down, pause/resume, case and trial actions, mode comparison, dependency and change-request export, bilingual text, evidence export/import/offline review, browser HAR import and traffic evidence drill-down, retention, and API recovery.'
 }
 finally {
     if ($null -ne $addOperator) { Stop-MihariTestRootConfirmation -Operator $addOperator }
