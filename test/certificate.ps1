@@ -32,7 +32,9 @@ try {
     Assert-MihariTest -Condition ($ca.Subject -match [regex]::Escape($sessionId)) -Message 'Session CA subject must carry its unique session marker.'
 
     Write-Host '[certificate] before trust installation'
-    $publicRoot = Install-MihariCARoot -CA $ca
+    $publicRoot = Invoke-MihariTestRootConfirmation -Operation Add -Action {
+        Install-MihariCARoot -CA $ca
+    }
     $installed = $true
     Write-Host '[certificate] after trust installation'
     Assert-MihariTest -Condition (-not $publicRoot.HasPrivateKey) -Message 'Only the public session CA may be installed in CurrentUser Root.'
@@ -44,10 +46,8 @@ try {
     $leafLeases.Add($leaf)
     $leafThumbprint = $leaf.Thumbprint
     Write-Host '[certificate] after leaf issuance'
-    Assert-MihariTest -Condition ($leaf.HasPrivateKey) -Message 'The exact-host leaf must have an in-memory private key.'
-    $leafKey = $cache['localhost'].PrivateKey
-    Assert-MihariTest -Condition ($leafKey -is [System.Security.Cryptography.RSACryptoServiceProvider]) -Message 'The exact-host TLS leaf must use the Schannel-compatible CAPI RSA provider.'
-    Assert-MihariTest -Condition (-not $leafKey.PersistKeyInCsp) -Message 'The exact-host leaf RSA key must not persist in the CAPI key store.'
+    Assert-MihariTest -Condition ($leaf.HasPrivateKey) -Message 'The exact-host leaf must have a temporary Schannel private key.'
+    Assert-MihariTest -Condition ($null -eq $cache['localhost'].PrivateKey) -Message 'The initial in-memory leaf key must be disposed after temporary PFX import.'
     Write-Host '[certificate] before leaf-store scan'
     Assert-MihariTest -Condition (Test-MihariTestThumbprintAbsent -Thumbprint $leaf.Thumbprint) -Message 'An exact-host leaf must not be installed in any certificate store.'
     Write-Host '[certificate] after leaf-store scan'
@@ -100,13 +100,13 @@ try {
     $handshakeDeadline = [DateTime]::UtcNow.AddSeconds(10)
     Write-Host '[certificate] before server handshake WaitOne'
     if (-not $serverAuth.AsyncWaitHandle.WaitOne(10000)) {
-        throw 'The in-memory leaf TLS 1.2 server handshake timed out.'
+        throw 'The temporary leaf TLS 1.2 server handshake timed out.'
     }
     Write-Host '[certificate] after server handshake WaitOne'
     $remainingMs = [int][Math]::Max(0, ($handshakeDeadline - [DateTime]::UtcNow).TotalMilliseconds)
     Write-Host '[certificate] before client handshake WaitOne'
     if (-not $clientAuth.AsyncWaitHandle.WaitOne($remainingMs)) {
-        throw 'The in-memory leaf TLS 1.2 client handshake timed out.'
+        throw 'The temporary leaf TLS 1.2 client handshake timed out.'
     }
     Write-Host '[certificate] after client handshake WaitOne'
     $handshakeError = $null
@@ -115,7 +115,7 @@ try {
     try { $clientTls.EndAuthenticateAsClient($clientAuth) }
     catch { if ($null -eq $handshakeError) { $handshakeError = $_.Exception } }
     if ($null -ne $handshakeError) { throw $handshakeError }
-    Assert-MihariTest -Condition ($clientTls.SslProtocol -eq [System.Security.Authentication.SslProtocols]::Tls12) -Message 'The in-memory leaf must complete TLS 1.2 server authentication.'
+    Assert-MihariTest -Condition ($clientTls.SslProtocol -eq [System.Security.Authentication.SslProtocols]::Tls12) -Message 'The temporary leaf must complete TLS 1.2 server authentication.'
     $reply = [System.Text.Encoding]::ASCII.GetBytes('ok')
     $serverTls.Write($reply, 0, $reply.Length)
     $readBuffer = [byte[]]::new(2)
@@ -128,7 +128,7 @@ try {
     $leafLeases.Add($sameLeaf)
     Assert-MihariTest -Condition ($sameLeaf.Thumbprint -eq $leaf.Thumbprint) -Message 'Normalized equivalent hosts must reuse the session leaf cache.'
     Write-Host '[certificate] before CurrentUser Root inspection'
-    $rootCertificates = Test-MihariTestStoreCertificates -StoreName ([System.Security.Cryptography.X509Certificates.StoreName]::Root) -StoreLocation ([System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
+    $rootCertificates = Get-MihariTestStoreCertificates -StoreName ([System.Security.Cryptography.X509Certificates.StoreName]::Root) -StoreLocation ([System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
     Write-Host '[certificate] after CurrentUser Root inspection'
     try {
         $matchingRoots = @($rootCertificates | Where-Object { $_.Thumbprint -eq $ca.Thumbprint })
@@ -138,7 +138,7 @@ try {
     finally {
         foreach ($rootCertificate in $rootCertificates) { $rootCertificate.Dispose() }
     }
-    Write-Host 'PASS certificate: ephemeral CA, public trust, exact-host in-memory leaf, TLS 1.2, bounded-cache lookup, no leaf-store residue'
+    Write-Host 'PASS certificate: ephemeral CA, public trust, exact-host temporary leaf, TLS 1.2, bounded-cache lookup, no leaf-store residue'
 }
 finally {
     Write-Host '[certificate] cleanup begin'
@@ -159,7 +159,9 @@ finally {
     if ($installed -and $null -ne $ca) {
         Write-Host '[certificate] before root removal'
         try {
-            $removed = Remove-MihariCARoot -Thumbprint $ca.Thumbprint -Subject $ca.Subject
+            $removed = Invoke-MihariTestRootConfirmation -Operation Remove -Action {
+                Remove-MihariCARoot -Thumbprint $ca.Thumbprint -Subject $ca.Subject
+            }
             if ($removed -ne 1) { $cleanupFailures.Add('Normal certificate cleanup did not remove exactly one trusted session CA.') }
             $installed = $false
         }
@@ -174,7 +176,7 @@ finally {
     if ($null -ne $ca) {
         Write-Host '[certificate] before root residue scan'
         try {
-            $remainingRoots = @(Test-MihariTestStoreCertificates -StoreName ([System.Security.Cryptography.X509Certificates.StoreName]::Root) -StoreLocation ([System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser) | Where-Object { $_.Thumbprint -eq $ca.Thumbprint })
+            $remainingRoots = @(Get-MihariTestStoreCertificates -StoreName ([System.Security.Cryptography.X509Certificates.StoreName]::Root) -StoreLocation ([System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser) | Where-Object { $_.Thumbprint -eq $ca.Thumbprint })
             if ($remainingRoots.Count -ne 0) { $cleanupFailures.Add('Session CA remains in CurrentUser Root after cleanup.') }
         }
         catch { $cleanupFailures.Add("CA store verification: $($_.Exception.Message)") }

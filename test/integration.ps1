@@ -81,14 +81,23 @@ function Wait-MihariTestSession {
 function Stop-MihariTestSession {
     param([Parameter(Mandatory = $true)]$Child, [Parameter(Mandatory = $true)]$Metadata)
     $Child | Add-Member -MemberType NoteProperty -Name StopAttempted -Value $true -Force
-    $stopCli = Start-MihariTestProcess -Command stop -OutputRoot $Child.OutputRoot
+    $removeOperator = $null
+    if ($Metadata.caThumbprint -and
+        -not (Test-MihariTestThumbprintAbsent -Thumbprint ([string]$Metadata.caThumbprint))) {
+        $removeOperator = Start-MihariTestRootConfirmation -Operation Remove -TargetProcessId $Child.Process.Id
+    }
+    $stopCli = $null
     try {
+        $stopCli = Start-MihariTestProcess -Command stop -OutputRoot $Child.OutputRoot
         if (-not $stopCli.Process.WaitForExit(10000)) {
             throw 'The Mihari stop command did not exit promptly.'
         }
         $stopCli.Process.WaitForExit()
         if ($stopCli.Process.ExitCode -ne 0) {
             throw ("Mihari stop command failed ({0}). stdout={1} stderr={2}" -f $stopCli.Process.ExitCode, $stopCli.Stdout.Result, $stopCli.Stderr.Result)
+        }
+        if ($null -ne $removeOperator) {
+            Complete-MihariTestRootConfirmation -Operator $removeOperator
         }
         if (-not $Child.Process.WaitForExit(15000)) {
             throw 'The foreground Mihari process did not stop after the stop signal.'
@@ -111,11 +120,14 @@ function Stop-MihariTestSession {
         return $final
     }
     finally {
-        if (-not $stopCli.Process.HasExited) {
-            try { $stopCli.Process.Kill(); $stopCli.Process.WaitForExit(5000) }
-            catch { Write-Warning ("Mihari stop child cleanup failed: {0}" -f $_.Exception.Message) }
+        Stop-MihariTestRootConfirmation -Operator $removeOperator
+        if ($null -ne $stopCli) {
+            if (-not $stopCli.Process.HasExited) {
+                try { $stopCli.Process.Kill(); $stopCli.Process.WaitForExit(5000) }
+                catch { Write-Warning ("Mihari stop child cleanup failed: {0}" -f $_.Exception.Message) }
+            }
+            $stopCli.Process.Dispose()
         }
-        $stopCli.Process.Dispose()
     }
 }
 
@@ -330,7 +342,9 @@ function New-MihariTestFixtureTlsIdentity {
     $session = $null
     $cache = [hashtable]::Synchronized(@{})
     try {
-        $publicRoot = Install-MihariCARoot -CA $ca
+        $publicRoot = Invoke-MihariTestRootConfirmation -Operation Add -Action {
+            Install-MihariCARoot -CA $ca
+        }
         $session = [pscustomobject]@{ CA = $ca; LeafCache = $cache }
         $leaf = Get-MihariLeaf -Session $session -DestinationHost '127.0.0.1'
         return [pscustomobject]@{ CA = $ca; PublicRoot = $publicRoot; Leaf = $leaf; LeafThumbprint = $leaf.Thumbprint; Session = $session; Thumbprint = $ca.Thumbprint; Subject = $ca.Subject }
@@ -339,7 +353,13 @@ function New-MihariTestFixtureTlsIdentity {
         $creationError = $_
         $cleanupErrors = New-Object 'System.Collections.Generic.List[string]'
         if ($null -ne $ca) {
-            try { [void](Remove-MihariCARoot -Thumbprint $ca.Thumbprint -Subject $ca.Subject) }
+            try {
+                if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $ca.Thumbprint)) {
+                    [void](Invoke-MihariTestRootConfirmation -Operation Remove -Action {
+                        Remove-MihariCARoot -Thumbprint $ca.Thumbprint -Subject $ca.Subject
+                    })
+                }
+            }
             catch { $cleanupErrors.Add("fixture root removal: $($_.Exception.Message)") }
         }
         if ($null -ne $leaf -and $null -ne $session) {
@@ -371,7 +391,9 @@ function Remove-MihariTestFixtureTlsIdentity {
     try { Clear-MihariLeafCache -Session $Identity.Session }
     catch { $failures.Add("fixture leaf disposal: $($_.Exception.Message)") }
     try {
-        $removed = Remove-MihariCARoot -Thumbprint $Identity.Thumbprint -Subject $Identity.Subject
+        $removed = Invoke-MihariTestRootConfirmation -Operation Remove -Action {
+            Remove-MihariCARoot -Thumbprint $Identity.Thumbprint -Subject $Identity.Subject
+        }
         if ($removed -ne 1) { $failures.Add('fixture CA root cleanup did not remove one certificate') }
     }
     catch { $failures.Add("fixture CA root removal: $($_.Exception.Message)") }
@@ -400,6 +422,7 @@ $proxyClient = $null
 $proxyTls = $null
 $tunnelChild = $null
 $inspectChild = $null
+$inspectAddOperator = $null
 $tunnelMetadata = $null
 $inspectMetadata = $null
 $proxyStatusChild = $null
@@ -526,7 +549,11 @@ try {
     # Inspect TLS 1.2 client handshake, upstream validation, and URL-path capture.
     $inspectRoot = Join-Path $tempRoot 'inspect'
     $inspectChild = Start-MihariTestProcess -Command start -OutputRoot $inspectRoot -Mode Inspect -Port 0
+    $inspectAddOperator = Start-MihariTestRootConfirmation -Operation Add -TargetProcessId $inspectChild.Process.Id
     $inspectMetadata = Wait-MihariTestSession -Child $inspectChild
+    Complete-MihariTestRootConfirmation -Operator $inspectAddOperator
+    Stop-MihariTestRootConfirmation -Operator $inspectAddOperator
+    $inspectAddOperator = $null
     $proxyPort = [int]$inspectMetadata.actualPort
     $originListener = New-MihariTestListener
     $originPort = ([System.Net.IPEndPoint]$originListener.LocalEndpoint).Port
@@ -584,6 +611,7 @@ try {
     Write-Host 'PASS integration: child-process start/stop, local HTTP forwarding, TLS 1.2 CONNECT tunnel, TLS 1.2 Inspect/path redaction, JSONL, reports, CA cleanup'
 }
 finally {
+    Stop-MihariTestRootConfirmation -Operator $inspectAddOperator
     foreach ($item in @(@{ Tls = $originTls }, @{ Tls = $proxyTls })) {
         if ($null -ne $item.Tls) { try { $item.Tls.Dispose() } catch { $finalCleanupFailures.Add("Fixture TLS stream cleanup failed: $($_.Exception.Message)") } }
     }
@@ -611,7 +639,13 @@ finally {
                 }
             }
             if ($null -ne $active -and $active.caThumbprint -and $active.caSubject) {
-                try { [void](Remove-MihariCARoot -Thumbprint ([string]$active.caThumbprint) -Subject ([string]$active.caSubject)) }
+                try {
+                    if (-not (Test-MihariTestThumbprintAbsent -Thumbprint ([string]$active.caThumbprint))) {
+                        [void](Invoke-MihariTestRootConfirmation -Operation Remove -Action {
+                            Remove-MihariCARoot -Thumbprint ([string]$active.caThumbprint) -Subject ([string]$active.caSubject)
+                        })
+                    }
+                }
                 catch { $finalCleanupFailures.Add("Could not remove a failed session's exact CA root: $($_.Exception.Message)") }
             }
             if ($child.Process.HasExited) { $child.Process.Dispose() }

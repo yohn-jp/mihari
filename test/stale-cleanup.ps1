@@ -22,13 +22,17 @@ $cleanupFailures = New-Object 'System.Collections.Generic.List[string]'
 try {
     $ownedId = [guid]::NewGuid().ToString('N')
     $owned = New-MihariCA -SessionId $ownedId
-    $ownedPublic = Install-MihariCARoot -CA $owned
+    $ownedPublic = Invoke-MihariTestRootConfirmation -Operation Add -Action {
+        Install-MihariCARoot -CA $owned
+    }
     $ownedInstalled = $true
     $ownedPublic.Dispose()
 
     $unmatchedId = [guid]::NewGuid().ToString('N')
     $unmatched = New-MihariCA -SessionId $unmatchedId
-    $unmatchedPublic = Install-MihariCARoot -CA $unmatched
+    $unmatchedPublic = Invoke-MihariTestRootConfirmation -Operation Add -Action {
+        Install-MihariCARoot -CA $unmatched
+    }
     $unmatchedInstalled = $true
     $unmatchedPublic.Dispose()
 
@@ -46,7 +50,9 @@ try {
     }
     Write-MihariJsonFileAtomic -Path (Join-Path $ownedDirectory 'session.json') -Value $metadata
 
-    $firstCleanup = Invoke-MihariCleanup -OutputRoot $outputRoot
+    $firstCleanup = Invoke-MihariTestRootConfirmation -Operation Remove -Action {
+        Invoke-MihariCleanup -OutputRoot $outputRoot
+    }
     Assert-MihariTest -Condition ($firstCleanup.removedCount -eq 1) -Message 'Cleanup must remove one positively identified stale Mihari CA.'
     Assert-MihariTest -Condition (@($firstCleanup.removed | Where-Object { $_.thumbprint -eq $owned.Thumbprint }).Count -eq 1) -Message 'Cleanup must report the exact CA removed from trust.'
     Assert-MihariTest -Condition (@($firstCleanup.refused | Where-Object { $_.thumbprint -eq $unmatched.Thumbprint }).Count -eq 1) -Message 'Cleanup must refuse a Mihari-marked root with no matching session metadata.'
@@ -62,11 +68,23 @@ try {
 }
 finally {
     if ($ownedInstalled -and $null -ne $owned) {
-        try { [void](Remove-MihariCARoot -Thumbprint $owned.Thumbprint -Subject $owned.Subject) }
+        try {
+            if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $owned.Thumbprint)) {
+                [void](Invoke-MihariTestRootConfirmation -Operation Remove -Action {
+                    Remove-MihariCARoot -Thumbprint $owned.Thumbprint -Subject $owned.Subject
+                })
+            }
+        }
         catch { $cleanupFailures.Add("owned test root removal: $($_.Exception.Message)") }
     }
     if ($unmatchedInstalled -and $null -ne $unmatched) {
-        try { [void](Remove-MihariCARoot -Thumbprint $unmatched.Thumbprint -Subject $unmatched.Subject) }
+        try {
+            if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $unmatched.Thumbprint)) {
+                [void](Invoke-MihariTestRootConfirmation -Operation Remove -Action {
+                    Remove-MihariCARoot -Thumbprint $unmatched.Thumbprint -Subject $unmatched.Subject
+                })
+            }
+        }
         catch { $cleanupFailures.Add("unmatched test root removal: $($_.Exception.Message)") }
     }
     if ($null -ne $owned) {
