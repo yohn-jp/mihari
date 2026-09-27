@@ -104,6 +104,8 @@ try {
     Assert-MihariBrowserProfileTest (-not (Test-MihariBrowserProfileMarker -Record $profileRecord -SessionId $sessionId)) 'The persisted profile marker must reject a one-tick start-time identity drift.'
     $profileMarker.processStartTimeUtc = $launch.OwnerStartTimeUtc
     [System.IO.File]::WriteAllText($profileMarkerPath, (ConvertTo-Json -InputObject $profileMarker -Compress), [System.Text.UTF8Encoding]::new($false))
+    $restoredProfileRecord = (Get-MihariBrowserProfileRecords -SessionMetadata $session -ProfileOwnershipId $ownershipId)[0]
+    Assert-MihariBrowserProfileTest (Test-MihariBrowserProfileMarker -Record $restoredProfileRecord -SessionId $sessionId) 'The restored marker must still match the persisted record before cleanup.'
 
     $unrelatedProfileProcess = [pscustomobject]@{
         ProcessId = 1234
@@ -141,7 +143,21 @@ try {
     $getStatus = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method GET -Path '/api/browser' -Token $null)
     Assert-MihariBrowserProfileTest ($getStatus.StatusCode -eq 200 -and $getStatus.Value.profiles.Count -eq 1 -and $getStatus.Value.profiles[0].cleanupAvailable) 'GET /api/browser exposes live verified profile state for the UI.'
     $cleaned = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method POST -Path '/api/browser/cleanup' -Token $session.ControlToken -Body ([pscustomobject]@{ profileOwnershipId = $ownershipId; confirmCleanup = $true }))
-    Assert-MihariBrowserProfileTest ($cleaned.StatusCode -eq 200 -and $cleaned.Value.success -and $cleaned.Value.state -eq 'cleaned') 'Confirmed cleanup removes the exact closed Mihari profile.'
+    $cleanupCode = [string]$cleaned.Value.errorCode
+    if ($cleanupCode -notin @('invalid_profile_id', 'profile_not_owned', 'profile_cleanup_unavailable', 'profile_cleanup_failed')) { $cleanupCode = 'none_or_unknown' }
+    $cleanupState = [string]$cleaned.Value.state
+    if ([string]::IsNullOrWhiteSpace($cleanupState) -and $null -ne $cleaned.Value.profile) { $cleanupState = [string]$cleaned.Value.profile.state }
+    if ($cleanupState -notin @('cleaned', 'unverified', 'not_found', 'ready', 'edge_running', 'process_state_unavailable', 'process_identity_unverified')) { $cleanupState = 'none_or_unknown' }
+    $cleanupDetail = 'none'
+    $cleanupMessage = [string]$cleaned.Value.message
+    if ($cleanupMessage -match 'safe profile removal \(([^)]+)\)\.') {
+        if ($Matches[1] -in @('profile_path_not_owned', 'profile_not_found', 'profile_path_reparse_point', 'ownership_marker_missing', 'ownership_marker_invalid', 'ownership_marker_mismatch', 'ownership_marker_unreadable', 'browser_process_ownership_unavailable', 'browser_process_ownership_unverified', 'profile_in_use')) {
+            $cleanupDetail = [string]$Matches[1]
+        }
+        else { $cleanupDetail = 'other_fixed_removal_reason' }
+    }
+    $cleanupDiagnostic = 'status={0};errorCode={1};state={2};detail={3}' -f [int]$cleaned.StatusCode, $cleanupCode, $cleanupState, $cleanupDetail
+    Assert-MihariBrowserProfileTest ($cleaned.StatusCode -eq 200 -and $cleaned.Value.success -and $cleaned.Value.state -eq 'cleaned') ('Confirmed cleanup removes the exact closed Mihari profile (' + $cleanupDiagnostic + ').')
     Assert-MihariBrowserProfileTest (-not [System.IO.Directory]::Exists($profilePath) -and [System.IO.Directory]::Exists($unrelatedPath)) 'Cleanup deletes only the selected Mihari profile and preserves unrelated profile data.'
 
     for ($index = 0; $index -lt 40; $index++) {
