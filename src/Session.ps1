@@ -733,7 +733,12 @@ function Stop-MihariSession {
 
     try {
         if (Get-Command Stop-MihariManagementV2EvidenceJobs -ErrorAction SilentlyContinue) {
-            Stop-MihariManagementV2EvidenceJobs -Session $Session
+            $evidenceStop = Stop-MihariManagementV2EvidenceJobs -Session $Session
+            if ($null -ne $evidenceStop -and $null -ne $evidenceStop.errors) {
+                foreach ($evidenceCleanupError in @($evidenceStop.errors)) {
+                    [void]$cleanupErrors.Add(('Evidence cleanup: {0}' -f [string]$evidenceCleanupError))
+                }
+            }
         }
     }
     catch { [void]$cleanupErrors.Add('Could not stop evidence jobs cleanly.') }

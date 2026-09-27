@@ -637,7 +637,6 @@ function Get-MihariFindingIdentityParts {
         stage = $stage
         routeKind = $routeKind
         transportLeg = $transportLeg
-        source = $source
     }
     if ($scope -eq 'request' -or $code -eq 'http_error_response') {
         $identity['path'] = $path
