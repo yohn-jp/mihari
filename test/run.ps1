@@ -79,6 +79,7 @@ try {
                 & (Join-Path $PSScriptRoot 'phase2-http2-tls.ps1')
                 & (Join-Path $PSScriptRoot 'traffic-projection.ps1')
                 & (Join-Path $PSScriptRoot 'findings-comparison.ps1')
+                & (Join-Path $PSScriptRoot 'finding-projection.ps1')
                 & (Join-Path $PSScriptRoot 'cases-dependencies.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-management-cases.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-evidence.ps1')
@@ -86,7 +87,6 @@ try {
                 & (Join-Path $PSScriptRoot 'browser-observation.ps1')
                 & (Join-Path $PSScriptRoot 'browser-observation-edge.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-ui-browser.ps1')
-                & (Join-Path $PSScriptRoot 'finding-projection.ps1')
             }
         }
     }
