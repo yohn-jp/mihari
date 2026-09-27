@@ -158,6 +158,7 @@ finally {
                     Complete-MihariListenerWorker -Session $Session -Worker $worker
                 }
             }
+            $Session.ActiveConnectionCount = $workers.Count
 
             if ($workers.Count -ge $maxWorkers) {
                 Start-Sleep -Milliseconds 25
@@ -192,6 +193,7 @@ finally {
                     Client = $client
                     ConnectionId = $connectionId
                 })
+                $Session.ActiveConnectionCount = $workers.Count
             }
             catch {
                 if ($null -ne $powerShell) { $powerShell.Dispose() }
@@ -202,6 +204,7 @@ finally {
     }
     finally {
         $listener.Stop()
+        $Session.ActiveConnectionCount = 0
         foreach ($worker in $workers) {
             try { $worker.Client.Close() } catch { Write-Warning ("Mihari client socket cleanup failed: {0}" -f $_.Exception.Message) }
         }

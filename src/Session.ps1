@@ -205,6 +205,7 @@ function Get-MihariSessionMetadataObject {
         uiEndpoint = $uiEndpoint
         proxyHeartbeatUtc = $Session.ProxyHeartbeatUtc
         managementHeartbeatUtc = $Session.ManagementHeartbeatUtc
+        activeConnections = [int]$Session.ActiveConnectionCount
         outputDirectory = [string]$Session.OutputDirectory
         eventsPath = [string]$Session.EventsPath
         stopPath = [string]$Session.StopPath
@@ -338,6 +339,7 @@ function New-MihariSession {
             ManagementListener = $null
             ProxyHeartbeatUtc = $null
             ManagementHeartbeatUtc = $null
+            ActiveConnectionCount = 0
             WorkerPool = $null
             ProcessId = [int]$PID
             ProcessStartTimeUtc = $processStart
