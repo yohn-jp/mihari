@@ -169,6 +169,10 @@ $addOperator = $null
 $originListener = $null
 $originClient = $null
 $diagnosticProfile = $null
+$findingListener = $null
+$findingChild = $null
+$findingMetadata = $null
+$findingBrowser = $null
 $cleanupFailure = $null
 try {
     $child = Start-MihariTestProcess -Command start -OutputRoot (Join-Path $tempRoot 'session') -Mode Tunnel -Port 0
@@ -261,17 +265,46 @@ try {
     $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("event-rows").textContent' -Predicate {
         param($value) [string]$value -match [regex]::Escape($fixturePath)
     }
-    Write-Host 'PASS issue3-ui-browser: Edge rendered live state, polled observations, clicked both mode states, and launched a proxied fixture browser.'
+
+    # A concrete upstream 407 must produce a finding in an already-open page.
+    # The separate session keeps the first session's direct local fixtures and
+    # its real browser action independent of this explicit-upstream fixture.
+    $findingListener = New-MihariTestListener
+    $findingProxyPort = ([System.Net.IPEndPoint]$findingListener.LocalEndpoint).Port
+    $findingChild = Start-MihariTestProcess -Command start -OutputRoot (Join-Path $tempRoot 'finding-session') -Mode Tunnel -Port 0 -UpstreamProxy ('http://127.0.0.1:{0}' -f $findingProxyPort)
+    $findingMetadata = Wait-MihariTestSession -Child $findingChild
+    $findingManagementUrl = 'http://127.0.0.1:{0}/' -f [int]$findingMetadata.actualManagementPort
+    $findingBrowser = Start-Issue3UiEdge -Uri $findingManagementUrl -ProfilePath (Join-Path $tempRoot 'finding-edge')
+    $null = Wait-Issue3UiValue -Browser $findingBrowser -Expression 'document.getElementById("session-id").textContent' -Predicate {
+        param($value) [string]$value -eq [string]$findingMetadata.sessionId
+    }
+    $beforeFinding = Invoke-Issue3UiEvaluate -Browser $findingBrowser -Expression 'document.getElementById("finding-rows").textContent'
+    Assert-MihariTest -Condition ([string]$beforeFinding -notmatch 'upstream_proxy_auth_required') -Message 'The finding must be absent before the fixture emits its upstream 407.'
+    [void](Invoke-MihariTestExplicitProxyStatus -ProxyListener $findingListener -MihariPort ([int]$findingMetadata.actualPort) -StatusCode 407)
+    $null = Wait-Issue3UiValue -Browser $findingBrowser -Expression 'document.getElementById("finding-rows").textContent' -Predicate {
+        param($value) [string]$value -match 'upstream_proxy_auth_required'
+    }
+    Write-Host 'PASS issue3-ui-browser: Edge rendered live status, observations and a 407 finding; both mode clicks and UI-launched proxy traffic worked.'
 }
 finally {
     if ($null -ne $addOperator) { Stop-MihariTestRootConfirmation -Operator $addOperator }
     if ($null -ne $originClient) { $originClient.Close() }
     if ($null -ne $originListener) { $originListener.Stop() }
     if ($null -ne $browser) { $browser.Socket.Dispose() }
-    foreach ($profile in @($diagnosticProfile, (Join-Path $tempRoot 'management-edge'))) {
+    if ($null -ne $findingBrowser) { $findingBrowser.Socket.Dispose() }
+    foreach ($profile in @($diagnosticProfile, (Join-Path $tempRoot 'management-edge'), (Join-Path $tempRoot 'finding-edge'))) {
         try { Stop-Issue3UiEdgeProfile -ProfilePath $profile }
         catch { $cleanupFailure = $_; Write-Warning ('Edge profile cleanup failed: ' + $_.Exception.Message) }
     }
+    if ($null -ne $findingChild -and $null -ne $findingMetadata -and -not $findingChild.Process.HasExited) {
+        try { [void](Stop-MihariTestSession -Child $findingChild -Metadata $findingMetadata) }
+        catch { $cleanupFailure = $_; Write-Warning ('Finding session cleanup failed: ' + $_.Exception.Message) }
+    }
+    if ($null -ne $findingChild) {
+        if (-not $findingChild.Process.HasExited) { $findingChild.Process.Kill(); [void]$findingChild.Process.WaitForExit(5000) }
+        $findingChild.Process.Dispose()
+    }
+    if ($null -ne $findingListener) { $findingListener.Stop() }
     if ($null -ne $child -and $null -ne $metadata -and -not $child.Process.HasExited) {
         try {
             $latestMetadata = ConvertFrom-Json -InputObject (Read-MihariTestLiveText -Path (Join-Path ([string]$metadata.outputDirectory) 'session.json'))
