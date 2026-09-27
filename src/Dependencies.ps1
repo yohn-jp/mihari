@@ -139,7 +139,7 @@ function ConvertTo-MihariDependencyTarget {
         if ($null -eq $pathValue) { $pathValue = $url.AbsolutePath + $url.Query }
     }
 
-    $host = ConvertTo-MihariDependencyHost -Value $hostValue
+    $targetHost = ConvertTo-MihariDependencyHost -Value $hostValue
     $scheme = ConvertTo-MihariDependencySafeText -Value $schemeValue -MaximumLength 16
     if ($null -ne $scheme) {
         $scheme = $scheme.ToLowerInvariant()
@@ -157,7 +157,7 @@ function ConvertTo-MihariDependencyTarget {
         elseif ($scheme -eq 'https') { $port = 443 }
     }
     $path = ConvertTo-MihariDependencyPath -Value $pathValue
-    return [pscustomobject]@{ Scheme = $scheme; Host = $host; Port = $port; Path = $path; QueryObserved = ($null -ne $path -and $path.Contains('?')) }
+    return [pscustomobject]@{ Scheme = $scheme; Host = $targetHost; Port = $port; Path = $path; QueryObserved = ($null -ne $path -and $path.Contains('?')) }
 }
 
 function ConvertTo-MihariDependencyEvent {
@@ -756,7 +756,7 @@ function ConvertTo-MihariNeutralPolicyRuleSet {
         $ruleId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $rule -Names @('ruleId', 'id')) -MaximumLength 128
         if ($null -eq $ruleId) { $ruleId = 'rule-' + $ruleCount.ToString([Globalization.CultureInfo]::InvariantCulture) }
         $hostText = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $rule -Names @('host')) -MaximumLength 512
-        $host = ConvertTo-MihariNeutralPolicyHost -HostValue $hostText
+        $normalizedHost = ConvertTo-MihariNeutralPolicyHost -HostValue $hostText
         $matchType = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $rule -Names @('matchType')) -MaximumLength 32
         $matchType = $(if ($null -eq $matchType) { 'exact' } else { $matchType })
         $path = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $rule -Names @('path')) -MaximumLength 2048
@@ -783,19 +783,19 @@ function ConvertTo-MihariNeutralPolicyRuleSet {
         foreach ($fieldName in $fieldNames) {
             if ($fieldName -notin @('ruleId', 'id', 'host', 'scheme', 'port', 'matchType', 'path', 'effect', 'methods')) { $unknownFields.Add($fieldName) }
         }
-        $isSupported = ($null -ne $host -and $matchType -in @('exact', 'pathPrefix') -and
+        $isSupported = ($null -ne $normalizedHost -and $matchType -in @('exact', 'pathPrefix') -and
             $null -ne $path -and $path.StartsWith('/') -and $path.IndexOf('?') -lt 0 -and $path -notmatch '[*{}\[\]]' -and
             ($null -eq $scheme -or $scheme -in @('http', 'https')) -and ($null -eq $portValue -or $null -ne $port) -and
             ($null -eq $effect -or $effect -eq 'allow') -and $unknownFields.Count -eq 0)
         if (-not $isSupported) {
-            $possibleHost = $host
+            $possibleHost = $normalizedHost
             $unsupported.Add([pscustomobject]@{ ruleId = $ruleId; host = $possibleHost; reason = 'unsupported_rule_semantics' })
             continue
         }
         if ($matchType -eq 'pathPrefix' -and $path.Length -gt 1) { $path = $path.TrimEnd('/') }
         if ($path.Length -eq 0) { $path = '/' }
         $normalized.Add([pscustomobject]@{
-            RuleId = $ruleId; Host = $host; Scheme = $scheme; Port = $port; MatchType = $matchType
+            RuleId = $ruleId; Host = $normalizedHost; Scheme = $scheme; Port = $port; MatchType = $matchType
             Path = $path; Methods = @($methods.ToArray())
         })
     }
@@ -827,7 +827,7 @@ function Compare-MihariDependencyPolicy {
     foreach ($dependency in $Dependencies) {
         $dependencyId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $dependency -Names @('dependencyId')) -MaximumLength 128
         if ($null -eq $dependencyId) { $dependencyId = 'unidentified' }
-        $host = ConvertTo-MihariNeutralPolicyHost -HostValue (Get-MihariDependencyValue -InputObject $dependency -Names @('host'))
+        $dependencyHost = ConvertTo-MihariNeutralPolicyHost -HostValue (Get-MihariDependencyValue -InputObject $dependency -Names @('host'))
         $scheme = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $dependency -Names @('scheme')) -MaximumLength 16
         if ($null -ne $scheme) { $scheme = $scheme.ToLowerInvariant() }
         $portValue = Get-MihariDependencyValue -InputObject $dependency -Names @('port')
@@ -845,12 +845,12 @@ function Compare-MihariDependencyPolicy {
         if (-not $policy.Supported) {
             $status = 'unknown'; $reason = [string]$policy.Reason
         }
-        elseif ($null -eq $host -or $null -eq $path) {
+        elseif ($null -eq $dependencyHost -or $null -eq $path) {
             $status = 'unknown'; $reason = 'observed_host_or_path_unknown'
         }
         else {
             foreach ($rule in $policy.Rules) {
-                if ($rule.Host -ne $host) { continue }
+                if ($rule.Host -ne $dependencyHost) { continue }
                 $ruleDimensionsUnknown = (($null -ne $rule.Scheme -and $null -eq $scheme) -or ($null -ne $rule.Port -and $null -eq $port))
                 $schemeMatches = ($null -eq $rule.Scheme -or $null -eq $scheme -or $rule.Scheme -eq $scheme)
                 $portMatches = ($null -eq $rule.Port -or $null -eq $port -or [int]$rule.Port -eq [int]$port)
@@ -865,7 +865,7 @@ function Compare-MihariDependencyPolicy {
                 $covering.Add($rule.RuleId)
             }
             foreach ($unknownRule in $policy.UnsupportedRules) {
-                if ($null -eq $unknownRule.host -or $unknownRule.host -eq $host) { $possibleUnknown.Add([string]$unknownRule.ruleId) }
+                if ($null -eq $unknownRule.host -or $unknownRule.host -eq $dependencyHost) { $possibleUnknown.Add([string]$unknownRule.ruleId) }
             }
             if ($covering.Count -gt 0) { $status = 'covered'; $reason = 'covered_by_neutral_exact_or_path_prefix_rule' }
             elseif ($possibleUnknown.Count -gt 0) { $status = 'unknown'; $reason = 'unsupported_or_incomplete_rule_semantics_may_cover_observation' }
@@ -874,7 +874,7 @@ function Compare-MihariDependencyPolicy {
             dependencyId = $dependencyId; status = $status; reason = $reason
             coveringRuleIds = @($covering.ToArray() | Sort-Object -Unique)
             possibleRuleIds = @($possibleUnknown.ToArray() | Sort-Object -Unique)
-            scheme = $scheme; host = $host; port = $port; path = $path
+            scheme = $scheme; host = $dependencyHost; port = $port; path = $path
         })
     }
     $allItems = @($items.ToArray() | Sort-Object -Property dependencyId)
@@ -950,7 +950,7 @@ function New-MihariPolicyProposals {
     $withheld = New-Object 'System.Collections.Generic.List[object]'
     foreach ($dependency in $Dependencies) {
         $dependencyId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $dependency -Names @('dependencyId')) -MaximumLength 128
-        $host = ConvertTo-MihariNeutralPolicyHost -HostValue (Get-MihariDependencyValue -InputObject $dependency -Names @('host'))
+        $dependencyHost = ConvertTo-MihariNeutralPolicyHost -HostValue (Get-MihariDependencyValue -InputObject $dependency -Names @('host'))
         $scheme = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $dependency -Names @('scheme')) -MaximumLength 16
         if ($null -ne $scheme) { $scheme = $scheme.ToLowerInvariant() }
         $port = Get-MihariDependencyValue -InputObject $dependency -Names @('port')
@@ -958,7 +958,7 @@ function New-MihariPolicyProposals {
         $path = $pathWithQuery
         $queryObserved = [bool](Get-MihariDependencyValue -InputObject $dependency -Names @('queryObserved'))
         if ($null -ne $path -and $path.Contains('?')) { $queryObserved = $true; $path = $path.Substring(0, $path.IndexOf('?')) }
-        if (-not $dependencyId -or -not $host -or $scheme -notin @('http', 'https') -or $null -eq $port -or $null -eq $path -or -not $path.StartsWith('/')) {
+        if (-not $dependencyId -or -not $dependencyHost -or $scheme -notin @('http', 'https') -or $null -eq $port -or $null -eq $path -or -not $path.StartsWith('/')) {
             $withheld.Add([pscustomobject]@{ dependencyId = $dependencyId; reason = 'host_scheme_port_or_exact_path_not_observed' })
             continue
         }
@@ -993,7 +993,7 @@ function New-MihariPolicyProposals {
             proposalType = 'url_allowlist'; policyDomain = 'enterprise-url-access'; dependencyId = $dependencyId
             caseId = (Get-MihariDependencyValue -InputObject $dependency -Names @('caseId'))
             trialId = (Get-MihariDependencyValue -InputObject $dependency -Names @('trialId'))
-            scheme = $scheme; host = $host; port = [int]$port; matchType = $PathMatch; path = $path
+            scheme = $scheme; host = $dependencyHost; port = [int]$port; matchType = $PathMatch; path = $path
             methods = $methods; queryValues = $(if ($queryObserved) { 'redacted; not proposed as match criteria' } else { 'not observed' })
             necessityState = $necessityState; existingPolicyStatus = $policyStatus; proposalStatus = $proposalStatus
             requiresConfirmation = @($requiredConfirmations.ToArray()); broadenedPattern = $broadens
@@ -1007,17 +1007,17 @@ function New-MihariPolicyProposals {
     foreach ($tlsEvidence in $TlsEvidence) {
         $validated = Test-MihariTlsExclusionEvidence -Evidence $tlsEvidence
         if (-not $validated.Valid) { continue }
-        $host = ConvertTo-MihariNeutralPolicyHost -HostValue (Get-MihariDependencyValue -InputObject $tlsEvidence -Names @('host', 'destinationHost'))
-        if ($null -eq $host) { continue }
+        $tlsHost = ConvertTo-MihariNeutralPolicyHost -HostValue (Get-MihariDependencyValue -InputObject $tlsEvidence -Names @('host', 'destinationHost'))
+        if ($null -eq $tlsHost) { continue }
         $caseId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $tlsEvidence -Names @('caseId')) -MaximumLength 128
         $matchingDependencies = @($Dependencies | Where-Object {
-                (ConvertTo-MihariNeutralPolicyHost -HostValue (Get-MihariDependencyValue -InputObject $_ -Names @('host'))) -eq $host -and
+                (ConvertTo-MihariNeutralPolicyHost -HostValue (Get-MihariDependencyValue -InputObject $_ -Names @('host'))) -eq $tlsHost -and
                 ($null -eq $caseId -or [string](Get-MihariDependencyValue -InputObject $_ -Names @('caseId')) -eq $caseId)
             })
         if ($matchingDependencies.Count -eq 0) { continue }
         $comparisonId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $tlsEvidence -Names @('comparisonId')) -MaximumLength 128
-        if ($null -eq $comparisonId) { $comparisonId = 'comparison-' + (Get-MihariDependencyHash -Text ($validated.InspectTrialId + [char]0 + $validated.TunnelTrialId + [char]0 + $host)).Substring(0, 24) }
-        $scopeKey = [string]$caseId + [char]0 + $comparisonId + [char]0 + $host
+        if ($null -eq $comparisonId) { $comparisonId = 'comparison-' + (Get-MihariDependencyHash -Text ($validated.InspectTrialId + [char]0 + $validated.TunnelTrialId + [char]0 + $tlsHost)).Substring(0, 24) }
+        $scopeKey = [string]$caseId + [char]0 + $comparisonId + [char]0 + $tlsHost
         if ($seenTlsProposalScopes.ContainsKey($scopeKey)) { continue }
         $seenTlsProposalScopes[$scopeKey] = $true
         $dependency = @($matchingDependencies | Sort-Object -Property dependencyId | Select-Object -First 1)[0]
@@ -1028,11 +1028,11 @@ function New-MihariPolicyProposals {
         if (-not $ConfirmTlsExclusionHostScope) { $requiredConfirmations.Add('exact_host_scope') }
         $status = 'candidate'
         if ($requiredConfirmations.Count -gt 0) { $status = 'requires_confirmation' }
-        $proposalSeed = @('tls_inspection_exclusion', $dependencyId, $comparisonId, $host) -join [char]0
+        $proposalSeed = @('tls_inspection_exclusion', $dependencyId, $comparisonId, $tlsHost) -join [char]0
         $proposals.Add([pscustomobject]@{
             schemaVersion = 1; proposalId = 'proposal-' + (Get-MihariDependencyHash -Text $proposalSeed).Substring(0, 24)
             proposalType = 'tls_inspection_exclusion'; policyDomain = 'mihari-local-inspection'
-            dependencyId = $dependencyId; caseId = $caseId; host = $host; matchType = 'exact_host'
+            dependencyId = $dependencyId; caseId = $caseId; host = $tlsHost; matchType = 'exact_host'
             localAction = 'New Mihari client connections to this host use Tunnel mode.'
             upstreamRoute = 'unchanged'; upstreamTlsValidation = 'unchanged'; proposalStatus = $status
             necessityState = $(if ($necessityState) { $necessityState } else { 'necessity_unconfirmed' })
@@ -1089,8 +1089,8 @@ function New-MihariChangeRequestPayload {
             $value = ConvertTo-MihariCaseSafeText -Value (Get-MihariDependencyValue -InputObject $Trial -Names @($field)) -MaximumLength 256
             if ($null -ne $value) { $safeTrial[$field] = $value }
         }
-        $profile = Get-MihariDependencyValue -InputObject $Trial -Names @('profile')
-        if ($null -ne $profile) { $safeTrial['profile'] = ConvertTo-MihariChangeRequestValue -Value $profile -RedactedCount ([ref]$redactedCount) }
+        $trialProfile = Get-MihariDependencyValue -InputObject $Trial -Names @('profile')
+        if ($null -ne $trialProfile) { $safeTrial['profile'] = ConvertTo-MihariChangeRequestValue -Value $trialProfile -RedactedCount ([ref]$redactedCount) }
         $environment = Get-MihariDependencyValue -InputObject $Trial -Names @('environmentReference')
         if ($null -ne $environment) { $safeTrial['environmentReference'] = ConvertTo-MihariChangeRequestValue -Value $environment -RedactedCount ([ref]$redactedCount) }
     }
