@@ -206,14 +206,18 @@ try {
         $originListener = $null
 
         $targetEvents = @(Get-MihariIssue3TargetEvents -EventsPath ([string]$metadata.eventsPath) -Path $fixturePath)
-        Assert-MihariTest -Condition ($targetEvents.Count -ge 4) -Message 'Mihari must emit an event chain for the browser-originated request to the local fixture.'
+        Assert-MihariTest -Condition ($targetEvents.Count -ge 6) -Message 'Mihari must emit the complete HTTP event chain for the browser-originated request to the local fixture.'
         $targetRequest = @($targetEvents | Where-Object { $_.stage -eq 'proxy.request' }) | Select-Object -First 1
+        $targetHttp = @($targetEvents | Where-Object { $_.stage -eq 'http.request' }) | Select-Object -First 1
         $targetRoute = @($targetEvents | Where-Object { $_.stage -eq 'upstream.resolve' }) | Select-Object -First 1
         $targetTcp = @($targetEvents | Where-Object { $_.stage -eq 'upstream.tcp' }) | Select-Object -First 1
+        $targetUpstreamHttp = @($targetEvents | Where-Object { $_.stage -eq 'upstream.http' }) | Select-Object -First 1
         $targetResponse = @($targetEvents | Where-Object { $_.stage -eq 'response.relay' }) | Select-Object -First 1
         Assert-MihariTest -Condition ($null -ne $targetRequest -and $targetRequest.data.host -eq '127.0.0.1' -and [int]$targetRequest.data.port -eq $originPort) -Message 'Mihari must observe the browser request with the fixture authority, not its own listener authority.'
+        Assert-MihariTest -Condition ($null -ne $targetHttp -and $targetHttp.data.method -eq 'GET' -and $targetHttp.data.path -eq $fixturePath) -Message 'Mihari must record the browser-originated HTTP request path.'
         Assert-MihariTest -Condition ($null -ne $targetRoute -and $targetRoute.outcome -eq 'success' -and $targetRoute.data.routeKind -in @('Direct', 'ExplicitProxy')) -Message 'The browser request must resolve through a concrete non-self upstream route.'
         Assert-MihariTest -Condition ($null -ne $targetTcp -and $targetTcp.outcome -eq 'success') -Message 'Mihari must establish the fixture upstream connection for real browser traffic.'
+        Assert-MihariTest -Condition ($null -ne $targetUpstreamHttp -and $targetUpstreamHttp.outcome -eq 'success' -and [int]$targetUpstreamHttp.data.statusCode -eq 200) -Message 'Mihari must observe the local fixture HTTP response before relaying it to Edge.'
         Assert-MihariTest -Condition ($null -ne $targetResponse -and $targetResponse.outcome -eq 'success' -and [int]$targetResponse.data.statusCode -eq 200) -Message 'Mihari must relay the local fixture response to real Edge.'
 
         foreach ($line in (Read-MihariTestCompleteLiveLines -Path ([string]$metadata.eventsPath))) {
@@ -249,7 +253,7 @@ try {
         Assert-MihariTest -Condition ($null -ne $edgeProcess) -Message 'The real Edge browser process must retain the forced Mihari proxy command line.'
         $edgeCommandLine = [string]$edgeProcess.CommandLine
         Assert-MihariTest -Condition ($edgeCommandLine.IndexOf(('--proxy-server=http://127.0.0.1:{0}' -f $proxyPort), [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $edgeCommandLine.IndexOf('--proxy-bypass-list=<-loopback>', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -Message 'The running Edge command line must force both HTTP and HTTPS through Mihari, including loopback destinations.'
-        Assert-MihariTest -Condition ($edgeCommandLine.IndexOf('--disable-quic', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $edgeCommandLine.IndexOf('--disable-http2', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $edgeCommandLine.IndexOf('--ssl-version-max=tls1.2', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -Message 'The running Edge command line must stay within Mihari’s supported QUIC/HTTP2/TLS baseline.'
+        Assert-MihariTest -Condition ($edgeCommandLine.IndexOf('--disable-quic', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $edgeCommandLine.IndexOf('--disable-http2', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $edgeCommandLine.IndexOf('--force-webrtc-ip-handling-policy=disable_non_proxied_udp', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $edgeCommandLine.IndexOf('--ssl-version-max=tls1.2', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -Message 'The running Edge command line must stay within Mihari’s supported QUIC/HTTP2/TLS baseline and disable non-proxied WebRTC UDP.'
         Assert-MihariTest -Condition ($edgeCommandLine -notmatch '(?i)--(ignore-certificate-errors|allow-insecure-localhost)') -Message 'The diagnostic Edge process must not disable certificate validation.'
 
     Write-Host 'PASS issue3-edge-smoke: UI-launched Microsoft Edge reached the loopback fixture through Mihari; event evidence confirms the route did not point back to the proxy listener.'
