@@ -184,7 +184,7 @@ function ConvertTo-MihariSafeEventData {
         'browserTimingStartMs', 'browserTimingDurationMs', 'requestBytes',
         'responseBytes', 'bytes', 'firstByteMs', 'lastByteMs',
         'forwardWriteMs', 'workerOccupancy', 'maxWorkers', 'workingSetBytes',
-        'cpuTotalMs', 'evidenceBytes', 'writerLagMs'
+        'cpuTotalMs', 'evidenceBytes', 'writerLagMs', 'activeLongLivedCount'
     )
     $booleanFields = @('certificateAccepted', 'caTrusted', 'fromDiskCache', 'fromServiceWorker', 'reused', 'queueSaturated', 'pendingConnections')
     $allowed = @{}
