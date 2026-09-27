@@ -79,8 +79,13 @@ function Stop-MihariIssue3EdgeProfile {
         if ($profileProcesses.Count -eq 0) { break }
         Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $deadline)
+    $remainingProcesses = @(Get-MihariIssue3EdgeProcesses -ProfilePath $ProfilePath)
+    if ($remainingProcesses.Count -gt 0) {
+        throw ('Could not stop all Edge processes using the test profile: ' + ([string]::Join(', ', @($remainingProcesses | ForEach-Object { [string]$_.ProcessId }))))
+    }
     if (Test-Path -LiteralPath $ProfilePath) {
-        Remove-Item -LiteralPath $ProfilePath -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $ProfilePath -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $ProfilePath) { throw 'The dedicated Edge test profile remained after removal.' }
     }
 }
 
@@ -151,6 +156,7 @@ $originClient = $null
 $browserProfilePath = $null
 $browserProcessId = $null
 $stopFailure = $null
+$browserCleanupFailure = $null
 
 try {
     $outputRoot = Join-Path $tempRoot 'session'
@@ -258,7 +264,10 @@ finally {
         catch { Write-Warning ("Edge fixture listener cleanup failed: {0}" -f $_.Exception.Message) }
     }
     try { Stop-MihariIssue3EdgeProfile -ProfilePath $browserProfilePath -ProcessId $browserProcessId }
-    catch { Write-Warning ("Diagnostic Edge process cleanup failed: {0}" -f $_.Exception.Message) }
+    catch {
+        $browserCleanupFailure = $_
+        Write-Warning ("Diagnostic Edge process cleanup failed: {0}" -f $_.Exception.Message)
+    }
     if ($null -ne $child -and $null -ne $metadata -and -not $child.Process.HasExited) {
         try {
             [void](Stop-MihariTestSession -Child $child -Metadata $metadata)
@@ -281,3 +290,4 @@ finally {
 }
 
 if ($null -ne $stopFailure) { throw $stopFailure }
+if ($null -ne $browserCleanupFailure) { throw $browserCleanupFailure }
