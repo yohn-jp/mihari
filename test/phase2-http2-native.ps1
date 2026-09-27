@@ -171,6 +171,10 @@ try {
     $wire = New-MihariTestH2Frame -Type 1 -Flags 5 -StreamId 9 -Payload $responseBlock
     $frame = (Add-MihariHttp2Input -State $upstream -Bytes $wire -Count $wire.Length).Items[0]
     $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
+    $requestBlock = Encode-MihariHpackBlock -Context $requestEncoder -Headers $requestHeaders
+    $wire = New-MihariTestH2Frame -Type 1 -Flags 4 -StreamId 11 -Payload $requestBlock
+    $frame = (Add-MihariHttp2Input -State $client -Bytes $wire -Count $wire.Length).Items[0]
+    $null = Invoke-MihariHttp2Frame -Context $ctx -State $client -Opposite $upstream -Frame $frame
     $goaway = New-MihariTestH2Frame -Type 7 -Flags 0 -StreamId 0 -Payload ([byte[]]@(0,0,0,9,0,0,0,0))
     $frame = (Add-MihariHttp2Input -State $upstream -Bytes $goaway -Count $goaway.Length).Items[0]
     $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
@@ -191,4 +195,6 @@ $requestEvents = @($events -split "`r?`n" | Where-Object { $_ -match '"stage":"h
 Assert-MihariTest -Condition ($events.Contains('/one?token=[REDACTED]') -and -not $events.Contains('topsecret')) -Message ('HTTP/2 path evidence must redact query values; observed request event count: {0}; safe path present: {1}.' -f $requestEvents.Count, $events.Contains('/one?token=[REDACTED]'))
 Assert-MihariTest -Condition ($events.Contains('http2.grpc_status') -and $events.Contains('http2.reset')) -Message 'RPC trailer and reset facts must remain distinct.'
 Assert-MihariTest -Condition ($events.Contains('http2.flow_wait') -and $events.Contains('http2.goaway')) -Message 'Measured flow wait and GOAWAY direction must remain distinct facts.'
+$affected = @($events -split "`r?`n" | Where-Object { $_ -match '"stage":"http2.goaway_affected"' })
+Assert-MihariTest -Condition ($affected.Count -eq 1 -and $affected[0].Contains('"streamId":"11"') -and $affected[0].Contains('"lastStreamId":9')) -Message 'Upstream GOAWAY must reference only still-open requests above the observed last stream ID.'
 Write-Host 'PASS phase2-http2-native: bounded frame parser, concurrent streams, safe path evidence'
