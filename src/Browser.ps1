@@ -513,17 +513,51 @@ function Get-MihariBrowserProfileState {
         }
     }
     $expectedExecutable = [string]$Record.executablePath
+    try {
+        $expectedProfilePath = [System.IO.Path]::GetFullPath($profilePath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    }
+    catch {
+        $base.state = 'process_identity_unverified'
+        $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. Mihari could not verify its process identity, so cleanup is unavailable.'
+        return $base
+    }
     $matchingProcesses = New-Object 'System.Collections.Generic.List[object]'
     foreach ($process in $processes) {
-        $argumentPath = Get-MihariBrowserProfileArgument -CommandLine ([string]$process.CommandLine)
-        if ([string]::IsNullOrWhiteSpace($argumentPath)) {
-            if ([int]$process.ProcessId -eq [int]$Record.processId) {
-                $matchingProcesses.Add($process)
-                continue
-            }
+        $commandLine = [string]$process.CommandLine
+        if ([string]::IsNullOrWhiteSpace($commandLine)) {
             $base.state = 'process_identity_unverified'
             $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. Mihari could not identify every Edge profile, so cleanup is unavailable.'
             return $base
+        }
+        $processId = 0
+        try { $processId = [int]$process.ProcessId }
+        catch { $processId = 0 }
+        $isRecordedOwnerPid = ($processId -gt 0 -and $processId -eq [int]$Record.processId)
+        $referencesExactProfilePath = ($commandLine.IndexOf($expectedProfilePath, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+        $argumentPath = Get-MihariBrowserProfileArgument -CommandLine $commandLine
+        if ([string]::IsNullOrWhiteSpace($argumentPath)) {
+            $hasUnparsedProfileArgument = [System.Text.RegularExpressions.Regex]::IsMatch(
+                $commandLine,
+                '(?i)(?:^|[\s"])--user-data-dir(?:=|\s|$)'
+            )
+            if ($referencesExactProfilePath -or $hasUnparsedProfileArgument) {
+                $base.state = 'process_identity_unverified'
+                $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. An ambiguous Edge process may refer to its profile, so cleanup is unavailable.'
+                return $base
+            }
+            if (-not $isRecordedOwnerPid) {
+                # A complete non-owner command line that contains no unique Mihari profile path cannot identify this profile.
+                # The exact-profile cleanup path applies the same boundary; blank command lines above still fail closed.
+                continue
+            }
+            if (-not [string]::Equals([string]$process.ExecutablePath, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase) -or
+                [string]::IsNullOrWhiteSpace([string]$process.ExecutablePath)) {
+                $base.state = 'process_identity_unverified'
+                $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. The recorded Edge process identity could not be verified, so cleanup is unavailable.'
+                return $base
+            }
+            $matchingProcesses.Add($process)
+            continue
         }
         $matchesProfile = $false
         try {
@@ -533,7 +567,14 @@ function Get-MihariBrowserProfileState {
                 [StringComparison]::OrdinalIgnoreCase)
         }
         catch { $matchesProfile = $false }
-        if (-not $matchesProfile) { continue }
+        if (-not $matchesProfile) {
+            if ($isRecordedOwnerPid -or $referencesExactProfilePath) {
+                $base.state = 'process_identity_unverified'
+                $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. An Edge process identity conflicts with its ownership record, so cleanup is unavailable.'
+                return $base
+            }
+            continue
+        }
         if (-not [string]::Equals([string]$process.ExecutablePath, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase) -or
             [string]::IsNullOrWhiteSpace([string]$process.ExecutablePath)) {
             $base.state = 'process_identity_unverified'

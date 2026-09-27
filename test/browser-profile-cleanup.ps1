@@ -113,22 +113,63 @@ try {
         ExecutablePath = $executablePath
         CommandLine = ('"{0}" --user-data-dir="{1}"' -f $executablePath, $unrelatedPath)
     }
-    $script:profileProcessInventory = @($unrelatedProfileProcess)
+    $unrelatedEdgeChild = [pscustomobject]@{
+        ProcessId = 1235
+        ExecutablePath = $executablePath
+        CommandLine = ('"{0}" --type=utility' -f $executablePath)
+    }
+    $script:profileProcessInventory = @($unrelatedProfileProcess, $unrelatedEdgeChild)
     $status = Get-MihariBrowserProfileStatus -SessionMetadata $session
-    Assert-MihariBrowserProfileTest ($status.profiles.Count -eq 1 -and $status.profiles[0].state -eq 'ready' -and $status.profiles[0].cleanupAvailable) 'An unrelated Edge profile does not block cleanup of the exact owned profile.'
+    Assert-MihariBrowserProfileTest ($status.profiles.Count -eq 1 -and $status.profiles[0].state -eq 'ready' -and $status.profiles[0].cleanupAvailable) 'A complete unrelated Edge helper command line without a profile argument does not block cleanup of the exact owned profile.'
+
+    $ownedEdgeChild = [pscustomobject]@{
+        ProcessId = 1236
+        ExecutablePath = $executablePath
+        CommandLine = ('"{0}" --type=utility --user-data-dir="{1}"' -f $executablePath, $profilePath)
+    }
+    $script:profileProcessInventory = @($unrelatedEdgeChild, $ownedEdgeChild)
+    $ownedChildStatus = Get-MihariBrowserProfileStatus -SessionMetadata $session
+    Assert-MihariBrowserProfileTest ($ownedChildStatus.profiles[0].state -eq 'edge_running' -and -not $ownedChildStatus.profiles[0].cleanupAvailable) 'An Edge child with the exact owned profile argument keeps cleanup unavailable even when its PID differs from the recorded browser root.'
+
+    $ambiguousOwnedEdgeChild = [pscustomobject]@{
+        ProcessId = 1237
+        ExecutablePath = $executablePath
+        CommandLine = ('"{0}" --type=utility --profile-hint="{1}"' -f $executablePath, $profilePath)
+    }
+    $script:profileProcessInventory = @($unrelatedEdgeChild, $ambiguousOwnedEdgeChild)
+    $ambiguousChildStatus = Get-MihariBrowserProfileStatus -SessionMetadata $session
+    Assert-MihariBrowserProfileTest ($ambiguousChildStatus.profiles[0].state -eq 'process_identity_unverified' -and -not $ambiguousChildStatus.profiles[0].cleanupAvailable -and [System.IO.Directory]::Exists($profilePath)) 'A child command line that mentions the exact owned path outside a parseable profile argument fails closed and preserves the profile.'
+
+    $blankCommandLineProcess = [pscustomobject]@{
+        ProcessId = 1238
+        ExecutablePath = $executablePath
+        CommandLine = ''
+    }
+    $script:profileProcessInventory = @($unrelatedEdgeChild, $blankCommandLineProcess)
+    $blankCommandLineStatus = Get-MihariBrowserProfileStatus -SessionMetadata $session
+    Assert-MihariBrowserProfileTest ($blankCommandLineStatus.profiles[0].state -eq 'process_identity_unverified' -and -not $blankCommandLineStatus.profiles[0].cleanupAvailable -and [System.IO.Directory]::Exists($profilePath)) 'Any Edge process with a blank command line still blocks cleanup because its profile cannot be identified.'
+
+    $malformedProfileArgumentProcess = [pscustomobject]@{
+        ProcessId = 1239
+        ExecutablePath = $executablePath
+        CommandLine = ('"{0}" --type=utility --user-data-dir' -f $executablePath)
+    }
+    $script:profileProcessInventory = @($unrelatedEdgeChild, $malformedProfileArgumentProcess)
+    $malformedArgumentStatus = Get-MihariBrowserProfileStatus -SessionMetadata $session
+    Assert-MihariBrowserProfileTest ($malformedArgumentStatus.profiles[0].state -eq 'process_identity_unverified' -and -not $malformedArgumentStatus.profiles[0].cleanupAvailable -and [System.IO.Directory]::Exists($profilePath)) 'A malformed user-data-dir switch fails closed because the process may refer to the owned profile.'
 
     $ownedProfileProcess = [pscustomobject]@{
         ProcessId = [int]$launch.Pid
         ExecutablePath = $executablePath
         CommandLine = ('"{0}" --user-data-dir="{1}"' -f $executablePath, $profilePath)
     }
-    $script:profileProcessInventory = @($unrelatedProfileProcess, $ownedProfileProcess)
+    $script:profileProcessInventory = @($unrelatedProfileProcess, $unrelatedEdgeChild, $ownedProfileProcess)
     $runningStatus = Get-MihariBrowserProfileStatus -SessionMetadata $session
     Assert-MihariBrowserProfileTest ($runningStatus.profiles[0].state -eq 'edge_running' -and -not $runningStatus.profiles[0].cleanupAvailable) 'Cleanup remains unavailable while an Edge process uses the owned profile.'
     $runningCleanup = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method POST -Path '/api/browser/cleanup' -Token $session.ControlToken -Body ([pscustomobject]@{ profileOwnershipId = $ownershipId; confirmCleanup = $true }))
     Assert-MihariBrowserProfileTest ($runningCleanup.StatusCode -eq 409 -and [System.IO.Directory]::Exists($profilePath)) 'The protected cleanup route refuses a live profile and preserves its files.'
 
-    $script:profileProcessInventory = @($unrelatedProfileProcess)
+    $script:profileProcessInventory = @($unrelatedProfileProcess, $unrelatedEdgeChild)
     $missingToken = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method POST -Path '/api/browser/cleanup' -Body ([pscustomobject]@{ profileOwnershipId = $ownershipId; confirmCleanup = $true }))
     Assert-MihariBrowserProfileTest ($missingToken.StatusCode -eq 403 -and [System.IO.Directory]::Exists($profilePath)) 'Cleanup requires the existing session control token.'
     $wrongOrigin = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method POST -Path '/api/browser/cleanup' -Token $session.ControlToken -Origin 'http://127.0.0.1:49124' -Body ([pscustomobject]@{ profileOwnershipId = $ownershipId; confirmCleanup = $true }))
