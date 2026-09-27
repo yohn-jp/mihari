@@ -10,6 +10,22 @@ permissions:
   contents: read
 
 jobs:
+  trust-confirm-probe:
+    name: Trust confirmation proof (${{ matrix.shell }})
+    runs-on: windows-latest
+    timeout-minutes: 3
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Confirm public root trust for bounded proof
+        run: ./test/trust-confirm-probe.ps1
+
   certificate-proofs:
     name: Certificate proof (${{ matrix.shell }}, ${{ matrix.proof }})
     runs-on: windows-latest
