@@ -2,9 +2,13 @@
 
 ## Authority
 
-Read `docs/requirements.md` and `docs/architecture.md` before changing runtime behavior. They define the current product contract.
+Read `docs/requirements.md`, `docs/architecture.md`, and `docs/architecture-phase-2.md` before changing runtime behavior. They define the product contract.
 
-When code and documentation disagree, do not silently reinterpret the architecture. Fix the code to the documented contract unless the task explicitly changes the contract.
+For Phase 2 work, `docs/architecture-phase-2.md` is the target architecture and delivery authority. Its explicit extensions supersede conflicting initial-stage exclusions and acceptance criteria in older documents or Issues. All unchanged safety, privacy, PowerShell compatibility, and lifecycle constraints remain binding. Do not create a scope blocker from an initial-stage exclusion that Phase 2 explicitly supersedes.
+
+When code and documentation disagree, do not silently reinterpret the architecture. Fix the code to the documented contract unless the task explicitly changes the contract. Do not rewrite mandatory requirements merely to declare incomplete work done.
+
+Phase 2 execution follows milestones M0-M5, with native HTTP/2 tracked separately through the M6 feasibility/capability gate. Keep `docs/phase-2-progress.md` as a compact implementation/proof ledger. Do not confuse unimplemented features with host capability limitations.
 
 ## Product in one sentence
 
@@ -13,12 +17,13 @@ Mihari is a Windows-local diagnostic HTTP(S) proxy that observes where enterpris
 ## Hard constraints
 
 - Windows PowerShell 5.1 is the language/runtime compatibility floor.
-- PowerShell 7 must run the same code.
+- PowerShell 7 must run the same core code; Phase 2 may expose richer native HTTP/2 capabilities only on runtimes proven to support them.
 - Runtime implementation is PowerShell plus platform .NET/Windows APIs already present on the host.
 - No Node.js, Python, separately built .NET application, native helper, external PowerShell module, package manager, or embedded C# source compilation.
+- Self-contained browser HTML/CSS/JavaScript is allowed; no frontend build-system or CDN dependency.
 - Keep `mihari.ps1` thin. Put behavior in small `src/*.ps1` files.
-- Initial protocol baseline is HTTP/1.1 + CONNECT + TLS 1.2.
-- TLS 1.3 interception, HTTP/2 parsing, HTTP/3, QUIC, packet capture, and kernel drivers are out of scope unless the task explicitly changes scope.
+- Initial protocol baseline is HTTP/1.1 + CONNECT + TLS 1.2. Phase 2 explicitly authorizes streaming, persistent HTTP/1.1, SSE/WebSocket connection diagnostics, browser-assisted HTTP/2, and gated native HTTP/2.
+- TLS 1.3 interception, HTTP/3/QUIC analysis, packet capture, and kernel drivers remain out of scope. Opaque tunnel transport is not native protocol inspection.
 - Do not change global/system proxy settings as part of the normal browser workflow.
 - Do not bypass enterprise proxies, TLS controls, firewall policy, or certificate validation.
 - Do not persist CA private keys.
@@ -34,11 +39,11 @@ A connection timeout is a fact. "The proxy blocked it" is not justified by that 
 
 A concrete HTTP 407 from an explicit upstream proxy supports `upstream_proxy_auth_required`.
 
-A concrete HTTP 403 from an explicit upstream proxy supports `upstream_proxy_rejected`, but not a claim about the proxy's internal rule.
+A concrete HTTP 403 rejecting CONNECT supports rejection by the immediate upstream proxy, but not a claim about its internal rule. A 403 on an origin request through a proxy does not by itself establish who originally generated the response.
 
-Inspect mode failing while a comparable Tunnel connection succeeds supports `tls_interception_incompatible`. It does not prove certificate pinning or mTLS individually.
+Inspect mode failing while a comparable Tunnel trial succeeds supports interception incompatibility only to the extent supported by the trial evidence. It does not prove certificate pinning or mTLS individually. Tunnel bytes alone do not prove application success, and changing the HTTP version at the same time invalidates a one-variable comparison.
 
-Every diagnosis must point to concrete event/connection/request evidence and preserve ambiguity when the endpoint cannot see the upstream cause.
+Every diagnosis must point to concrete event/connection/request evidence and preserve ambiguity when the endpoint cannot see the upstream cause. Keep tool health separate from traffic failures. Browser, proxy, Windows, operator, and imported evidence must retain their distinct provenance.
 
 ## Enterprise topology model
 
@@ -79,7 +84,7 @@ One active Inspect session owns one ephemeral root CA.
 
 If the host lacks the X.509 APIs required to issue an exact-host leaf and use it with `SslStream` through the temporary user-key-file path, Inspect capability must fail explicitly. Do not satisfy compatibility by installing leaves in certificate stores.
 
-Upstream TLS uses normal OS/.NET trust validation. Validation failures are evidence.
+Upstream TLS uses normal OS/.NET trust validation. Validation failures are evidence. Record not-performed/unavailable checks honestly rather than implying a full validation suite ran. Local inspection exclusions must never change enterprise routing.
 
 ## HTTP implementation rules
 
@@ -96,7 +101,7 @@ Do not treat an HTTP connection as an arbitrary text stream.
 - Never write Authorization, Proxy-Authorization, Cookie, or Set-Cookie values to events.
 - Reject ambiguous authority routing rather than forwarding to an unexpected host.
 
-Prefer a small parser that is tested exhaustively over a large proxy abstraction.
+Prefer a small parser that is tested exhaustively over a large proxy abstraction. Phase 2 separates framing from streaming body relay and must not retain whole bodies merely to render URL/timing information.
 
 ## CONNECT modes
 
@@ -106,9 +111,9 @@ Open/resolve the upstream path, send success to the client when viable, then rel
 
 ### Inspect
 
-Acknowledge CONNECT, perform TLS 1.2 server authentication using the generated destination leaf, parse HTTP/1.1, then establish the upstream connection/TLS leg and forward the HTTP request.
+The initial HTTP/1.1 path acknowledges CONNECT, performs TLS 1.2 server authentication using the generated destination leaf, parses HTTP/1.1, then establishes the upstream connection/TLS leg and forwards the request. Phase 2 extends protocol handling only as specified in its architecture.
 
-Tunnel is the diagnostic control for Inspect. Keep their connection metadata comparable.
+Tunnel is the diagnostic control for Inspect. Keep their connection metadata comparable. Pin mode/profile at accepted-connection boundaries; existing persistent connections and streams do not silently change mode.
 
 ## Concurrency
 
@@ -141,7 +146,7 @@ Keep the event writer synchronized. A partial line is a defect.
 
 Normalize common failures into stable Mihari error codes while also retaining the .NET exception type/message after secret-safe sanitization.
 
-Do not put diagnosis logic in the event writer.
+Do not put diagnosis logic in the event writer. Phase 2 adds source/sequence/trial/transport-leg identity with explicit schema compatibility. Session findings and totals must not depend on the current UI page size. Do not rewrite legacy evidence.
 
 ## Session and cleanup
 
@@ -151,7 +156,7 @@ Persist only non-secret session metadata required for status, report, and stale 
 
 Normal stop must always attempt CA cleanup in a `finally` path.
 
-Stale cleanup must require positive Mihari ownership markers. Never remove arbitrary certificates based only on age or issuer similarity.
+Stale cleanup must require positive Mihari ownership markers. Never remove arbitrary certificates based only on age or issuer similarity. Never delete unverified user key files or kill unrelated browser profiles.
 
 ## Browser launcher
 
@@ -165,9 +170,11 @@ Do not reuse the user's normal profile by default.
 
 If browser discovery fails, report the proxy endpoint and continue to support manual configuration.
 
+For Phase 2 browser observation, attach only to a Mihari-owned diagnostic profile. Honor enterprise restrictions and distinguish requested switches from observed behavior. Do not retain raw DevTools messages, bodies, or debugger control endpoints in evidence.
+
 ## PowerShell 5.1 discipline
 
-Avoid PowerShell 7-only syntax, including:
+Avoid PowerShell 7-only syntax in shared code, including:
 
 - ternary expressions;
 - null-coalescing operators;
@@ -176,7 +183,7 @@ Avoid PowerShell 7-only syntax, including:
 
 Prefer ordinary functions and `[pscustomobject]` data contracts over deep class hierarchies.
 
-Use .NET APIs only when they exist in the supported Windows PowerShell environment; capability-check uncertain APIs at startup.
+Use .NET APIs only when they exist in the supported Windows PowerShell environment; capability-check uncertain APIs at startup. Optional richer-runtime features must not prevent the shared runtime from parsing/loading on 5.1.
 
 Be careful with `ConvertTo-Json` depth and enum/date serialization. Event output must be deterministic enough for tests.
 
@@ -216,6 +223,8 @@ Never add "temporary" debug logging of those values.
 
 Bind the proxy to loopback only unless a future explicit requirement changes that contract.
 
+The management API must retain loopback Host/Origin checks and protect state-changing actions. Treat imported evidence, notes, URLs, and error text as untrusted data. Offline review must not create CA trust or expose live mutation actions.
+
 ## Testing
 
 Do not require Pester or any downloaded test dependency.
@@ -237,13 +246,15 @@ Prioritize tests that prove the product contract:
 9. abnormal/stale cleanup;
 10. end-to-end local smoke test.
 
+Phase 2 adds the acceptance proofs in `docs/architecture-phase-2.md`, including real UI actions, history-independent findings, controlled comparisons, source provenance, browser-assisted HTTP/2, bounded streaming, and safe export/import. Native HTTP/2 support requires its own positive runtime-specific proof.
+
 Certificate tests must use unique names and remove their artifacts in `finally`.
 
-Tests must not depend on public Internet access.
+Tests must not depend on public Internet access. Batch integration pushes and reuse suite structure instead of adding a CI job for every feature. Preserve coverage when consolidating probes; final implementation HEAD must have passing required Windows CI.
 
 ## Implementation order
 
-When building from an empty repository, converge in this order:
+For Phase 2, follow the milestone/dependency table in `docs/architecture-phase-2.md`. The following initial implementation order is retained as historical context for the core runtime, not as a replacement for Phase 2 delivery:
 
 1. compatibility/capability probe;
 2. session/event contracts;
@@ -258,36 +269,16 @@ When building from an empty repository, converge in this order:
 11. cleanup hardening;
 12. Windows PowerShell 5.1 + PowerShell 7 CI smoke.
 
-The CA/leaf proof is the earliest technical risk. Resolve it before spending time on polish.
-
 ## Parallel-agent guidance
 
 Parallelize by file ownership and integration seam, not by asking many agents to redesign the system.
 
-Good independent workstreams after contracts are fixed:
+Keep one integration owner responsible for shared contracts, coherent main checkpoints, and end-to-end verification. Use isolated local worktrees for overlapping workstreams rather than concurrent edits to the same working tree. Subagents return concrete changes or findings, not competing architectures.
 
-- certificate/TLS;
-- HTTP parsing/redaction;
-- observation/diagnosis;
-- listener/tunnel;
-- upstream resolution;
-- browser/session lifecycle;
-- tests/CI.
+Phase 2 explicitly permits coordinator-owned direct commits/pushes to main. Local scratch branches/worktrees are allowed for isolation; feature Issues/PRs and review waits are not required. Do not force-push main or discard unrelated work.
 
-Keep one integration owner responsible for data contracts and the end-to-end path. Subagents should return concrete patches or findings, not competing architectures.
+## Definition of done
 
-## Definition of done for the initial implementation
+The initial implementation remains protected by its Windows CI smoke proofs: HTTP proxying, CONNECT tunnel, TLS 1.2 Inspect path capture, facts/report generation, exact session CA removal, no leaf-store residue, and no third-party runtime/package requirement.
 
-"Implemented" means a Windows CI smoke test proves:
-
-- both Windows PowerShell 5.1 and PowerShell 7 can run Mihari;
-- HTTP proxying works;
-- CONNECT tunnel works;
-- Inspect mode reads an HTTPS URL path over TLS 1.2;
-- facts are emitted;
-- a report is generated;
-- the session CA is removed;
-- no per-host leaf certificate remains installed;
-- no third-party runtime/package is required.
-
-Do not call the initial implementation complete based only on unit tests or static code review.
+Phase 2 completion additionally requires M0-M5 and the exact verification ledger in `docs/architecture-phase-2.md`. Track native HTTP/2 separately through M6. Do not call the work complete based only on static review, mocks, isolated modules, or a green subset of tests.

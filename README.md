@@ -19,8 +19,11 @@ Mihari places a local diagnostic proxy in front of the existing network path. It
 ## Documentation
 
 - [Product requirements](docs/requirements.md)
-- [Target architecture](docs/architecture.md)
+- [Initial runtime architecture](docs/architecture.md)
+- [Phase 2: Enterprise Diagnostic Workbench](docs/architecture-phase-2.md) — approved target, shared contracts, milestone acceptance, parallel workstreams, and staged HTTP/2 capabilities.
 - [Agent implementation guidance](AGENTS.md)
+
+Phase 2 is the next implementation contract, not a claim that the workbench extensions are already available. It preserves the current runtime while adding request-centric investigation, dependencies/allowlist proposals, controlled comparisons, endpoint/browser evidence, streaming, and portable cases. Native HTTP/2 inspection has a separate runtime-specific feasibility gate; it must not be confused with opaque tunneling or browser-assisted diagnostics.
 
 ## Use
 
