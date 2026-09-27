@@ -230,10 +230,9 @@ function Invoke-MihariH2FixtureConnection {
         if ($preface -cne "PRI * HTTP/2.0`r`n`r`nSM`r`n`r`n") { throw 'h2 client connection preface was invalid.' }
         Write-MihariH2FixtureFrame -Stream $tls -Type 4 -Flags 0 -StreamId 0 -Payload ([byte[]]@())
 
-        $rootTransactionCount = 0
         $totalTransactionCount = 0
         $fixtureDeadline = [DateTime]::UtcNow.AddSeconds(12)
-        while ($rootTransactionCount -lt 2 -and $totalTransactionCount -lt 64 -and [DateTime]::UtcNow -lt $fixtureDeadline) {
+        while ($totalTransactionCount -lt 64 -and [DateTime]::UtcNow -lt $fixtureDeadline) {
             $frame = Read-MihariH2FixtureFrame -Stream $tls
             if ($frame.Type -eq 4 -and ($frame.Flags -band 0x01) -eq 0) {
                 Write-MihariH2FixtureFrame -Stream $tls -Type 4 -Flags 1 -StreamId 0 -Payload ([byte[]]@())
@@ -249,8 +248,7 @@ function Invoke-MihariH2FixtureConnection {
             $rootPathObserved = Test-MihariHpackRootPath -HeaderBlock $headerBlock
             $totalTransactionCount++
             $body = [byte[]]@()
-            if ($rootPathObserved) { $rootTransactionCount++ }
-            if ($rootPathObserved -and $rootTransactionCount -eq 1) {
+            if ($rootPathObserved) {
                 $page = '<!doctype html><html><body><script>setTimeout(function(){fetch("/")},500)</script>h2 tunnel fixture</body></html>'
                 $body = [System.Text.Encoding]::UTF8.GetBytes($page)
             }
@@ -264,8 +262,18 @@ function Invoke-MihariH2FixtureConnection {
                 responseBodyBytes = [int]$body.Length
             }
             [System.IO.File]::AppendAllText($TransactionsFile, (ConvertTo-Json -InputObject $record -Compress) + [Environment]::NewLine, [System.Text.Encoding]::UTF8)
+            # Edge may open the script fetch on another h2 connection. Complete
+            # this stream, then send GOAWAY so the serial local fixture accepts
+            # that next connection without holding the first one open.
+            $goaway = New-Object byte[] 8
+            $goaway[0] = [byte](($frame.StreamId -shr 24) -band 0x7f)
+            $goaway[1] = [byte](($frame.StreamId -shr 16) -band 0xff)
+            $goaway[2] = [byte](($frame.StreamId -shr 8) -band 0xff)
+            $goaway[3] = [byte]($frame.StreamId -band 0xff)
+            Write-MihariH2FixtureFrame -Stream $tls -Type 7 -Flags 0 -StreamId 0 -Payload $goaway
+            return
         }
-        if ($rootTransactionCount -lt 2) { throw 'The local h2 fixture did not receive the initial root GET and its delayed script fetch within the bounded stream window.' }
+        throw 'The local h2 fixture did not receive a request HEADERS frame within its bounded stream window.'
     }
     finally {
         if ($null -ne $tls) { $tls.Dispose() }
