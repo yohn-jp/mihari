@@ -185,6 +185,9 @@ function Get-MihariEdgeLaunchArguments {
         $arguments += '--disable-http2'
         $arguments += '--ssl-version-max=tls1.2'
     }
+    elseif ($DiagnosticProfile -eq 'http2-inspect') {
+        $arguments += '--ssl-version-max=tls1.2'
+    }
     if (-not [string]::IsNullOrWhiteSpace($Url)) {
         $arguments += $Url
     }
