@@ -644,7 +644,12 @@ function Stop-MihariSession {
 
     try {
         if ($null -ne $Session.ManagementListener -and (Get-Command Stop-MihariManagementListener -ErrorAction SilentlyContinue)) {
-            Stop-MihariManagementListener -Session $Session
+            $managementStop = Stop-MihariManagementListener -Session $Session
+            if ($null -ne $managementStop -and $null -ne $managementStop.errors) {
+                foreach ($managementCleanupError in @($managementStop.errors)) {
+                    [void]$cleanupErrors.Add(('Management cleanup: {0}' -f [string]$managementCleanupError))
+                }
+            }
         }
         elseif ($null -ne $Session.ManagementListener) {
             $Session.ManagementListener.Stop()
