@@ -173,7 +173,9 @@ try {
     $frame = (Add-MihariHttp2Input -State $upstream -Bytes $goaway -Count $goaway.Length).Items[0]
     $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
     $broken = New-MihariHttp2Direction -Leg client
-    $broken.FirstSettings = $false
+    foreach ($frame in (Add-MihariHttp2Input -State $broken -Bytes $input -Count $input.Length).Items) {
+        $null = Invoke-MihariHttp2Frame -Context $ctx -State $broken -Opposite $upstream -Frame $frame
+    }
     $continuation = New-MihariTestH2Frame -Type 9 -Flags 4 -StreamId 1
     $frame = (Add-MihariHttp2Input -State $broken -Bytes $continuation -Count $continuation.Length).Items[0]
     Assert-MihariTestH2Rejected -Message 'Orphan CONTINUATION must fail.' -Action { Invoke-MihariHttp2Frame -Context $ctx -State $broken -Opposite $upstream -Frame $frame }
