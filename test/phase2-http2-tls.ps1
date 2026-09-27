@@ -16,8 +16,35 @@ $sourceRoot = Join-Path $root 'src'
 . (Join-Path $sourceRoot 'Http2Tls.ps1')
 
 if ($env:OS -ne 'Windows_NT') { Write-Host 'SKIP phase2-http2-tls: Windows certificate fixture required'; return }
+function Start-MihariTestNativeProcess {
+    param([string]$OutputRoot)
+    $executable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' })
+    $entry = Join-Path $root 'mihari.ps1'
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $executable
+    $info.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {0} start -Mode Inspect -Profile http2-inspect -Port 0 -UiPort 0 -MaxWorkers 4 -OutputRoot {1}' -f
+        (ConvertTo-MihariTestProcessArgument -Value $entry), (ConvertTo-MihariTestProcessArgument -Value $OutputRoot)
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy')) { $info.EnvironmentVariables.Remove($name) }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    if (-not $process.Start()) { throw 'Could not start the native profile test process.' }
+    return [pscustomobject]@{ Process = $process; Stdout = $process.StandardOutput.ReadToEndAsync(); Stderr = $process.StandardError.ReadToEndAsync(); OutputRoot = $OutputRoot }
+}
 if (-not (Test-MihariHttp2RuntimeCapability).Available) {
     Assert-MihariTest -Condition ($PSVersionTable.PSEdition -eq 'Desktop') -Message 'PowerShell 7 must expose the positive ALPN gate on this Windows runner.'
+    $gateRoot = Join-Path ([IO.Path]::GetTempPath()) ('mihari-h2-gate-' + [guid]::NewGuid().ToString('N'))
+    $gate = Start-MihariTestNativeProcess -OutputRoot $gateRoot
+    try {
+        Assert-MihariTest -Condition ($gate.Process.WaitForExit(15000)) -Message 'The 5.1 native profile gate must reject before listener startup.'
+        $gate.Process.WaitForExit()
+        Assert-MihariTest -Condition ($gate.Process.ExitCode -ne 0 -and $gate.Stderr.Result -match 'managed ALPN API surface') -Message 'PowerShell 5.1 must reject native Inspect with a precise ALPN reason.'
+        Assert-MihariTest -Condition (-not [IO.File]::Exists((Join-Path $gateRoot 'active-session.json'))) -Message 'A rejected 5.1 native profile must not create a session.'
+    }
+    finally { if (-not $gate.Process.HasExited) { $gate.Process.Kill(); $gate.Process.WaitForExit(5000) }; $gate.Process.Dispose(); if ([IO.Directory]::Exists($gateRoot)) { [IO.Directory]::Delete($gateRoot,$true) } }
     Write-Host 'PASS phase2-http2-tls: Windows PowerShell 5.1 native capability unavailable'
     return
 }
@@ -78,6 +105,10 @@ $client = $null
 $clientTls = $null
 $originWorker = $null
 $proxyWorker = $null
+$endOriginWorker = $null
+$nativeChild = $null
+$nativeMetadata = $null
+$nativeAddOperator = $null
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('mihari-h2-native-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($temp)
 try {
@@ -233,13 +264,81 @@ finally { $Accepted.Dispose() }
     Assert-MihariTest -Condition ($events.Contains('"tlsAlpn":"h2"') -and $events.Contains('"transportLeg":"upstream"')) -Message 'Both native TLS legs must emit measured ALPN evidence.'
     Assert-MihariTest -Condition ($events.Contains('/native-1?token=REDACTED') -and $events.Contains('/native-3?token=REDACTED') -and -not $events.Contains('secret')) -Message 'Native stream facts must retain safe paths for both streams.'
     Assert-MihariTest -Condition ($events.Contains('"statusCode":200') -and $events.Contains('http2.stream')) -Message 'Native h2 response and stream outcomes must be observed.'
-    Write-Host 'PASS phase2-http2-tls: real two-leg ALPN h2, concurrent streams, normal trust, safe evidence'
+
+    # Exercise the actual entry point, listener and CONNECT dispatch, including
+    # the session CA trust/cleanup path. The origin fixture remains loopback.
+    $client.Dispose(); $client = $null
+    $endOriginPowerShell = [PowerShell]::Create()
+    $null = $endOriginPowerShell.AddScript($originScript).AddArgument($originListener).AddArgument($fixture.Leaf).AddArgument($sourceRoot)
+    $endOriginWorker = [pscustomobject]@{ Powershell = $endOriginPowerShell; Async = $endOriginPowerShell.BeginInvoke() }
+    $nativeChild = Start-MihariTestNativeProcess -OutputRoot (Join-Path $temp 'native-session')
+    $nativeAddOperator = Start-MihariTestRootConfirmation -Operation Add -TargetProcessId $nativeChild.Process.Id
+    $nativeMetadata = Wait-MihariTestSession -Child $nativeChild
+    Complete-MihariTestRootConfirmation -Operator $nativeAddOperator
+    Stop-MihariTestRootConfirmation -Operator $nativeAddOperator
+    $nativeAddOperator = $null
+    Assert-MihariTest -Condition ($nativeMetadata.profile -eq 'http2-inspect') -Message 'The running session must pin the native Inspect profile.'
+    $client = [Net.Sockets.TcpClient]::new()
+    $client.Connect('127.0.0.1',[int]$nativeMetadata.actualPort)
+    $proxyStream = $client.GetStream()
+    $connect = [Text.Encoding]::ASCII.GetBytes("CONNECT 127.0.0.1:$originPort HTTP/1.1`r`nHost: 127.0.0.1:$originPort`r`n`r`n")
+    $proxyStream.Write($connect,0,$connect.Length)
+    $proxyStream.Flush()
+    $connectResponse = Read-MihariTestHeaderText -Stream $proxyStream -Context 'native Inspect CONNECT response'
+    Assert-MihariTest -Condition ($connectResponse.StartsWith('HTTP/1.1 200')) -Message 'The production listener must acknowledge native Inspect CONNECT.'
+    $clientTls = [Net.Security.SslStream]::new($proxyStream,$true)
+    $clientTls.ReadTimeout = 15000; $clientTls.WriteTimeout = 15000
+    $options = New-MihariHttp2TlsOptions -Role Client -TargetHost '127.0.0.1'
+    Invoke-MihariHttp2TlsAuthentication -Tls $clientTls -Options $options -Role Client
+    Assert-MihariTest -Condition ((Get-MihariHttp2NegotiatedProtocol -Tls $clientTls) -eq 'h2') -Message 'The production session leaf must negotiate native h2.'
+    $clientTls.Write($preface,0,$preface.Length)
+    $clientTls.Write($settings,0,$settings.Length)
+    $encoder = New-MihariHpackContext -MaxTableSize 4096
+    foreach ($id in @(1,3)) {
+        $block = Encode-MihariHpackBlock -Context $encoder -Headers @(
+            [pscustomobject]@{ name = ':method'; value = 'GET' },
+            [pscustomobject]@{ name = ':scheme'; value = 'https' },
+            [pscustomobject]@{ name = ':authority'; value = ('127.0.0.1:' + $originPort) },
+            [pscustomobject]@{ name = ':path'; value = ('/entry-' + $id + '?token=entry-secret') }
+        )
+        $headers = New-MihariTestNativeFrame -Type 1 -Flags 5 -StreamId $id -Payload $block
+        $clientTls.Write($headers,0,$headers.Length)
+    }
+    $clientTls.Flush()
+    $completed = @{}
+    while ($completed.Count -lt 2) {
+        $frame = Read-MihariTestNativeFrame -Stream $clientTls
+        if ($frame.Type -eq 4 -and ($frame.Flags -band 1) -eq 0) {
+            $ack = New-MihariTestNativeFrame -Type 4 -Flags 1 -StreamId 0
+            $clientTls.Write($ack,0,$ack.Length)
+        }
+        if ($frame.Type -eq 0 -and ($frame.Flags -band 1) -ne 0) { $completed[$frame.StreamId] = [Text.Encoding]::ASCII.GetString($frame.Payload) }
+    }
+    Assert-MihariTest -Condition ($completed[1] -eq 'response-1' -and $completed[3] -eq 'response-3') -Message 'Production CONNECT must carry both native h2 streams.'
+    $clientTls.Dispose(); $clientTls = $null
+    $client.Dispose(); $client = $null
+    Complete-MihariTestNativeWorker -Worker $endOriginWorker -Name 'End-to-end origin'
+    $nativeFinal = Stop-MihariTestSession -Child $nativeChild -Metadata $nativeMetadata
+    $endEvents = [IO.File]::ReadAllText([string]$nativeFinal.eventsPath)
+    Assert-MihariTest -Condition ($endEvents.Contains('"tlsAlpn":"h2"') -and $endEvents.Contains('/entry-1?token=REDACTED') -and $endEvents.Contains('/entry-3?token=REDACTED')) -Message 'Production JSONL must contain actual ALPN and safe path observations.'
+    Assert-MihariTest -Condition (-not $endEvents.Contains('entry-secret') -and $endEvents.Contains('"statusCode":200')) -Message 'Production events must exclude query secrets and retain response status.'
+    Write-Host 'PASS phase2-http2-tls: direct and production CONNECT two-leg h2, concurrent streams, normal trust, CA cleanup'
 }
 finally {
     if ($null -ne $clientTls) { $clientTls.Dispose() }
     if ($null -ne $client) { $client.Dispose() }
     if ($null -ne $proxyWorker) { try { $proxyWorker.Powershell.Stop() } catch { $null = $_ }; $proxyWorker.Powershell.Dispose() }
     if ($null -ne $originWorker) { try { $originWorker.Powershell.Stop() } catch { $null = $_ }; $originWorker.Powershell.Dispose() }
+    if ($null -ne $endOriginWorker) { try { $endOriginWorker.Powershell.Stop() } catch { $null = $_ }; $endOriginWorker.Powershell.Dispose() }
+    if ($null -ne $nativeAddOperator) { Stop-MihariTestRootConfirmation -Operator $nativeAddOperator }
+    if ($null -ne $nativeChild) {
+        if ($null -ne $nativeMetadata -and $null -eq $nativeChild.PSObject.Properties['StopAttempted']) {
+            try { $null = Stop-MihariTestSession -Child $nativeChild -Metadata $nativeMetadata }
+            catch { Write-Warning ('Native session cleanup failed: ' + $_.Exception.Message) }
+        }
+        if (-not $nativeChild.Process.HasExited) { try { $nativeChild.Process.Kill(); $nativeChild.Process.WaitForExit(5000) } catch { Write-Warning ('Native child termination failed: ' + $_.Exception.Message) } }
+        $nativeChild.Process.Dispose()
+    }
     if ($null -ne $proxyListener) { $proxyListener.Stop() }
     if ($null -ne $originListener) { $originListener.Stop() }
     if ($null -ne $writer) { Close-MihariEventWriter -Writer $writer }
