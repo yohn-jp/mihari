@@ -56,6 +56,24 @@ try {
     Assert-MihariTest -Condition (-not $launchText.Contains('browser-secret')) -Message 'Successful launch metadata must not retain URL query values.'
     $launchMetadata = ConvertFrom-Json -InputObject $launchText -ErrorAction Stop
     Assert-MihariTest -Condition ($launchMetadata.proxiedSchemes.Count -eq 2 -and $launchMetadata.loopbackBypassDisabled -and $launchMetadata.quicDisabled -and $launchMetadata.http2Disabled -and $launchMetadata.nonProxiedWebRtcUdpDisabled -and $launchMetadata.maximumTlsVersion -eq 'tls1.2') -Message 'Session metadata must report the enforced Edge transport policy.'
+
+    $rawReasonResult = New-MihariBrowserLaunchResult -Success $false -Path $null -ProcessId $null `
+        -ProfilePath $null -ProxyEndpoint $null `
+        -Reason 'Launch failed for https://user:password@example.test/path?token=browser-secret'
+    $sanitizedReasonResult = Complete-MihariBrowserLaunch -SessionMetadata $metadataWithReservedPort `
+        -Result $rawReasonResult -UrlProvided $true
+    Assert-MihariTest -Condition (-not $sanitizedReasonResult.Reason.Contains('browser-secret') -and -not $sanitizedReasonResult.Reason.Contains('user:password')) -Message 'Browser launch reason sanitization must redact URL query values and user info.'
+
+    Set-Item -Path Function:\Start-MihariEdgeProcess -Value {
+        param([System.Diagnostics.ProcessStartInfo] $StartInfo)
+        throw 'Failed to start C:\Users\private\Edge\msedge.exe for https://example.test/path?token=browser-secret'
+    }
+    $failedLaunch = Start-MihariBrowser -SessionMetadata $metadataWithReservedPort `
+        -Url 'https://example.test/path?token=browser-secret'
+    Assert-MihariTest -Condition (-not $failedLaunch.Success) -Message 'An Edge process creation error must be reported.'
+    Assert-MihariTest -Condition (-not $failedLaunch.Reason.Contains('C:\Users\private') -and -not $failedLaunch.Reason.Contains('browser-secret')) -Message 'Browser launch reasons must not expose local paths or URL query values.'
+    $launchText = [IO.File]::ReadAllText($launchPath)
+    Assert-MihariTest -Condition (-not $launchText.Contains('C:\Users\private') -and -not $launchText.Contains('browser-secret')) -Message 'Persisted browser launch metadata must not expose local paths or URL query values.'
     Write-Host 'PASS browser: Edge uses an isolated profile and Mihari proxy, including loopback, while restricting unsupported transports'
 }
 finally {

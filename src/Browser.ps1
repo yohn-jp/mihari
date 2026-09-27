@@ -198,6 +198,29 @@ function Complete-MihariBrowserLaunch {
         [bool] $UrlProvided
     )
 
+    if (-not [string]::IsNullOrWhiteSpace([string]$Result.Reason)) {
+        $safeReason = [string]$Result.Reason
+        if (Get-Command -Name 'ConvertTo-MihariSafeText' -CommandType Function -ErrorAction SilentlyContinue) {
+            $safeReason = ConvertTo-MihariSafeText -Text $safeReason
+        }
+        else {
+            # Browser.ps1 can be loaded on its own by repository-owned tests.
+            # Keep the same query-value redaction at that boundary.
+            $safeReason = [System.Text.RegularExpressions.Regex]::Replace(
+                $safeReason,
+                '([?&][^=&#\s]+)=([^&#\s]*)',
+                '$1=[REDACTED]'
+            )
+            $safeReason = [System.Text.RegularExpressions.Regex]::Replace(
+                $safeReason,
+                '(?i)(https?://)[^/\s?#@]+@',
+                '$1[REDACTED]@'
+            )
+        }
+        if ($safeReason.Length -gt 512) { $safeReason = $safeReason.Substring(0, 512) }
+        $Result.Reason = $safeReason
+    }
+
     $outputDirectory = [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'outputDirectory')
     if ([string]::IsNullOrWhiteSpace($outputDirectory)) {
         return $Result
@@ -231,7 +254,7 @@ function Complete-MihariBrowserLaunch {
         [System.IO.File]::WriteAllText($metadataPath, $json, [System.Text.Encoding]::UTF8)
     }
     catch {
-        $writeFailure = 'Could not write browser launch metadata: {0}: {1}' -f $_.Exception.GetType().FullName, $_.Exception.Message
+        $writeFailure = 'Could not write browser launch metadata ({0}).' -f $_.Exception.GetType().FullName
         if ([string]::IsNullOrWhiteSpace([string]$Result.Reason)) {
             $Result.Reason = $writeFailure
         }
@@ -293,7 +316,7 @@ function Start-MihariBrowser {
         [void][System.IO.Directory]::CreateDirectory($profilePath)
     }
     catch {
-        $reason = 'Could not create the temporary Edge profile: {0}: {1}' -f $_.Exception.GetType().FullName, $_.Exception.Message
+        $reason = 'Could not create the temporary Edge profile ({0}).' -f $_.Exception.GetType().FullName
         $result = New-MihariBrowserLaunchResult -Success $false -Path $edgePath -ProcessId $null `
             -ProfilePath $profilePath -ProxyEndpoint $proxyEndpoint -Reason $reason
         return (Complete-MihariBrowserLaunch -SessionMetadata $SessionMetadata -Result $result `
@@ -327,7 +350,7 @@ function Start-MihariBrowser {
             -UrlProvided (-not [string]::IsNullOrWhiteSpace($Url)))
     }
     catch {
-        $reason = 'Microsoft Edge could not be started: {0}: {1}' -f $_.Exception.GetType().FullName, $_.Exception.Message
+        $reason = 'Microsoft Edge could not be started ({0}).' -f $_.Exception.GetType().FullName
         $result = New-MihariBrowserLaunchResult -Success $false -Path $edgePath -ProcessId $null `
             -ProfilePath $profilePath -ProxyEndpoint $proxyEndpoint -Reason $reason
         return (Complete-MihariBrowserLaunch -SessionMetadata $SessionMetadata -Result $result `
