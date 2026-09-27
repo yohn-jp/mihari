@@ -87,15 +87,25 @@ try {
     $startMarker = Add-MihariMarker -CaseRoot $caseRoot -TrialId $trial.trialId -Boundary start -Label 'Upload' -TimestampUtc $markerStart
     $endMarker = Add-MihariMarker -CaseRoot $caseRoot -TrialId $trial.trialId -Boundary end -Label 'Upload' -Note 'Done' -TimestampUtc $markerEnd
     Assert-MihariTest -Condition ($startMarker.markerId -ne $endMarker.markerId -and $startMarker.timestamp -eq $startMarker.timestampUtc) -Message 'Operation boundaries need distinct timestamped marker identities.'
+    $loginTimestamp = $eventTimestamp.AddMinutes(-2)
+    $loginMarkerStart = Add-MihariMarker -CaseRoot $caseRoot -TrialId $trial.trialId -Boundary start -Label 'Login' -TimestampUtc $loginTimestamp.AddSeconds(-5)
+    $loginMarkerEnd = Add-MihariMarker -CaseRoot $caseRoot -TrialId $trial.trialId -Boundary end -Label 'Login' -TimestampUtc $loginTimestamp.AddSeconds(5)
+    $loginTimestampText = $loginTimestamp.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    $afterUploadTimestampText = $eventTimestamp.AddMinutes(1).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
 
     $events = @(
-        (New-MihariCaseDependencyEvent -EventId 'event-r1-request' -SessionId $trial.sessionId -RequestId 'request-r1' -ConnectionId 'connection-r1' -Sequence 1 -TrialId $trial.trialId -HostName 'UPLOAD.EXAMPLE.TEST.' -Path ('/files?token=' + $querySecret) -Method POST -Timestamp $eventTimestampText),
-        (New-MihariCaseDependencyEvent -EventId 'event-r1-response' -SessionId $trial.sessionId -RequestId 'request-r1' -ConnectionId 'connection-r1' -Sequence 2 -TrialId $trial.trialId -HostName 'upload.example.test' -Path ('/files?token=' + $querySecret) -Method POST -Stage 'upstream.http' -Outcome 'succeeded' -StatusCode 200 -Timestamp $eventTimestampText),
-        (New-MihariCaseDependencyEvent -EventId 'event-r2-request' -SessionId $trial.sessionId -RequestId 'request-r2' -ConnectionId 'connection-r2' -Sequence 3 -TrialId $trial.trialId -HostName 'upload.example.test' -Path ('/files?token=' + $querySecret) -Method POST -Timestamp $eventTimestampText),
-        (New-MihariCaseDependencyEvent -EventId 'event-r2-response' -SessionId $trial.sessionId -RequestId 'request-r2' -ConnectionId 'connection-r2' -Sequence 4 -TrialId $trial.trialId -HostName 'upload.example.test' -Path ('/files?token=' + $querySecret) -Method POST -Stage 'upstream.http' -Outcome 'succeeded' -StatusCode 200 -Timestamp $eventTimestampText),
-        (New-MihariCaseDependencyEvent -EventId 'event-r3' -SessionId $trial.sessionId -RequestId 'request-r3' -ConnectionId 'connection-r3' -Sequence 5 -TrialId $trial.trialId -HostName 'upload.example.test' -Path '/files/42' -Method GET -Timestamp $eventTimestampText),
-        (New-MihariCaseDependencyEvent -EventId 'event-r4' -SessionId $trial.sessionId -RequestId 'request-r4' -ConnectionId 'connection-r4' -Sequence 6 -TrialId $trial.trialId -HostName 'upload.example.test' -Path '/filesystem' -Method GET -Timestamp $eventTimestampText)
+        (New-MihariCaseDependencyEvent -EventId 'event-login-request' -SessionId $trial.sessionId -RequestId 'request-login' -ConnectionId 'connection-login' -Sequence 1 -TrialId $trial.trialId -HostName 'identity.example.test' -Path ('/api/session?tenant=' + $querySecret) -Method POST -Timestamp $loginTimestampText),
+        (New-MihariCaseDependencyEvent -EventId 'event-login-response' -SessionId $trial.sessionId -RequestId 'request-login' -ConnectionId 'connection-login' -Sequence 2 -TrialId $trial.trialId -HostName 'identity.example.test' -Path ('/api/session?tenant=' + $querySecret) -Method POST -Stage 'upstream.http' -Outcome 'succeeded' -StatusCode 204 -Timestamp $loginTimestampText),
+        (New-MihariCaseDependencyEvent -EventId 'event-r1-request' -SessionId $trial.sessionId -RequestId 'request-r1' -ConnectionId 'connection-r1' -Sequence 3 -TrialId $trial.trialId -HostName 'UPLOAD.EXAMPLE.TEST.' -Path ('/files?token=' + $querySecret) -Method POST -Timestamp $eventTimestampText),
+        (New-MihariCaseDependencyEvent -EventId 'event-r1-response' -SessionId $trial.sessionId -RequestId 'request-r1' -ConnectionId 'connection-r1' -Sequence 4 -TrialId $trial.trialId -HostName 'upload.example.test' -Path ('/files?token=' + $querySecret) -Method POST -Stage 'upstream.http' -Outcome 'succeeded' -StatusCode 200 -Timestamp $eventTimestampText),
+        (New-MihariCaseDependencyEvent -EventId 'event-r2-request' -SessionId $trial.sessionId -RequestId 'request-r2' -ConnectionId 'connection-r2' -Sequence 5 -TrialId $trial.trialId -HostName 'upload.example.test' -Path ('/files?token=' + $querySecret) -Method POST -Timestamp $eventTimestampText),
+        (New-MihariCaseDependencyEvent -EventId 'event-r2-response' -SessionId $trial.sessionId -RequestId 'request-r2' -ConnectionId 'connection-r2' -Sequence 6 -TrialId $trial.trialId -HostName 'upload.example.test' -Path ('/files?token=' + $querySecret) -Method POST -Stage 'upstream.http' -Outcome 'succeeded' -StatusCode 200 -Timestamp $eventTimestampText),
+        (New-MihariCaseDependencyEvent -EventId 'event-r3' -SessionId $trial.sessionId -RequestId 'request-r3' -ConnectionId 'connection-r3' -Sequence 7 -TrialId $trial.trialId -HostName 'upload.example.test' -Path '/files/42' -Method POST -Timestamp $eventTimestampText),
+        (New-MihariCaseDependencyEvent -EventId 'event-r3-response' -SessionId $trial.sessionId -RequestId 'request-r3' -ConnectionId 'connection-r3' -Sequence 8 -TrialId $trial.trialId -HostName 'upload.example.test' -Path '/files/42' -Method POST -Stage 'upstream.http' -Outcome 'succeeded' -StatusCode 201 -Timestamp $eventTimestampText),
+        (New-MihariCaseDependencyEvent -EventId 'event-r4' -SessionId $trial.sessionId -RequestId 'request-r4' -ConnectionId 'connection-r4' -Sequence 9 -TrialId $trial.trialId -HostName 'upload.example.test' -Path '/filesystem' -Method GET -Timestamp $afterUploadTimestampText)
     )
+    $fixtureSequence = [string]::Join(',', @($events | ForEach-Object { [string]$_.sequence }))
+    Assert-MihariTest -Condition ($fixtureSequence -eq '1,2,3,4,5,6,7,8,9') -Message 'Fixture events must preserve the canonical session sequence contract.'
     $projection = Get-MihariDependencyProjection -Events $events -CaseRoot $caseRoot
     $uploadDependency = @($projection.items | Where-Object { $_.path -eq '/files?token=[REDACTED]' })[0]
     Assert-MihariTest -Condition ($null -ne $uploadDependency -and $uploadDependency.attemptCount -eq 2) -Message 'Two direct request IDs for the same URL must remain two attempts even at the same timestamp.'
@@ -103,12 +113,16 @@ try {
     Assert-MihariTest -Condition ($uploadDependency.operationLabel -eq 'Upload' -and $uploadDependency.operationAttribution -eq 'heuristic_marker_window') -Message 'Marker windows may group requests by an explicitly labelled operation only as a heuristic.'
     Assert-MihariTest -Condition ($uploadDependency.businessOutcome -eq 'unknown') -Message 'An HTTP response must not be presented as business success.'
     Assert-MihariTest -Condition ($uploadDependency.path -notmatch [regex]::Escape($querySecret)) -Message 'Dependency paths must not retain query values.'
+    $loginDependency = @($projection.items | Where-Object { $_.host -eq 'identity.example.test' -and $_.path -eq '/api/session?tenant=[REDACTED]' })[0]
+    Assert-MihariTest -Condition ($null -ne $loginDependency -and $loginDependency.operationLabel -eq 'Login' -and $loginDependency.operationAttribution -eq 'heuristic_marker_window' -and $loginDependency.attemptCount -eq 1 -and $loginDependency.successfulHttpResponseCount -eq 1) -Message 'The login fixture must project as its own marker-attributed, response-backed dependency.'
+    $uploadActionDependency = @($projection.items | Where-Object { $_.host -eq 'upload.example.test' -and $_.path -eq '/files/42' })[0]
+    Assert-MihariTest -Condition ($null -ne $uploadActionDependency -and $uploadActionDependency.methods -contains 'POST' -and $uploadActionDependency.successfulHttpResponseCount -eq 1 -and $uploadActionDependency.operationLabel -eq 'Upload') -Message 'The upload fixture must project separately with its direct HTTP response evidence.'
 
     $firstDependencyPage = Get-MihariDependencyProjection -Events $events -CaseRoot $caseRoot -MaximumItems 1
     Assert-MihariTest -Condition ($null -ne $firstDependencyPage.nextCursor -and $firstDependencyPage.scopeTotal -gt 1) -Message 'Dependency projections need a stable bounded cursor and full scope total.'
     $secondDependencyPage = Get-MihariDependencyProjection -Events $events -CaseRoot $caseRoot -MaximumItems 1 -Cursor $firstDependencyPage.nextCursor
     Assert-MihariTest -Condition ($secondDependencyPage.items.Count -eq 1 -and $secondDependencyPage.items[0].dependencyId -ne $firstDependencyPage.items[0].dependencyId) -Message 'Dependency cursor paging must not repeat rows.'
-    $changedEvents = @($events) + @((New-MihariCaseDependencyEvent -EventId 'event-r5-new' -SessionId $trial.sessionId -RequestId 'request-r5' -ConnectionId 'connection-r5' -Sequence 7 -TrialId $trial.trialId -HostName 'second.example.test' -Path '/new' -Method GET -Timestamp $eventTimestampText))
+    $changedEvents = @($events) + @((New-MihariCaseDependencyEvent -EventId 'event-r5-new' -SessionId $trial.sessionId -RequestId 'request-r5' -ConnectionId 'connection-r5' -Sequence 10 -TrialId $trial.trialId -HostName 'second.example.test' -Path '/new' -Method GET -Timestamp $eventTimestampText))
     Assert-MihariCaseDependencyThrows -Action {
         Get-MihariDependencyProjection -Events $changedEvents -CaseRoot $caseRoot -MaximumItems 1 -Cursor $firstDependencyPage.nextCursor
     } -Message 'A dependency cursor must be invalidated when its source events change.'
@@ -159,9 +173,24 @@ try {
     } -Message 'Business necessity cannot be classified without an explicit confirmation action.'
     $confirmed = Set-MihariDependencyNecessity -CaseRoot $caseRoot -Dependency $filesChild -State business_required_confirmed -ConfirmBusinessRequired -Rationale 'Required for the upload workflow.'
     Assert-MihariTest -Condition ($confirmed.explicitConfirmation -eq $true -and $confirmed.evidenceReferences.Count -gt 0) -Message 'Necessity confirmation must persist explicit operator action and event evidence.'
+    $loginConfirmed = Set-MihariDependencyNecessity -CaseRoot $caseRoot -Dependency $loginDependency -State business_required_confirmed -ConfirmBusinessRequired -Rationale 'Required to establish the enterprise login session.'
+    Assert-MihariTest -Condition ($loginConfirmed.explicitConfirmation -eq $true -and $loginConfirmed.evidenceReferences.Count -gt 0) -Message 'Login necessity also requires an explicit operator confirmation tied to observed evidence.'
     $confirmedProjection = Get-MihariDependencyProjection -Events $events -CaseRoot $caseRoot
     $confirmedChild = @($confirmedProjection.items | Where-Object { $_.path -eq '/files/42' })[0]
+    $confirmedLogin = @($confirmedProjection.items | Where-Object { $_.host -eq 'identity.example.test' -and $_.path -eq '/api/session?tenant=[REDACTED]' })[0]
     Assert-MihariTest -Condition ($confirmedChild.necessityState -eq 'business_required_confirmed') -Message 'The dependency projection must replay its latest necessity confirmation.'
+    Assert-MihariTest -Condition ($confirmedLogin.necessityState -eq 'business_required_confirmed') -Message 'The login dependency must replay its own necessity confirmation.'
+    $loginUploadProposals = New-MihariPolicyProposals -Dependencies @($confirmedChild, $confirmedLogin) -PolicyComparison $exactComparison -PathMatch exact
+    $loginProposal = @($loginUploadProposals.items | Where-Object { $_.dependencyId -eq $confirmedLogin.dependencyId })[0]
+    $uploadProposal = @($loginUploadProposals.items | Where-Object { $_.dependencyId -eq $confirmedChild.dependencyId })[0]
+    $fixtureEvidenceIds = @($events | Select-Object -ExpandProperty eventId)
+    Assert-MihariTest -Condition ($loginUploadProposals.items.Count -eq 2 -and $loginProposal.proposalType -eq 'url_allowlist' -and $uploadProposal.proposalType -eq 'url_allowlist' -and $loginProposal.proposalStatus -eq 'candidate' -and $uploadProposal.proposalStatus -eq 'candidate') -Message 'A login/upload case must produce distinct exact URL allowlist proposals after necessity confirmation.'
+    Assert-MihariTest -Condition ($loginProposal.matchType -eq 'exact' -and $loginProposal.host -eq 'identity.example.test' -and $loginProposal.path -eq '/api/session' -and $uploadProposal.matchType -eq 'exact' -and $uploadProposal.host -eq 'upload.example.test' -and $uploadProposal.path -eq '/files/42') -Message 'Login and upload proposals must preserve their distinct observed authorities and exact paths.'
+    Assert-MihariTest -Condition ($loginProposal.evidenceReferences.Count -gt 0 -and $uploadProposal.evidenceReferences.Count -gt 0 -and @($loginProposal.evidenceReferences | Where-Object { $_.eventId -notin $fixtureEvidenceIds }).Count -eq 0 -and @($uploadProposal.evidenceReferences | Where-Object { $_.eventId -notin $fixtureEvidenceIds }).Count -eq 0) -Message 'Both proposals must drill down to the canonical event IDs that produced their dependency evidence.'
+    $loginProposalEventIds = @($loginProposal.evidenceReferences | ForEach-Object { [string]$_.eventId })
+    $uploadProposalEventIds = @($uploadProposal.evidenceReferences | ForEach-Object { [string]$_.eventId })
+    $sharedProposalEventIds = @($loginProposalEventIds | Where-Object { $_ -in $uploadProposalEventIds })
+    Assert-MihariTest -Condition ($loginProposalEventIds -contains 'event-login-request' -and $loginProposalEventIds -contains 'event-login-response' -and $uploadProposalEventIds -contains 'event-r3' -and $uploadProposalEventIds -contains 'event-r3-response' -and $sharedProposalEventIds.Count -eq 0) -Message 'Login and upload proposals must retain their own disjoint request/response evidence chains.'
 
     $prefixProposalSet = New-MihariPolicyProposals -Dependencies @($confirmedChild) -PolicyComparison $exactComparison -PathMatch pathPrefix
     $prefixProposal = @($prefixProposalSet.items | Where-Object { $_.proposalType -eq 'url_allowlist' })[0]
