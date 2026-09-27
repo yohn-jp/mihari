@@ -127,7 +127,7 @@ function ConvertTo-MihariEvidenceShareValue {
     }
     if ($Value -is [string] -or $Value -is [char] -or $Value -is [DateTime] -or $Value -is [DateTimeOffset]) {
         $text = [string]$Value
-        if ($lower -match '^(host|hostname|proxyhost|upstreamhost)$' -and $Context.Options.maskHosts) {
+        if ($lower -match '^(host|hostname|proxyhost|upstreamhost|destinationhost|targethost)$' -and $Context.Options.maskHosts) {
             return (Get-MihariEvidencePseudonym -Value $text -Kind 'host' -Context $Context)
         }
         if ($lower -match '^(path|requestpath|urlpath)$' -and $Context.Options.maskPaths) {
@@ -153,14 +153,15 @@ function ConvertTo-MihariEvidenceSafeData {
     param([AllowNull()][object]$Data, [Parameter(Mandatory = $true)][object]$Context)
     $allowed = @(
         'host', 'hostname', 'scheme', 'port', 'method', 'path', 'requestPath', 'urlPath', 'url',
-        'statusCode', 'proxyStatus', 'routeKind', 'routeSource', 'proxyHost', 'proxyPort', 'clientEndpoint',
+        'statusCode', 'httpStatusCode', 'responseStatusCode', 'proxyStatus', 'proxyStatusCode', 'routeKind', 'routeSource', 'upstreamKind', 'proxyHost', 'proxyPort', 'clientEndpoint',
         'direction', 'tlsProtocol', 'tlsCipher', 'certificateSubject', 'certificateIssuer', 'certificateThumbprint',
         'certificateNotBefore', 'certificateNotAfter', 'certificateAccepted', 'chainStatus', 'validationState',
-        'errorType', 'errorCode', 'reason', 'errorMessage', 'message', 'unsupportedProtocol', 'mode', 'previousMode',
+        'errorType', 'exceptionType', 'errorCode', 'mihariErrorCode', 'reason', 'errorMessage', 'message', 'unsupportedProtocol', 'mode', 'previousMode',
         'bytesClientToUpstream', 'bytesUpstreamToClient', 'bytesSent', 'bytesReceived', 'firstByteUtc', 'lastByteUtc',
         'requestCount', 'responseCount', 'streamId', 'protocol', 'alpn', 'connectionReuse', 'cacheState', 'source',
         'coverage', 'observed', 'supported', 'available', 'requested', 'effective', 'tlsValidation', 'proxyResponse',
-        'targetHost', 'targetPort', 'upstreamConnectionId', 'localEndpoint', 'remoteEndpoint', 'elapsedMs', 'timeoutMs',
+        'targetHost', 'destinationHost', 'targetPort', 'destinationPort', 'upstreamConnectionId', 'localEndpoint', 'remoteEndpoint', 'elapsedMs', 'timeoutMs',
+        'explicitProxy', 'isExplicitProxy', 'isProxyResponse', 'upstreamProxyResponse', 'responseSource', 'responderKind',
         'timeout', 'cancelled', 'truncated', 'droppedCount', 'queueLength', 'workerOccupancy', 'forwardingDelayMs',
         'writerLagMs', 'memoryBytes', 'cpuPercent', 'retainedBytes', 'firstFailureDirection', 'failureStage', 'result'
     )
@@ -606,8 +607,8 @@ function Export-MihariEvidenceBundle {
         [AllowEmptyCollection()][object[]]$EnvironmentSnapshots = @(), [AllowNull()][object]$CaptureCoverage,
         [AllowNull()][object]$ShareProfile, [string]$RuleVersion = 'unknown', [string]$ApplicationRevision = 'unknown'
     )
-    $contentParameters = @{}
     [void][System.Reflection.Assembly]::Load('System.IO.Compression')
+    $contentParameters = @{}
     foreach ($key in $PSBoundParameters.Keys) {
         if ($key -ne 'DestinationPath') { $contentParameters[$key] = $PSBoundParameters[$key] }
     }
@@ -970,13 +971,18 @@ function Import-MihariEvidenceBundle {
 
 function Read-MihariOfflineEvidenceCase {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$CaseDirectory)
+    param(
+        [Parameter(Mandatory = $true)][string]$CaseDirectory,
+        [ValidateRange(1024, 134217728)][long]$MaximumEvidenceBytes = 67108864,
+        [ValidateRange(1, 100000)][int]$MaximumEvents = 100000
+    )
     $directory = [System.IO.Path]::GetFullPath($CaseDirectory)
     Assert-MihariEvidencePathHasNoReparsePoint -Path $directory
     $manifestPath = [System.IO.Path]::Combine($directory, 'manifest.json')
     if (-not [System.IO.File]::Exists($manifestPath)) { throw 'The offline case has no manifest.' }
     $manifestBytes = [System.IO.File]::ReadAllBytes($manifestPath)
     if ($manifestBytes.Length -gt 1048576) { throw 'The offline case manifest exceeds the configured size limit.' }
+    $totalBytes = [long]$manifestBytes.Length
     $manifest = ConvertFrom-MihariEvidenceJsonBytes -Bytes $manifestBytes -Name 'manifest.json'
     $files = @{}
     foreach ($record in @(Get-MihariEvidenceValue -InputObject $manifest -Name 'files')) {
@@ -985,12 +991,14 @@ function Read-MihariOfflineEvidenceCase {
         $path = [System.IO.Path]::Combine($directory, $name)
         Assert-MihariEvidencePathHasNoReparsePoint -Path $path
         if (-not [System.IO.File]::Exists($path)) { throw ('Offline case file {0} is missing.' -f $name) }
-        if ((New-Object System.IO.FileInfo($path)).Length -gt 134217728) { throw 'An offline case file exceeds the configured size limit.' }
+        $fileLength = (New-Object System.IO.FileInfo($path)).Length
+        if ($fileLength -gt $MaximumEvidenceBytes -or ($totalBytes + $fileLength) -gt $MaximumEvidenceBytes) { throw 'Offline case evidence exceeds the configured size limit.' }
+        $totalBytes += $fileLength
         $files[$name] = [System.IO.File]::ReadAllBytes($path)
     }
     Test-MihariEvidenceManifestFiles -Manifest $manifest -Files $files
     $context = New-MihariEvidenceShareContext -ShareProfile ([pscustomobject]@{ maskHosts = $false; maskUsernames = $false; maskPaths = $false; maskIdentifiers = $false })
-    $events = Read-MihariEvidenceJsonLines -Bytes ([byte[]]$files['events.jsonl']) -Name 'events.jsonl' -Context $context
+    $events = Read-MihariEvidenceJsonLines -Bytes ([byte[]]$files['events.jsonl']) -Name 'events.jsonl' -Context $context -MaximumRecords $MaximumEvents
     $annotations = Read-MihariEvidenceJsonLines -Bytes ([byte[]]$files['annotations.jsonl']) -Name 'annotations.jsonl' -Context $context -MaximumRecords 10000
     $environment = ConvertFrom-MihariEvidenceJsonBytes -Bytes ([byte[]]$files['environment.json']) -Name 'environment.json'
     $original = $null
@@ -1009,10 +1017,13 @@ function Read-MihariOfflineEvidenceCase {
         }
     }
     $importReport = $null
+    $importedUnknownRecordCount = 0
     if ($files.ContainsKey('import-report.json')) {
         $rawReport = ConvertFrom-MihariEvidenceJsonBytes -Bytes ([byte[]]$files['import-report.json']) -Name 'import-report.json'
         $safeUnknown = New-Object 'System.Collections.Generic.List[object]'
-        foreach ($item in @(Get-MihariEvidenceValue -InputObject $rawReport -Name 'unknownRecords')) {
+        $rawUnknownRecords = @(Get-MihariEvidenceValue -InputObject $rawReport -Name 'unknownRecords')
+        $importedUnknownRecordCount = $rawUnknownRecords.Count
+        foreach ($item in $rawUnknownRecords) {
             if ($safeUnknown.Count -ge 10000) { break }
             $line = [int]0
             [void][int]::TryParse([string](Get-MihariEvidenceValue -InputObject $item -Name 'line'), [ref]$line)
@@ -1061,7 +1072,12 @@ function Read-MihariOfflineEvidenceCase {
         case = $safeCase; trials = @($safeTrials.ToArray()); findings = @($safeFindings.ToArray())
         diagnosticProfile = (ConvertTo-MihariEvidenceSafeProfile -Profile (Get-MihariEvidenceValue -InputObject $manifest -Name 'diagnosticProfile') -Context $context)
         environmentSnapshots = @($safeEnvironment); captureCoverage = $safeCoverage
-        shareProfile = (Get-MihariEvidenceValue -InputObject $manifest -Name 'shareProfile')
+        shareProfile = [pscustomobject]@{
+            maskHosts = [bool](Get-MihariEvidenceValue -InputObject (Get-MihariEvidenceValue -InputObject $manifest -Name 'shareProfile') -Name 'maskHosts')
+            maskUsernames = [bool](Get-MihariEvidenceValue -InputObject (Get-MihariEvidenceValue -InputObject $manifest -Name 'shareProfile') -Name 'maskUsernames')
+            maskPaths = [bool](Get-MihariEvidenceValue -InputObject (Get-MihariEvidenceValue -InputObject $manifest -Name 'shareProfile') -Name 'maskPaths')
+            maskIdentifiers = [bool](Get-MihariEvidenceValue -InputObject (Get-MihariEvidenceValue -InputObject $manifest -Name 'shareProfile') -Name 'maskIdentifiers')
+        }
         redactionSummary = [pscustomobject]@{ state = 'safe_projection_applied' }
         import = [pscustomobject]@{ importedAtUtc = (ConvertTo-MihariEvidenceSharedText -Value (Get-MihariEvidenceValue -InputObject (Get-MihariEvidenceValue -InputObject $manifest -Name 'import') -Name 'importedAtUtc') -Context $context -MaximumLength 64) }
         integrity = [pscustomobject]@{ algorithm = 'SHA-256'; sourceBundleHash = [string](Get-MihariEvidenceValue -InputObject (Get-MihariEvidenceValue -InputObject $manifest -Name 'integrity') -Name 'sourceBundleHash'); meaning = 'Modification check only.' }
@@ -1077,7 +1093,8 @@ function Read-MihariOfflineEvidenceCase {
         environment = [pscustomobject]@{ snapshots = @($safeEnvironment); captureCoverage = $safeCoverage }
         originalResult = $original
         importReport = $importReport
-        unknownRecordCount = $events.Unknown.Count
+        unknownRecordCount = ($events.Unknown.Count + $importedUnknownRecordCount)
+        evidenceBytesRead = $totalBytes
     }
 }
 
@@ -1088,21 +1105,68 @@ function New-MihariOfflineReanalysisRecord {
         [Parameter(Mandatory = $true)][string]$RuleVersion,
         [AllowEmptyCollection()][object[]]$Findings = @()
     )
-    $context = New-MihariEvidenceShareContext -ShareProfile (Get-MihariEvidenceValue -InputObject $OfflineCase.manifest -Name 'shareProfile')
+    if ([string]::IsNullOrWhiteSpace($RuleVersion)) { throw 'Offline reanalysis requires an explicit rule version.' }
+    if (@($Findings).Count -gt 5000) { throw 'Offline reanalysis findings exceed the configured record bound.' }
+    # OfflineCase has already passed through the bundle's redaction and
+    # pseudonymization projection. Preserve those stable IDs for drill-down.
+    $context = New-MihariEvidenceShareContext -ShareProfile ([pscustomobject]@{ maskHosts = $false; maskUsernames = $false; maskPaths = $false; maskIdentifiers = $false })
     $safeFindings = New-Object 'System.Collections.Generic.List[object]'
     foreach ($finding in @($Findings)) {
-        if ($safeFindings.Count -ge 5000) { break }
         $safeFindings.Add((ConvertTo-MihariEvidenceSafeFinding -Finding $finding -Context $context))
     }
+    $unknownRecords = 0
+    if ($null -ne $OfflineCase.PSObject.Properties['unknownRecordCount']) { $unknownRecords = [int]$OfflineCase.unknownRecordCount }
     return [pscustomobject]@{
         schemaVersion = 1
-        ruleVersion = ConvertTo-MihariEvidenceSharedText -Value $RuleVersion -Context $context -MaximumLength 128
+        ruleVersion = (ConvertTo-MihariEvidenceSharedText -Value $RuleVersion -Context $context -MaximumLength 128)
         analyzedAtUtc = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
         originalResultPreserved = ($null -ne $OfflineCase.originalResult)
         originalResult = $OfflineCase.originalResult
+        inputEventCount = @($OfflineCase.events).Count
+        unknownRecordCount = $unknownRecords
+        coverage = $(if ($unknownRecords -eq 0) { 'observed' } else { 'unknown' })
         findings = @($safeFindings.ToArray())
         readOnly = $true
     }
+}
+
+function Open-MihariOfflineEvidenceReview {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$CaseDirectory,
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$RuleVersion,
+        [ValidateRange(1024, 67108864)][long]$MaximumEvidenceBytes = 16777216,
+        [ValidateRange(1, 20000)][int]$MaximumEvents = 10000,
+        [ValidateRange(1024, 16777216)][int]$MaximumResultBytes = 4194304
+    )
+    $diagnosisCommand = Get-Command Get-MihariDiagnosis -CommandType Function -ErrorAction SilentlyContinue
+    if ($null -eq $diagnosisCommand) { throw 'The canonical Mihari diagnosis rules are not loaded for offline review.' }
+    $offlineCase = Read-MihariOfflineEvidenceCase -CaseDirectory $CaseDirectory -MaximumEvidenceBytes $MaximumEvidenceBytes -MaximumEvents $MaximumEvents
+    $findings = @(Get-MihariDiagnosis -Events ([object[]]$offlineCase.events))
+    if ($findings.Count -gt 5000) { throw 'Offline reanalysis findings exceed the configured record bound.' }
+    $reanalysis = New-MihariOfflineReanalysisRecord -OfflineCase $offlineCase -RuleVersion $RuleVersion -Findings $findings
+    $review = [pscustomobject]@{
+        readOnly = $true
+        case = $offlineCase
+        reanalysis = $reanalysis
+        limits = [pscustomobject]@{
+            maximumEvidenceBytes = $MaximumEvidenceBytes
+            maximumEvents = $MaximumEvents
+            maximumResultBytes = $MaximumResultBytes
+            evidenceBytesRead = [long]$offlineCase.evidenceBytesRead
+            resultBytes = 0
+        }
+    }
+    for ($attempt = 0; $attempt -lt 4; $attempt++) {
+        $json = ConvertTo-Json -InputObject $review -Depth 32 -Compress
+        $measuredBytes = [System.Text.Encoding]::UTF8.GetByteCount($json)
+        if ($measuredBytes -eq $review.limits.resultBytes) { break }
+        $review.limits.resultBytes = $measuredBytes
+    }
+    $resultBytes = [System.Text.Encoding]::UTF8.GetByteCount((ConvertTo-Json -InputObject $review -Depth 32 -Compress))
+    $review.limits.resultBytes = $resultBytes
+    if ($resultBytes -gt $MaximumResultBytes) { throw 'Offline review response exceeds the configured size limit.' }
+    return $review
 }
 
 function ConvertTo-MihariSafeCsvCell {

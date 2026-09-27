@@ -76,3 +76,22 @@ $plan.eligible | Format-Table bundleId, createdAtUtc, path
 $result = Invoke-MihariEvidenceRetentionCleanup `
     -RootPath $caseRoot -OlderThanUtc $cutoff -ConfirmDeletion
 ```
+
+## Offline review
+
+The application loads `Evidence.ps1` and the existing `Diagnosis.ps1` rules before
+calling `Open-MihariOfflineEvidenceReview`. The helper checks a locally imported
+case directory's file hashes and schema, applies the same diagnosis rules, and
+returns a new rule-versioned result beside the original result. These checks do
+not authenticate the source bundle. It has finite evidence-byte, event-count,
+and serialized-result limits. It does not call session, listener, browser, or
+certificate-trust operations.
+
+```powershell
+$review = Open-MihariOfflineEvidenceReview `
+    -CaseDirectory $savedCaseDirectory `
+    -RuleVersion 'mihari-rules-2026-09' `
+    -MaximumEvidenceBytes 16777216 `
+    -MaximumEvents 10000 `
+    -MaximumResultBytes 4194304
+```
