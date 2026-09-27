@@ -2,11 +2,33 @@
 # retain their own connection IDs even though this byte-preserving relay keeps
 # stream numbers unchanged. No payload or compressed field block is an event.
 
+function Resolve-MihariHttp2Type {
+    param([string]$Name)
+    $found = [type]::GetType($Name, $false)
+    if ($null -ne $found) { return $found }
+    foreach ($assembly in [AppDomain]::CurrentDomain.GetAssemblies()) {
+        $found = $assembly.GetType($Name, $false)
+        if ($null -ne $found) { return $found }
+    }
+    return $null
+}
+
+function Test-MihariHttp2AuthenticationMethod {
+    param([type]$SslType, [type]$OptionsType, [string]$Name)
+    if ($null -eq $OptionsType) { return $false }
+    foreach ($method in $SslType.GetMethods()) {
+        if ($method.Name -ne $Name -and $method.Name -ne ($Name + 'Async')) { continue }
+        $parameters = $method.GetParameters()
+        if ($parameters.Length -gt 0 -and $parameters[0].ParameterType -eq $OptionsType) { return $true }
+    }
+    return $false
+}
+
 function Test-MihariHttp2RuntimeCapability {
     $ssl = [System.Net.Security.SslStream]
-    $server = [type]::GetType('System.Net.Security.SslServerAuthenticationOptions, System.Net.Security')
-    $client = [type]::GetType('System.Net.Security.SslClientAuthenticationOptions, System.Net.Security')
-    $alpn = [type]::GetType('System.Net.Security.SslApplicationProtocol, System.Net.Security')
+    $server = Resolve-MihariHttp2Type -Name 'System.Net.Security.SslServerAuthenticationOptions'
+    $client = Resolve-MihariHttp2Type -Name 'System.Net.Security.SslClientAuthenticationOptions'
+    $alpn = Resolve-MihariHttp2Type -Name 'System.Net.Security.SslApplicationProtocol'
     $members = [ordered]@{
         serverOptions = ($null -ne $server)
         clientOptions = ($null -ne $client)
@@ -14,12 +36,25 @@ function Test-MihariHttp2RuntimeCapability {
         serverProtocols = ($null -ne $server -and $null -ne $server.GetProperty('ApplicationProtocols'))
         clientProtocols = ($null -ne $client -and $null -ne $client.GetProperty('ApplicationProtocols'))
         negotiatedProtocol = ($null -ne $ssl.GetProperty('NegotiatedApplicationProtocol'))
-        serverAuthenticate = ($null -ne $server -and $null -ne $ssl.GetMethod('AuthenticateAsServer', [type[]]@($server)))
-        clientAuthenticate = ($null -ne $client -and $null -ne $ssl.GetMethod('AuthenticateAsClient', [type[]]@($client)))
+        serverAuthenticate = (Test-MihariHttp2AuthenticationMethod -SslType $ssl -OptionsType $server -Name 'AuthenticateAsServer')
+        clientAuthenticate = (Test-MihariHttp2AuthenticationMethod -SslType $ssl -OptionsType $client -Name 'AuthenticateAsClient')
     }
     $available = $true
     foreach ($value in $members.Values) { if (-not $value) { $available = $false } }
     return [pscustomobject]@{ Available = $available; Members = $members; Runtime = [string]$PSVersionTable.PSVersion }
+}
+
+function Get-MihariHttp2NegotiatedProtocol {
+    param([System.Net.Security.SslStream]$Tls)
+    $property = $Tls.GetType().GetProperty('NegotiatedApplicationProtocol')
+    if ($null -eq $property) { return $null }
+    $selected = $property.GetValue($Tls, $null)
+    if ($null -eq $selected) { return $null }
+    $protocol = $selected.GetType().GetProperty('Protocol').GetValue($selected, $null)
+    if ($protocol -is [byte[]]) { return [Text.Encoding]::ASCII.GetString($protocol) }
+    $toArray = $protocol.GetType().GetMethod('ToArray', [type[]]@())
+    if ($null -eq $toArray) { return $null }
+    return [Text.Encoding]::ASCII.GetString([byte[]]$toArray.Invoke($protocol, [object[]]@()))
 }
 
 function Get-MihariHttp2UInt32 {
@@ -399,7 +434,7 @@ function Invoke-MihariHttp2Relay {
     )
     if (-not (Test-MihariHttp2RuntimeCapability).Available) { throw [System.NotSupportedException]::new('Native HTTP/2 ALPN API is unavailable on this runtime.') }
     foreach ($tls in @($ClientTls,$UpstreamTls)) {
-        $alpn = [string]$tls.NegotiatedApplicationProtocol.ToString()
+        $alpn = Get-MihariHttp2NegotiatedProtocol -Tls $tls
         if ($alpn -ne 'h2') { throw [System.NotSupportedException]::new('Both TLS legs must negotiate h2 for native Inspect.') }
     }
     $context = [pscustomobject]@{ Session = $Session; ConnectionId = $ConnectionId; UpstreamConnectionId = $UpstreamConnectionId; Host = $ConnectHost; Port = $ConnectPort; Mode = $ConnectionMode; ConfigurationRevision = $AcceptedConfigurationRevision; Clock = [System.Diagnostics.Stopwatch]::StartNew(); Streams = @{} }
