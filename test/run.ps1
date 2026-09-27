@@ -89,8 +89,8 @@ try {
                 & (Join-Path $PSScriptRoot 'phase2-management-evidence.ps1')
                 & (Join-Path $PSScriptRoot 'browser-observation.ps1')
                 & (Join-Path $PSScriptRoot 'browser-profile-cleanup.ps1')
-                & (Join-Path $PSScriptRoot 'browser-observation-edge.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-ui-browser.ps1')
+                & (Join-Path $PSScriptRoot 'browser-observation-edge.ps1')
             }
         }
     }
