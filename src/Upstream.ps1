@@ -222,6 +222,9 @@ function Resolve-MihariRoute {
     }
 
     if ($null -eq $proxyUri) {
+        if (-not $configuration.Configured -and -not $configuration.ErrorType) {
+            return New-MihariRouteResult -Kind 'Direct' -HostName $Uri.DnsSafeHost -Port ([Nullable[int]]$Uri.Port) -Source 'Platform' -Reason 'The platform returned no proxy endpoint and no proxy policy is configured.'
+        }
         return New-MihariRouteResult -Kind 'Unsupported' -HostName $null -Port ([Nullable[int]]$null) -Source 'Platform' -Reason 'Platform proxy resolution returned no route.'
     }
 
