@@ -16,8 +16,6 @@ $outputRoot = Join-Path ([IO.Path]::GetTempPath()) ('mihari-cleanup-' + [guid]::
 [void][IO.Directory]::CreateDirectory($outputRoot)
 $owned = $null
 $unmatched = $null
-$ownedInstalled = $false
-$unmatchedInstalled = $false
 $cleanupFailures = New-Object 'System.Collections.Generic.List[string]'
 try {
     $ownedId = [guid]::NewGuid().ToString('N')
@@ -25,7 +23,6 @@ try {
     $ownedPublic = Invoke-MihariTestRootConfirmation -Operation Add -Action {
         Install-MihariCARoot -CA $owned
     }
-    $ownedInstalled = $true
     $ownedPublic.Dispose()
 
     $unmatchedId = [guid]::NewGuid().ToString('N')
@@ -33,7 +30,6 @@ try {
     $unmatchedPublic = Invoke-MihariTestRootConfirmation -Operation Add -Action {
         Install-MihariCARoot -CA $unmatched
     }
-    $unmatchedInstalled = $true
     $unmatchedPublic.Dispose()
 
     $ownedDirectory = Join-Path $outputRoot $ownedId
@@ -67,7 +63,7 @@ try {
     Write-Host 'PASS stale cleanup: exact metadata ownership required, unowned roots preserved, removal idempotent'
 }
 finally {
-    if ($ownedInstalled -and $null -ne $owned) {
+    if ($null -ne $owned) {
         try {
             if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $owned.Thumbprint)) {
                 [void](Invoke-MihariTestRootConfirmation -Operation Remove -Action {
@@ -77,7 +73,7 @@ finally {
         }
         catch { $cleanupFailures.Add("owned test root removal: $($_.Exception.Message)") }
     }
-    if ($unmatchedInstalled -and $null -ne $unmatched) {
+    if ($null -ne $unmatched) {
         try {
             if (-not (Test-MihariTestThumbprintAbsent -Thumbprint $unmatched.Thumbprint)) {
                 [void](Invoke-MihariTestRootConfirmation -Operation Remove -Action {

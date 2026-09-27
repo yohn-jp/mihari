@@ -156,7 +156,8 @@ finally {
         try { Clear-MihariLeafCache -Session $session }
         catch { $cleanupFailures.Add("leaf-cache disposal: $($_.Exception.Message)") }
     }
-    if ($installed -and $null -ne $ca) {
+    if ($null -ne $ca -and
+        ($installed -or -not (Test-MihariTestThumbprintAbsent -Thumbprint $ca.Thumbprint))) {
         Write-Host '[certificate] before root removal'
         try {
             $removed = Invoke-MihariTestRootConfirmation -Operation Remove -Action {
