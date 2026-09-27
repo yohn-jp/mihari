@@ -48,6 +48,11 @@ function Start-MihariTestProcess {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    # Local fixtures require a direct loopback route. Do not let a CI runner's
+    # unrelated inherited proxy variables change the route under test.
+    foreach ($name in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy')) {
+        $startInfo.EnvironmentVariables.Remove($name)
+    }
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
     if (-not $process.Start()) { throw ("Could not start Mihari child process: {0}" -f $executablePath) }

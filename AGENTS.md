@@ -77,7 +77,7 @@ One active Inspect session owns one ephemeral root CA.
 - Stop removes the exact session root.
 - `cleanup` removes only positively identified Mihari stale roots and is idempotent.
 
-If PowerShell 5.1 on the host lacks the X.509 APIs required to issue a private-key-bearing leaf purely in memory, Inspect capability must fail explicitly. Do not satisfy compatibility by spamming certificate stores.
+If the host lacks the X.509 APIs required to issue an exact-host leaf and use it with `SslStream` through the temporary user-key-file path, Inspect capability must fail explicitly. Do not satisfy compatibility by installing leaves in certificate stores.
 
 Upstream TLS uses normal OS/.NET trust validation. Validation failures are evidence.
 
