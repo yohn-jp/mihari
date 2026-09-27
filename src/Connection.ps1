@@ -187,8 +187,9 @@ function Handle-MihariConnection {
 
         if ($isConnect) {
             if ($AcceptedMode -eq 'Inspect') {
-                if ($null -eq $Session.CA -or $null -eq $Session.PublicCARoot) {
-                    throw (New-Object System.InvalidOperationException -ArgumentList 'Inspect requires an installed session CA before accepting CONNECT.')
+                if ($null -eq $Session.CA -or $null -eq $Session.PublicCARoot -or
+                    -not (Test-MihariSessionCATrust -Session $Session)) {
+                    throw (New-Object System.InvalidOperationException -ArgumentList 'Inspect requires a trusted session CA before accepting CONNECT.')
                 }
                 Write-MihariProxyStatus -Stream $clientStream -StatusCode 200 -Reason 'Connection Established' -ConnectSuccess $true
                 $responseStarted = $true
