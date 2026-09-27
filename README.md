@@ -24,9 +24,10 @@ Mihari places a local diagnostic proxy in front of the existing network path. It
 
 ## Use
 
-Run in Windows PowerShell 5.1 or PowerShell 7. `start` stays in the foreground and writes session metadata; use another shell for the remaining commands.
+Run in Windows PowerShell 5.1 or PowerShell 7. Running `.\mihari.ps1` with no command shows usage. `start` stays in the foreground; use another shell for the remaining commands.
 
 ```powershell
+.\mihari.ps1
 .\mihari.ps1 start -Mode Inspect -Port 8899
 .\mihari.ps1 status
 .\mihari.ps1 browser -Url 'https://example.com/'

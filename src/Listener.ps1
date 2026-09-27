@@ -126,7 +126,7 @@ finally {
         else {
             $Session.Listener = $listener
         }
-        Save-MihariSessionMetadata -Session $Session
+        [void](Save-MihariSessionMetadata -Session $Session)
 
         while (-not (Test-Path -LiteralPath $Session.StopPath)) {
             for ($i = $workers.Count - 1; $i -ge 0; $i--) {
