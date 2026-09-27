@@ -73,7 +73,8 @@ function Invoke-Phase2UiProxyGet {
         try {
             $originStream = $originClient.GetStream()
             $originRequest = Read-MihariTestHeaderText -Stream $originStream -Context 'Paused-display origin request'
-            Assert-MihariTest -Condition ($originRequest.StartsWith(('GET {0} HTTP/1.1' -f $Path))) -Message 'The paused-display request must reach the local origin.'
+            $originRequestLine = ($originRequest -split "`r`n", 2)[0]
+            Assert-MihariTest -Condition ($originRequestLine.StartsWith(('GET {0}?' -f $Path)) -and $originRequestLine.EndsWith(' HTTP/1.1')) -Message 'The paused-display request must reach the local origin with its query present.'
             Write-MihariTestHttpResponse -Stream $originStream -Body 'phase2-ui-ok'
         }
         finally { $originClient.Close() }
