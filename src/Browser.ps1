@@ -136,6 +136,57 @@ function New-MihariBrowserLaunchResult {
     }
 }
 
+function Get-MihariEdgeLaunchArguments {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ProfilePath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ProxyEndpoint,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [string] $Url
+    )
+
+    # Edge is Chromium based. These switches keep ordinary browser HTTP(S)
+    # requests on Mihari, including loopback fixture destinations which Edge
+    # otherwise excludes from manually configured proxies. QUIC is not
+    # supported by Mihari, and WebRTC must not create an unproxied UDP path.
+    $arguments = @(
+        ('--user-data-dir={0}' -f $ProfilePath),
+        ('--proxy-server={0}' -f $ProxyEndpoint),
+        '--proxy-bypass-list=<-loopback>',
+        '--disable-quic',
+        '--disable-http2',
+        '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+        '--ssl-version-max=tls1.2'
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Url)) {
+        $arguments += $Url
+    }
+    return ,$arguments
+}
+
+function Start-MihariEdgeProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.ProcessStartInfo] $StartInfo
+    )
+
+    $process = [System.Diagnostics.Process]::Start($StartInfo)
+    if ($null -eq $process) {
+        return $null
+    }
+
+    try {
+        return $process.Id
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
 function Complete-MihariBrowserLaunch {
     param(
         [Parameter(Mandatory = $true)]
@@ -154,12 +205,19 @@ function Complete-MihariBrowserLaunch {
 
     # Preserve only the safe launch configuration. The requested URL and raw
     # command-line arguments may contain credentials or query values.
+    $browserLaunchSucceeded = [bool]$Result.Success
     $launchMetadata = [pscustomobject]@{
         schemaVersion = 1
         timestamp = [DateTime]::UtcNow.ToString('o')
         executablePath = $Result.Path
         profilePath = $Result.ProfilePath
         proxyEndpoint = $Result.ProxyEndpoint
+        proxiedSchemes = $(if ($browserLaunchSucceeded) { @('http', 'https') } else { @() })
+        loopbackBypassDisabled = $browserLaunchSucceeded
+        quicDisabled = $browserLaunchSucceeded
+        http2Disabled = $browserLaunchSucceeded
+        nonProxiedWebRtcUdpDisabled = $browserLaunchSucceeded
+        maximumTlsVersion = $(if ($browserLaunchSucceeded) { 'tls1.2' } else { $null })
         processId = $Result.Pid
         success = $Result.Success
         reason = $Result.Reason
@@ -242,13 +300,8 @@ function Start-MihariBrowser {
             -UrlProvided (-not [string]::IsNullOrWhiteSpace($Url)))
     }
 
-    $arguments = @(
-        ('--user-data-dir={0}' -f $profilePath),
-        ('--proxy-server={0}' -f $proxyEndpoint)
-    )
-    if (-not [string]::IsNullOrWhiteSpace($Url)) {
-        $arguments += $Url
-    }
+    $arguments = Get-MihariEdgeLaunchArguments -ProfilePath $profilePath `
+        -ProxyEndpoint $proxyEndpoint -Url $Url
     $quotedArguments = @()
     foreach ($argument in $arguments) {
         $quotedArguments += ConvertTo-MihariWindowsArgument -Value ([string]$argument)
@@ -260,16 +313,14 @@ function Start-MihariBrowser {
     $startInfo.UseShellExecute = $false
 
     try {
-        $process = [System.Diagnostics.Process]::Start($startInfo)
-        if ($null -eq $process) {
+        $processId = Start-MihariEdgeProcess -StartInfo $startInfo
+        if ($null -eq $processId) {
             $result = New-MihariBrowserLaunchResult -Success $false -Path $edgePath -ProcessId $null `
                 -ProfilePath $profilePath -ProxyEndpoint $proxyEndpoint `
                 -Reason 'Windows did not return a process handle when starting Microsoft Edge.'
             return (Complete-MihariBrowserLaunch -SessionMetadata $SessionMetadata -Result $result `
                 -UrlProvided (-not [string]::IsNullOrWhiteSpace($Url)))
         }
-        $processId = $process.Id
-        $process.Dispose()
         $result = New-MihariBrowserLaunchResult -Success $true -Path $edgePath -ProcessId $processId `
             -ProfilePath $profilePath -ProxyEndpoint $proxyEndpoint -Reason $null
         return (Complete-MihariBrowserLaunch -SessionMetadata $SessionMetadata -Result $result `
