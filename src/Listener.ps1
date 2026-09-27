@@ -110,6 +110,8 @@ function Start-MihariListener {
     $listener = New-Object System.Net.Sockets.TcpListener -ArgumentList @([System.Net.IPAddress]::Loopback, $port)
     $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $maxWorkers)
     $workers = New-Object System.Collections.ArrayList
+    $queueCapacity = [Math]::Max(2, $maxWorkers * 2)
+    $pendingClients = New-Object 'System.Collections.Generic.Queue[object]'
     $activeUpstreamClients = [System.Collections.Hashtable]::Synchronized(@{})
     if ($null -eq $Session.PSObject.Properties['ActiveUpstreamClients']) {
         $Session | Add-Member -NotePropertyName ActiveUpstreamClients -NotePropertyValue $activeUpstreamClients
@@ -135,7 +137,7 @@ finally {
 
     try {
         $pool.Open()
-        $listener.Start([Math]::Max(2, $maxWorkers * 2))
+        $listener.Start($queueCapacity)
         $actualPort = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
         if ($null -eq $Session.PSObject.Properties['ActualPort']) {
             $Session | Add-Member -NotePropertyName ActualPort -NotePropertyValue $actualPort
@@ -182,6 +184,34 @@ finally {
             }
             $Session.ActiveConnectionCount = $workers.Count
 
+            if ($pendingClients.Count -lt $queueCapacity -and $listener.Pending()) {
+                $acceptedClient = $null
+                try {
+                    $acceptedClient = $listener.AcceptTcpClient()
+                    [System.Threading.Monitor]::Enter($Session.StateLock)
+                    try {
+                        $accepted = [pscustomobject]@{
+                            Client = $acceptedClient
+                            Mode = [string]$Session.Mode
+                            Revision = [int]$Session.ConfigurationRevision
+                            Policy = [string]$Session.HttpConnectionPolicy
+                            Exclusions = [string[]]@($Session.LocalInspectExclusions)
+                            AcceptedUtc = [DateTime]::UtcNow
+                        }
+                    }
+                    finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
+                    $pendingClients.Enqueue($accepted)
+                    if ($pendingClients.Count -gt [int]$Session.CaptureState.QueuePeak) {
+                        $Session.CaptureState.QueuePeak = $pendingClients.Count
+                    }
+                }
+                catch {
+                    if ($null -ne $acceptedClient) { $acceptedClient.Close() }
+                    if (Test-Path -LiteralPath $Session.StopPath) { break }
+                    throw
+                }
+            }
+
             if (([DateTime]::UtcNow - $lastResourceEvent).TotalSeconds -ge 5) {
                 $process = [System.Diagnostics.Process]::GetCurrentProcess()
                 try {
@@ -190,6 +220,10 @@ finally {
                         maxWorkers = $maxWorkers
                         activeLongLivedCount = [int]$Session.ActiveLongLivedCount
                         pendingConnections = [bool]$listener.Pending()
+                        queueLength = $pendingClients.Count
+                        queueCapacity = $queueCapacity
+                        queuePeak = [int]$Session.CaptureState.QueuePeak
+                        saturationCount = [long]$Session.CaptureState.SaturationCount
                         workingSetBytes = [long]$process.WorkingSet64
                         cpuTotalMs = [double]$process.TotalProcessorTime.TotalMilliseconds
                         evidenceBytes = [long]([System.IO.FileInfo]::new([string]$Session.EventsPath)).Length
@@ -204,44 +238,36 @@ finally {
                 $lastResourceEvent = [DateTime]::UtcNow
             }
 
-            if ($workers.Count -ge $maxWorkers) {
-                if ($listener.Pending() -and ([DateTime]::UtcNow - $lastCapacityEvent).TotalSeconds -ge 1) {
+            $queueFull = ($pendingClients.Count -ge $queueCapacity)
+            if (($workers.Count -ge $maxWorkers -or $queueFull) -and
+                ($pendingClients.Count -gt 0 -or $listener.Pending()) -and
+                ([DateTime]::UtcNow - $lastCapacityEvent).TotalSeconds -ge 1) {
+                    $Session.CaptureState.SaturationCount = [long]$Session.CaptureState.SaturationCount + 1
                     $null = Write-MihariEvent -Session $Session -ConnectionId 'session' -Stage 'listener.capacity' -Outcome 'saturated' -ElapsedMs 0 -Data @{
-                        workerOccupancy = $workers.Count; maxWorkers = $maxWorkers; queueSaturated = $true
+                        workerOccupancy = $workers.Count; maxWorkers = $maxWorkers
+                        queueLength = $pendingClients.Count; queueCapacity = $queueCapacity
+                        queueSaturated = $queueFull; saturationCount = [long]$Session.CaptureState.SaturationCount
                     }
                     $lastCapacityEvent = [DateTime]::UtcNow
-                }
+            }
+            if ($workers.Count -ge $maxWorkers -or $pendingClients.Count -eq 0) {
                 Start-Sleep -Milliseconds 25
                 continue
             }
+            $accepted = $pendingClients.Dequeue()
+            $client = $accepted.Client
+            $acceptedMode = $accepted.Mode
+            $acceptedConfigurationRevision = $accepted.Revision
+            $acceptedHttpConnectionPolicy = $accepted.Policy
+            $acceptedLocalInspectExclusions = $accepted.Exclusions
+            $queueWaitMs = [long]([DateTime]::UtcNow - $accepted.AcceptedUtc).TotalMilliseconds
             try {
-                if (-not $listener.Pending()) {
-                    Start-Sleep -Milliseconds 25
-                    continue
+                $null = Write-MihariEvent -Session $Session -ConnectionId 'session' -Stage 'listener.queue' -Outcome 'dispatched' -ElapsedMs 0 -Data @{
+                    waitMs = $queueWaitMs; queueLength = $pendingClients.Count; queueCapacity = $queueCapacity
                 }
-                $client = $listener.AcceptTcpClient()
-                [System.Threading.Monitor]::Enter($Session.StateLock)
-                try {
-                    $acceptedMode = [string]$Session.Mode
-                    $acceptedConfigurationRevision = 0
-                    if ($null -ne $Session.PSObject.Properties['ConfigurationRevision']) {
-                        $acceptedConfigurationRevision = [int]$Session.ConfigurationRevision
-                    }
-                    $acceptedHttpConnectionPolicy = 'reuse'
-                    if ($null -ne $Session.PSObject.Properties['HttpConnectionPolicy']) {
-                        $acceptedHttpConnectionPolicy = [string]$Session.HttpConnectionPolicy
-                    }
-                    $acceptedLocalInspectExclusions = [string[]]@()
-                    if ($null -ne $Session.PSObject.Properties['LocalInspectExclusions']) {
-                        $acceptedLocalInspectExclusions = [string[]]@($Session.LocalInspectExclusions)
-                    }
-                }
-                finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
             }
             catch {
-                # Stop-MihariListener may close the listener while accept is
-                # in progress. The stop file distinguishes that from a fault.
-                if (Test-Path -LiteralPath $Session.StopPath) { break }
+                $client.Close()
                 throw
             }
             $connectionId = [guid]::NewGuid().ToString('N')
@@ -268,6 +294,11 @@ finally {
     }
     finally {
         $listener.Stop()
+        while ($pendingClients.Count -gt 0) {
+            $queued = $pendingClients.Dequeue()
+            try { $queued.Client.Close() }
+            catch { Write-Warning 'Mihari queued client socket cleanup failed.' }
+        }
         $Session.ActiveConnectionCount = 0
         $registry = $Session.ActiveUpstreamClients
         [System.Threading.Monitor]::Enter($registry.SyncRoot)

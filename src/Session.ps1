@@ -274,6 +274,15 @@ function Get-MihariSessionMetadataObject {
         upstreamProxy = Get-MihariSafeProxyEndpoint -Proxy ([string]$Session.UpstreamProxy)
         upstreamSnapshotCapturedAtUtc = $(if ($null -ne $Session.PlatformProxySnapshot) { [string]$Session.PlatformProxySnapshot.CapturedAtUtc } else { $null })
         maxWorkers = [int]$Session.MaxWorkers
+        capture = [pscustomobject][ordered]@{
+            incomplete = [bool]$Session.CaptureState.Incomplete
+            reason = $Session.CaptureState.Reason
+            atUtc = $Session.CaptureState.AtUtc
+            evidenceByteLimit = [long]$Session.CaptureState.EvidenceByteLimit
+            queueCapacity = [int]$Session.CaptureState.QueueCapacity
+            queuePeak = [int]$Session.CaptureState.QueuePeak
+            saturationCount = [long]$Session.CaptureState.SaturationCount
+        }
         error = $Session.Error
         managementError = $Session.ManagementError
         cleanupErrors = @($Session.CleanupErrors)
@@ -315,7 +324,8 @@ function New-MihariSession {
         [ValidateRange(0, 65535)][int]$ManagementPort = 0,
         [string]$UpstreamProxy,
         [string]$OutputRoot,
-        [ValidateRange(1, 128)][int]$MaxWorkers = 16
+        [ValidateRange(1, 128)][int]$MaxWorkers = 16,
+        [ValidateRange(4096, 1099511627776)][long]$EvidenceByteLimit = 536870912
     )
 
     if (-not (Get-Command Test-MihariCapability -ErrorAction SilentlyContinue)) {
@@ -411,6 +421,15 @@ function New-MihariSession {
             ActivePath = $activePath
             SourceRoot = $sourceRoot
             MaxWorkers = $MaxWorkers
+            CaptureState = [pscustomobject]@{
+                Incomplete = $false
+                Reason = $null
+                AtUtc = $null
+                EvidenceByteLimit = $EvidenceByteLimit
+                QueueCapacity = [int]($MaxWorkers * 2)
+                QueuePeak = 0
+                SaturationCount = [long]0
+            }
             UpstreamProxy = $UpstreamProxy
             PlatformProxySnapshot = $platformProxySnapshot
             Writer = $null
