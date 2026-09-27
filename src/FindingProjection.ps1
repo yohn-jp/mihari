@@ -100,7 +100,12 @@ function Write-MihariFindingProjectionSnapshotAtomic {
         [System.IO.File]::WriteAllText($temporaryPath, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
         if ([System.IO.File]::Exists($Path)) {
             $failurePhase = 'replace'
-            [System.IO.File]::Replace($temporaryPath, $Path, $null)
+            # PowerShell coerces a null string argument to an empty path when
+            # binding this overload. Reflection preserves null, so no backup
+            # copy of the evidence snapshot is left on disk.
+            $replace = [System.IO.File].GetMethod('Replace', [type[]]@([string], [string], [string]))
+            if ($null -eq $replace) { throw [System.NotSupportedException]::new('Atomic file replacement is unavailable.') }
+            [void]$replace.Invoke($null, [object[]]@($temporaryPath, $Path, $null))
         }
         else {
             $failurePhase = 'move_into_place'
