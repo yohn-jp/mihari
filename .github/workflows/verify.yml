@@ -40,14 +40,34 @@ jobs:
             throw "Expected ${{ matrix.label }}; found PowerShell $actual"
           }
 
-      - name: Run repository tests
+      - name: Certificate capability and TLS 1.2 proof
         env:
           MIHARI_TEST_ARTIFACT_DIR: ${{ runner.temp }}/mihari-test-artifacts
         run: |
           if (-not (Test-Path -LiteralPath './test/run.ps1' -PathType Leaf)) {
             throw 'Repository test entry point test/run.ps1 is missing.'
           }
-          & ./test/run.ps1
+          & ./test/run.ps1 -Suite certificate
+
+      - name: HTTP and diagnosis contracts
+        env:
+          MIHARI_TEST_ARTIFACT_DIR: ${{ runner.temp }}/mihari-test-artifacts
+        run: '& ./test/run.ps1 -Suite contracts'
+
+      - name: Edge discovery
+        env:
+          MIHARI_TEST_ARTIFACT_DIR: ${{ runner.temp }}/mihari-test-artifacts
+        run: '& ./test/run.ps1 -Suite browser'
+
+      - name: Stale root cleanup
+        env:
+          MIHARI_TEST_ARTIFACT_DIR: ${{ runner.temp }}/mihari-test-artifacts
+        run: '& ./test/run.ps1 -Suite stale-cleanup'
+
+      - name: Local end-to-end proxy runtime
+        env:
+          MIHARI_TEST_ARTIFACT_DIR: ${{ runner.temp }}/mihari-test-artifacts
+        run: '& ./test/run.ps1 -Suite integration'
 
       - name: Upload test artifacts on failure
         if: failure()

@@ -1,4 +1,7 @@
-param()
+param(
+    [ValidateSet('all', 'certificate', 'contracts', 'browser', 'stale-cleanup', 'integration')]
+    [string] $Suite = 'all'
+)
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
@@ -35,16 +38,26 @@ try {
     }
     Write-Host ("PASS parse: {0} PowerShell files" -f $sourceFiles.Count)
 
-    if ($env:OS -ne 'Windows_NT') {
-        Write-Warning 'Windows certificate/runtime integration tests require Windows; static parse check completed.'
+    if ($Suite -eq 'all') {
+        $selectedSuites = @('certificate', 'contracts', 'browser', 'stale-cleanup', 'integration')
     }
     else {
-        & (Join-Path $PSScriptRoot 'certificate.ps1')
+        $selectedSuites = @($Suite)
     }
-    & (Join-Path $PSScriptRoot 'contracts.ps1')
-    & (Join-Path $PSScriptRoot 'browser.ps1')
-    & (Join-Path $PSScriptRoot 'stale-cleanup.ps1')
-    & (Join-Path $PSScriptRoot 'integration.ps1')
+    foreach ($selectedSuite in $selectedSuites) {
+        if ($env:OS -ne 'Windows_NT' -and $selectedSuite -in @('certificate', 'stale-cleanup', 'integration')) {
+            Write-Warning ("Skipping suite '{0}': Windows certificate/runtime integration is required." -f $selectedSuite)
+            continue
+        }
+        Write-Host ("RUN suite: {0}" -f $selectedSuite)
+        switch ($selectedSuite) {
+            'certificate' { & (Join-Path $PSScriptRoot 'certificate.ps1') }
+            'contracts' { & (Join-Path $PSScriptRoot 'contracts.ps1') }
+            'browser' { & (Join-Path $PSScriptRoot 'browser.ps1') }
+            'stale-cleanup' { & (Join-Path $PSScriptRoot 'stale-cleanup.ps1') }
+            'integration' { & (Join-Path $PSScriptRoot 'integration.ps1') }
+        }
+    }
 }
 catch {
     $exitCode = 1
