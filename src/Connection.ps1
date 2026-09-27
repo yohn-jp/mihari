@@ -270,7 +270,7 @@ function Handle-MihariConnection {
                 }
                 Write-MihariProxyStatus -Stream $clientStream -StatusCode 200 -Reason 'Connection Established' -ConnectSuccess $true
                 $responseStarted = $true
-                Invoke-MihariInspect -Session $Session -ClientStream $clientStream -ConnectHost $hostName -ConnectPort $targetPort -ConnectionId $connectionId -ConnectionMode $AcceptedMode -AcceptedConfigurationRevision $AcceptedConfigurationRevision -AcceptedHttpConnectionPolicy $AcceptedHttpConnectionPolicy -ProxyAuthorization (Get-MihariHeaderText -Headers $request.Headers -Name 'Proxy-Authorization')
+                Invoke-MihariInspect -Session $Session -ClientStream $clientStream -ConnectHost $hostName -ConnectPort $targetPort -ConnectionId $connectionId -ConnectionMode $AcceptedMode -AcceptedConfigurationRevision $AcceptedConfigurationRevision -AcceptedHttpConnectionPolicy $AcceptedHttpConnectionPolicy -AcceptedConnectionElapsedMs $timer.ElapsedMilliseconds -ProxyAuthorization (Get-MihariHeaderText -Headers $request.Headers -Name 'Proxy-Authorization')
                 return
             }
             if ($AcceptedMode -ne 'Tunnel') {

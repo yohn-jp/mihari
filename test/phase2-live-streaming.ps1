@@ -118,6 +118,54 @@ try {
         if ($null -ne $keepProxy) { $keepProxy.Client.Close() }
     }
 
+    # The first bytes of a >32 MiB response arrive before the origin finishes.
+    $largeLength = [long]33554433
+    $largePath = Join-Path $temporary 'large-fixture.bin'
+    $largeFile = [System.IO.FileStream]::new($largePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    $largeProxy = $null
+    $largeOrigin = $null
+    try {
+        $largeFile.SetLength($largeLength)
+        $largeFile.Position = 0
+        $largeFile.WriteByte(0x5A)
+        $largeFile.Position = $largeLength - 1
+        $largeFile.WriteByte(0xA5)
+        $largeFile.Position = 0
+        $largeAccept = $originListener.AcceptTcpClientAsync()
+        $largeProxy = New-MihariLiveProxyClient -ProxyPort $proxyPort -OriginPort $originPort -Path '/large' -ExtraHeaders "Connection: close`r`n"
+        Assert-MihariTest -Condition ($largeAccept.Wait(10000)) -Message 'Large response request must reach the local origin.'
+        $largeOrigin = $largeAccept.Result
+        $largeOriginStream = $largeOrigin.GetStream()
+        $null = Read-MihariTestHeaderText -Stream $largeOriginStream
+        $largeHead = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: $largeLength`r`nConnection: close`r`n`r`n")
+        $largeOriginStream.Write($largeHead, 0, $largeHead.Length)
+        $firstPart = New-Object 'byte[]' 16384
+        $null = $largeFile.Read($firstPart, 0, $firstPart.Length)
+        $largeOriginStream.Write($firstPart, 0, $firstPart.Length)
+        $largeResponseHead = Read-MihariTestHeaderText -Stream $largeProxy.Stream
+        $largeLengthPattern = '(?im)^Content-Length:\s*' + $largeLength + '\s*$'
+        Assert-MihariTest -Condition ($largeResponseHead -match $largeLengthPattern) -Message 'Large response headers must arrive before origin completion.'
+        $firstPartAtClient = Read-MihariTestExactBytes -Stream $largeProxy.Stream -Count 16384
+        Assert-MihariTest -Condition ($firstPartAtClient[0] -eq 0x5A) -Message 'Early large-response body bytes must reach the client before origin completion.'
+        $copyTask = $largeFile.CopyToAsync($largeOriginStream, 16384)
+        $remaining = $largeLength - 16384
+        $readBuffer = New-Object 'byte[]' 16384
+        $lastByte = 0
+        while ($remaining -gt 0) {
+            $wanted = [int][Math]::Min([long]$readBuffer.Length, $remaining)
+            $read = $largeProxy.Stream.Read($readBuffer, 0, $wanted)
+            if ($read -le 0) { throw 'Large response ended before Content-Length.' }
+            $lastByte = $readBuffer[$read - 1]
+            $remaining -= $read
+        }
+        Assert-MihariTest -Condition ($copyTask.Wait(30000) -and $lastByte -eq 0xA5) -Message 'The entire >32 MiB binary response must stream intact.'
+    }
+    finally {
+        if ($null -ne $largeOrigin) { $largeOrigin.Close() }
+        if ($null -ne $largeProxy) { $largeProxy.Client.Close() }
+        $largeFile.Dispose()
+    }
+
     # SSE remains open while management and another proxy worker respond.
     $sseAccept = $originListener.AcceptTcpClientAsync()
     $sseProxy = New-MihariLiveProxyClient -ProxyPort $proxyPort -OriginPort $originPort -Path '/events' -ExtraHeaders "Accept: text/event-stream`r`n"
