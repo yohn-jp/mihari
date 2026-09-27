@@ -129,7 +129,7 @@ try {
         if ([IO.File]::Exists($launchPath)) { break }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $launchDeadline)
-    Assert-MihariTest -Condition ([IO.File]::Exists($launchPath)) -Message 'The visible browser action must use Mihari’s canonical Edge launcher.'
+    Assert-MihariTest -Condition ([IO.File]::Exists($launchPath)) -Message 'The visible browser action must use the canonical Mihari Edge launcher.'
     $launch = ConvertFrom-Json -InputObject (Read-MihariTestLiveText -Path $launchPath)
     $diagnosticProfile = [string]$launch.profilePath
     Assert-MihariTest -Condition ([bool]$launch.success -and [string]$launch.proxyEndpoint -eq ('http://127.0.0.1:{0}' -f [int]$metadata.actualPort)) -Message 'The diagnostic browser must use the Mihari loopback proxy.'
