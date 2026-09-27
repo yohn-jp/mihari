@@ -19,7 +19,7 @@ function ConvertTo-MihariTestProcessArgument {
 
 function Start-MihariTestProcess {
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('start', 'stop', 'report')][string] $Command,
+        [Parameter(Mandatory = $true)][ValidateSet('start', 'status', 'stop', 'report')][string] $Command,
         [Parameter(Mandatory = $true)][string] $OutputRoot,
         [string] $Mode,
         [string] $UpstreamProxy,
