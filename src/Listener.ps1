@@ -188,6 +188,7 @@ finally {
                     $resourceData = @{
                         workerOccupancy = $workers.Count
                         maxWorkers = $maxWorkers
+                        activeLongLivedCount = [int]$Session.ActiveLongLivedCount
                         pendingConnections = [bool]$listener.Pending()
                         workingSetBytes = [long]$process.WorkingSet64
                         cpuTotalMs = [double]$process.TotalProcessorTime.TotalMilliseconds
