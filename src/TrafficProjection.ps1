@@ -72,7 +72,7 @@ function ConvertTo-MihariTrafficSafeEvent {
         'tlsAlpn', 'certificateChainState', 'hostnameState', 'validityState', 'ekuState', 'revocationState',
         'validationPolicy', 'peerIdentityRole', 'clientCertificateState', 'protocol', 'initiatorType',
         'browserTargetId', 'browserRequestId', 'browserConnectionId', 'browserError', 'browserTimingOrigin',
-        'requestFraming', 'responseFraming', 'connectionPolicy', 'framing'
+        'requestFraming', 'responseFraming', 'connectionPolicy', 'framing', 'httpVersion', 'scope', 'headerSection'
     )
     foreach ($name in $stringFields) {
         $limit = 256
@@ -92,6 +92,13 @@ function ConvertTo-MihariTrafficSafeEvent {
         $value = Get-MihariTrafficMemberValue -InputObject $data -Name $name
         if ($value -is [bool]) { $safeData[$name] = $value }
     }
+    foreach ($name in @('maxConcurrentStreams', 'maxFrameSize', 'initialWindowSize', 'headerTableSize', 'lastStreamId',
+            'grpcStatus', 'httpStatus', 'waitMs', 'durationMs', 'activeStreamsAtClose')) {
+        $value = ConvertTo-MihariTrafficNumber -Value (Get-MihariTrafficMemberValue -InputObject $data -Name $name)
+        if ($null -ne $value -and $value -ge 0 -and $value -le [decimal][long]::MaxValue) { $safeData[$name] = [long][Math]::Truncate($value) }
+    }
+    $informational = Get-MihariTrafficMemberValue -InputObject $data -Name 'informational'
+    if ($informational -is [bool]) { $safeData['informational'] = $informational }
     $rawChain = Get-MihariTrafficMemberValue -InputObject $data -Name 'certificateChain'
     if ($null -ne $rawChain) {
         $chain = New-Object 'System.Collections.Generic.List[object]'
@@ -133,12 +140,14 @@ function ConvertTo-MihariTrafficSafeEvent {
         data = [pscustomobject]$safeData
     }
     foreach ($name in @('caseId', 'trialId', 'configurationRevision', 'transportLeg', 'upstreamConnectionId', 'streamId',
-            'sourceIdentity', 'sourceVersion', 'monotonicTicks', 'clockId')) {
+            'sourceIdentity', 'sourceVersion', 'monotonicTicks', 'monotonicFrequency', 'clockId')) {
         $value = Get-MihariTrafficMemberValue -InputObject $Event -Name $name
         if ($null -eq $value) { continue }
-        if ($name -eq 'configurationRevision' -or $name -eq 'monotonicTicks') {
+        if ($name -in @('configurationRevision', 'monotonicTicks', 'monotonicFrequency')) {
             $number = ConvertTo-MihariTrafficNumber -Value $value
-            if ($null -ne $number -and $number -ge 0 -and $number -le [decimal][long]::MaxValue -and [decimal]::Truncate($number) -eq $number) { $result[$name] = [long]$number }
+            $minimum = [decimal]0
+            if ($name -eq 'monotonicFrequency') { $minimum = [decimal]1 }
+            if ($null -ne $number -and $number -ge $minimum -and $number -le [decimal][long]::MaxValue -and [decimal]::Truncate($number) -eq $number) { $result[$name] = [long]$number }
         }
         else {
             $limit = 128
@@ -1096,6 +1105,10 @@ function Get-MihariTrafficRequestDetail {
         }
     }
     finally { if ($null -ne $reader) { $reader.Dispose() } }
+    $requestTimings = @(Get-MihariTrafficRequestTimings -Events @($events.ToArray()))
+    if ($requestTimings.Count -gt 0) {
+        Add-Member -InputObject $summary.Request -MemberType NoteProperty -Name timings -Value $requestTimings -Force
+    }
     return [pscustomobject][ordered]@{
         request = $summary.Request; events = @($events.ToArray()); evidence = @($evidence.ToArray())
         eventCount = [long]$summary.Request.eventCount; eventsTruncated = ([long]$summary.Request.eventCount -gt $MaximumEvents)
@@ -1103,36 +1116,181 @@ function Get-MihariTrafficRequestDetail {
     }
 }
 
+function Get-MihariTrafficRequestTimings {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Events)
+    $measured = New-Object 'System.Collections.Generic.List[object]'
+    $clockId = $null
+    $frequency = [long]0
+    $source = $null
+    $sourceIdentity = $null
+    foreach ($event in $Events) {
+        $ticks = Get-MihariTrafficMemberValue -InputObject $event -Name 'monotonicTicks'
+        $eventFrequency = Get-MihariTrafficMemberValue -InputObject $event -Name 'monotonicFrequency'
+        $elapsed = Get-MihariTrafficMemberValue -InputObject $event -Name 'elapsedMs'
+        $eventClock = Get-MihariTrafficMemberValue -InputObject $event -Name 'clockId'
+        if ($null -eq $ticks -or $null -eq $eventFrequency -or $null -eq $elapsed -or [string]::IsNullOrWhiteSpace([string]$eventClock)) { continue }
+        $tickValue = ConvertTo-MihariTrafficNumber -Value $ticks
+        $frequencyValue = ConvertTo-MihariTrafficNumber -Value $eventFrequency
+        $elapsedValue = ConvertTo-MihariTrafficNumber -Value $elapsed
+        if ($null -eq $tickValue -or $tickValue -le 0 -or [decimal]::Truncate($tickValue) -ne $tickValue -or
+            $null -eq $frequencyValue -or $frequencyValue -le 0 -or [decimal]::Truncate($frequencyValue) -ne $frequencyValue -or
+            $null -eq $elapsedValue -or $elapsedValue -lt 0 -or $frequencyValue -gt [decimal][long]::MaxValue) { continue }
+        $eventSource = [string]$event.source
+        $eventSourceIdentity = [string]$event.sourceIdentity
+        if ($eventSource -notin @('proxy', 'browser', 'windows', 'operator', 'import')) { continue }
+        if ($null -eq $clockId) {
+            $clockId = [string]$eventClock
+            $frequency = [long]$frequencyValue
+            $source = $eventSource
+            $sourceIdentity = $eventSourceIdentity
+        }
+        elseif (-not [string]::Equals($clockId, [string]$eventClock, [StringComparison]::Ordinal) -or
+            $frequency -ne [long]$frequencyValue -or
+            -not [string]::Equals($source, $eventSource, [StringComparison]::Ordinal) -or
+            -not [string]::Equals($sourceIdentity, $eventSourceIdentity, [StringComparison]::Ordinal)) {
+            return @()
+        }
+        $startTicks = [decimal]$tickValue - (([decimal]$elapsedValue * [decimal]$frequency) / [decimal]1000)
+        if ($startTicks -lt 0) { continue }
+        $measured.Add([pscustomobject]@{
+            stage = [string]$event.stage; eventId = [string]$event.eventId
+            startTicks = $startTicks; durationMs = [long][Math]::Truncate($elapsedValue)
+        })
+    }
+    if ($measured.Count -eq 0) { return @() }
+    $originTicks = [decimal]$measured[0].startTicks
+    foreach ($item in $measured) { if ([decimal]$item.startTicks -lt $originTicks) { $originTicks = [decimal]$item.startTicks } }
+    $timings = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($item in $measured) {
+        $offset = ([decimal]$item.startTicks - $originTicks) * [decimal]1000 / [decimal]$frequency
+        $timings.Add([pscustomobject][ordered]@{
+            stage = $item.stage; eventId = $item.eventId
+            startOffsetMs = [Math]::Round([double]$offset, 3)
+            durationMs = [long]$item.durationMs
+        })
+    }
+    return @($timings.ToArray())
+}
+
 function Get-MihariTrafficProjectionEvents {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][object]$Store,
         [ValidateRange(0, 2147483647)][long]$AfterOrdinal = 0,
+        [Parameter()][ValidateRange(0, 2147483647)][long]$AfterOffset = 0,
+        [Parameter()][string]$ExpectedFileGeneration,
+        [ValidateRange(65536, 16777216)][int]$MaximumBytes = 4194304,
         [ValidateRange(1, 20000)][int]$Limit = 1000
     )
-    $events = New-Object 'System.Collections.Generic.List[object]'
-    $reader = $null
-    $lastOrdinal = $AfterOrdinal
-    $hasMore = $false
-    if ([System.IO.File]::Exists($Store.EventsIndexPath)) {
-        try {
-            $stream = [System.IO.File]::Open($Store.EventsIndexPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
-            $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8, $true)
-            while (-not $reader.EndOfStream) {
-                $line = $reader.ReadLine()
-                if ($null -eq $line -or $line.Length -gt 2097152) { continue }
-                $row = $null
-                try { $row = ConvertFrom-Json -InputObject $line -ErrorAction Stop } catch { continue }
-                $ordinal = [long]$row.indexOrdinal
-                if ($ordinal -le $AfterOrdinal) { continue }
-                if ($events.Count -ge $Limit) { $hasMore = $true; break }
-                if ($null -ne $row.event) {
-                    $events.Add([pscustomobject]@{ ordinal = $ordinal; offset = [long]$row.offset; generation = [int]$row.generation; event = $row.event })
-                }
-                $lastOrdinal = $ordinal
+    [System.Threading.Monitor]::Enter($Store.SyncRoot)
+    try {
+        $events = New-Object 'System.Collections.Generic.List[object]'
+        $lastOrdinal = $AfterOrdinal
+        $firstSequence = $null
+        $lastSequence = $null
+        $hasMore = $false
+        $nextOffset = [long]0
+        $pending = $false
+        $fileGeneration = [string]$Store.GenerationId
+        $malformedLineCount = [long]$Store.Counters.MalformedLineCount
+        if ($PSBoundParameters.ContainsKey('ExpectedFileGeneration') -and
+                -not [string]::Equals($ExpectedFileGeneration, $fileGeneration, [StringComparison]::Ordinal)) {
+            $invalid = [System.InvalidOperationException]::new('The indexed event history was rebuilt; restart the event cursor.')
+            $invalid.Data['mihariCode'] = 'cursor_invalidated'
+            throw $invalid
+        }
+        if (-not [System.IO.File]::Exists($Store.EventsIndexPath)) {
+            return [pscustomobject]@{
+                events = @(); nextOrdinal = $lastOrdinal; nextOffset = $nextOffset; hasMore = $false; pending = $false
+                fileGeneration = $fileGeneration; firstSequence = $null; lastSequence = $null
+                malformedLineCount = $malformedLineCount; readError = $false
             }
         }
-        finally { if ($null -ne $reader) { $reader.Dispose() } }
+        $stream = $null
+        try {
+            $stream = [System.IO.File]::Open($Store.EventsIndexPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+            $fileLength = [long]$stream.Length
+            $useOffset = $PSBoundParameters.ContainsKey('AfterOffset')
+            if ($useOffset) {
+                if ($AfterOffset -gt $fileLength) {
+                    $invalid = [System.InvalidOperationException]::new('The indexed event history was rebuilt; restart the event cursor.')
+                    $invalid.Data['mihariCode'] = 'cursor_invalidated'
+                    throw $invalid
+                }
+                if ($AfterOffset -gt 0) {
+                    $stream.Position = $AfterOffset - 1
+                    if ($stream.ReadByte() -ne 10) {
+                        $invalid = [System.InvalidOperationException]::new('The indexed event cursor is not on a complete record boundary.')
+                        $invalid.Data['mihariCode'] = 'cursor_invalidated'
+                        throw $invalid
+                    }
+                }
+                $startOffset = [long]$AfterOffset
+            }
+            else { $startOffset = [long]0 }
+            $stream.Position = $startOffset
+            $count = [int][Math]::Min([long]$MaximumBytes, $fileLength - $startOffset)
+            $buffer = New-Object byte[] $count
+            $read = 0
+            while ($read -lt $count) { $got = $stream.Read($buffer, $read, $count - $read); if ($got -le 0) { break }; $read += $got }
+            $position = 0
+            $nextOffset = $startOffset
+            while ($position -lt $read) {
+                $newline = [Array]::IndexOf($buffer, [byte]10, $position, $read - $position)
+                if ($newline -lt 0) { $pending = $true; break }
+                $lineLength = $newline - $position
+                $lineOrdinal = $null
+                if ($lineLength -le 2097152) {
+                    $lineBytes = New-Object byte[] $lineLength
+                    if ($lineLength -gt 0) { [Array]::Copy($buffer, $position, $lineBytes, 0, $lineLength) }
+                    $line = [System.Text.Encoding]::UTF8.GetString($lineBytes).TrimEnd([char]13)
+                    try {
+                        $row = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+                        $lineOrdinal = [long]$row.indexOrdinal
+                        if ($null -ne $row.event -and ($useOffset -or $lineOrdinal -gt $AfterOrdinal)) {
+                            if ($events.Count -ge $Limit) { $hasMore = $true; break }
+                            $events.Add([pscustomobject]@{
+                                ordinal = $lineOrdinal
+                                offset = [long]$row.offset
+                                generation = [int]$row.generation
+                                generationId = [string]$row.generationId
+                                event = $row.event
+                            })
+                            if ($null -ne $row.event.sequence) {
+                                $sequence = [long]$row.event.sequence
+                                if ($null -eq $firstSequence) { $firstSequence = $sequence }
+                                $lastSequence = $sequence
+                            }
+                            $lastOrdinal = $lineOrdinal
+                        }
+                    }
+                    catch {
+                        # A malformed derived row is skipped; canonical facts remain intact.
+                    }
+                }
+                $nextOffset = $startOffset + $newline + 1
+                $position = $newline + 1
+                if ($events.Count -ge $Limit) { $hasMore = ($nextOffset -lt $fileLength); break }
+            }
+            $readEnd = $startOffset + $read
+            if ($readEnd -lt $fileLength) { $hasMore = $true }
+            if (-not $pending -and $nextOffset -lt $fileLength -and -not $hasMore) { $pending = $true }
+        }
+        finally { if ($null -ne $stream) { $stream.Dispose() } }
+        return [pscustomobject]@{
+            events = @($events.ToArray()); nextOrdinal = $lastOrdinal; nextOffset = $nextOffset
+            hasMore = $hasMore; pending = $pending; fileGeneration = $fileGeneration
+            firstSequence = $firstSequence; lastSequence = $lastSequence
+            malformedLineCount = $malformedLineCount; readError = $false
+        }
     }
-    return [pscustomobject]@{ events = @($events.ToArray()); nextOrdinal = $lastOrdinal; hasMore = $hasMore }
+    catch {
+        $projectionError = $_.Exception
+        if ($projectionError.Data.Contains('mihariCode')) { throw }
+        $wrapped = [System.InvalidOperationException]::new(('Could not read the indexed event projection ({0}).' -f $projectionError.GetType().FullName), $projectionError)
+        $wrapped.Data['mihariCode'] = 'projection_read_error'
+        throw $wrapped
+    }
+    finally { [System.Threading.Monitor]::Exit($Store.SyncRoot) }
 }
