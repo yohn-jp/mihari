@@ -157,7 +157,7 @@ function Invoke-MihariCleanup {
             if (-not $processAlive -and -not $finished) {
                 $metadata.status = 'orphaned_cleaned'
                 if ([string]::IsNullOrWhiteSpace([string]$metadata.stoppedAtUtc)) {
-                    $metadata.stoppedAtUtc = [DateTime]::UtcNow.ToString('o')
+                    $metadata | Add-Member -NotePropertyName stoppedAtUtc -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
                 }
                 $metadata | Add-Member -NotePropertyName caCleanup -NotePropertyValue 'removed_by_cleanup' -Force
                 try {

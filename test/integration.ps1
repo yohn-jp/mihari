@@ -66,10 +66,10 @@ function Wait-MihariTestSession {
             throw ("Mihari exited during startup ({0}). stdout={1} stderr={2}" -f $Child.Process.ExitCode, $Child.Stdout.Result, $Child.Stderr.Result)
         }
         if ([IO.File]::Exists($activePath)) {
-            $active = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($activePath)) -ErrorAction Stop
+            $active = ConvertFrom-Json -InputObject (Read-MihariTestLiveText -Path $activePath) -ErrorAction Stop
             $sessionPath = Join-Path ([string]$active.outputDirectory) 'session.json'
             if ([IO.File]::Exists($sessionPath)) {
-                $metadata = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($sessionPath)) -ErrorAction Stop
+                $metadata = ConvertFrom-Json -InputObject (Read-MihariTestLiveText -Path $sessionPath) -ErrorAction Stop
                 if ($metadata.actualPort -and $metadata.status -eq 'running') { return $metadata }
             }
         }
@@ -319,7 +319,7 @@ function Wait-MihariTestEvent {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
         if ([IO.File]::Exists($EventsPath)) {
-            $lines = [IO.File]::ReadAllLines($EventsPath)
+            $lines = Read-MihariTestCompleteLiveLines -Path $EventsPath
             foreach ($line in $lines) {
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
                 try {
@@ -590,7 +590,7 @@ try {
     $originListener.Stop(); $originListener = $null
     [void](Wait-MihariTestEvent -EventsPath ([string]$inspectMetadata.eventsPath) -Stage 'upstream.http')
 
-    $inspectEvents = [IO.File]::ReadAllLines([string]$inspectMetadata.eventsPath)
+    $inspectEvents = Read-MihariTestCompleteLiveLines -Path ([string]$inspectMetadata.eventsPath)
     $inspectText = [string]::Join("`n", $inspectEvents)
     Assert-MihariTest -Condition ($inspectText.Contains('/inspect/deep/path?token=[REDACTED]')) -Message 'Inspect JSONL must record URL path with the query value redacted.'
     Assert-MihariTest -Condition (-not $inspectText.Contains('inspect-secret')) -Message 'Inspect JSONL must not retain the query value.'

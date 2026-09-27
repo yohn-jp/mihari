@@ -80,6 +80,46 @@ function Invoke-MihariTestRootConfirmation {
     finally { Stop-MihariTestRootConfirmation -Operator $operator }
 }
 
+function Read-MihariTestLiveText {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [int] $TimeoutMilliseconds = 2000
+    )
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        $stream = $null
+        $reader = $null
+        try {
+            $sharing = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+            $stream = [System.IO.FileStream]::new(
+                $Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $sharing
+            )
+            $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8)
+            return $reader.ReadToEnd()
+        }
+        catch {
+            $isSharingRace = ($_.Exception -is [System.IO.IOException] -or
+                $_.Exception.InnerException -is [System.IO.IOException])
+            if (-not $isSharingRace -or [DateTime]::UtcNow -ge $deadline) { throw }
+            Start-Sleep -Milliseconds 25
+        }
+        finally {
+            if ($null -ne $reader) { $reader.Dispose() }
+            elseif ($null -ne $stream) { $stream.Dispose() }
+        }
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out reading live test file $Path."
+}
+
+function Read-MihariTestCompleteLiveLines {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $content = Read-MihariTestLiveText -Path $Path
+    $lastNewline = $content.LastIndexOf("`n")
+    if ($lastNewline -lt 0) { return @() }
+    $complete = $content.Substring(0, $lastNewline + 1)
+    return @($complete -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
 function Get-MihariTestFreePort {
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     try {
