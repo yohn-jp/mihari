@@ -158,6 +158,55 @@ try {
     $confirmed = Invoke-MihariManagementCasesRoute -Session $session -Method 'POST' -Path ('/api/v2/dependencies/' + $dependency.dependencyId + '/necessity') -Query '' -Body ([pscustomobject]@{ state = 'business_required_confirmed'; confirmBusinessRequired = $true; rationale = 'Required for the upload operation.' })
     Assert-MihariManagementCases ($confirmed.StatusCode -eq 200 -and $confirmed.Value.result.explicitConfirmation) 'necessity confirmation is journaled against projected evidence'
 
+    $proposals = Invoke-MihariManagementCasesRoute -Session $session -Method 'GET' -Path '/api/v2/proposals' -Query ('caseId=' + $case.caseId + '&trialId=' + $beforeTrial.trialId) -Body $null
+    Assert-MihariManagementCases ($proposals.StatusCode -eq 200 -and $proposals.Value.items.Count -eq 1) 'proposals are generated from the selected canonical dependency'
+    Assert-MihariManagementCases ($proposals.Value.items[0].proposalType -eq 'url_allowlist' -and $proposals.Value.items[0].necessityState -eq 'business_required_confirmed') 'URL proposals retain their distinct type and operator necessity state'
+    $broadenedProposals = Invoke-MihariManagementCasesRoute -Session $session -Method 'GET' -Path '/api/v2/proposals' -Query ('caseId=' + $case.caseId + '&trialId=' + $beforeTrial.trialId + '&pathMatch=pathPrefix') -Body $null
+    Assert-MihariManagementCases ($broadenedProposals.StatusCode -eq 200 -and $broadenedProposals.Value.items[0].requiresConfirmation -contains 'broadened_path_prefix') 'broadened URL patterns remain suggestions until explicitly confirmed'
+
+    $neutralPolicy = [pscustomobject]@{
+        format = 'mihari-neutral-url-policy'
+        schemaVersion = 1
+        rules = @([pscustomobject]@{
+            ruleId = 'upload-api'; host = 'api.example.test'; scheme = 'https'; port = 443
+            matchType = 'exact'; path = '/items'; effect = 'allow'; methods = @('GET')
+        })
+    }
+    $policyComparison = Invoke-MihariManagementCasesRoute -Session $session -Method 'POST' -Path '/api/v2/policy/compare' -Query '' -Body ([pscustomobject]@{
+        caseId = $case.caseId; trialId = $beforeTrial.trialId; policyDocument = $neutralPolicy
+    })
+    Assert-MihariManagementCases ($policyComparison.StatusCode -eq 200 -and $policyComparison.Value.items[0].status -eq 'covered') 'policy comparison accepts only the documented neutral format'
+    $vendorPolicy = Invoke-MihariManagementCasesRoute -Session $session -Method 'POST' -Path '/api/v2/policy/compare' -Query '' -Body ([pscustomobject]@{
+        caseId = $case.caseId; trialId = $beforeTrial.trialId; policyDocument = [pscustomobject]@{ format = 'vendor-specific'; schemaVersion = 1; rules = @() }
+    })
+    Assert-MihariManagementCases ($vendorPolicy.StatusCode -eq 400) 'vendor policy formats are rejected instead of being interpreted by Mihari'
+
+    $previewRequest = [pscustomobject]@{
+        caseId = $case.caseId; trialId = $beforeTrial.trialId; dependencyIds = @($dependency.dependencyId)
+        businessAction = 'Upload report'; pathMatch = 'exact'
+        reproductionConditions = [pscustomobject]@{ mode = 'Inspect'; cacheState = 'unknown'; secretToken = 'change-request-secret' }
+    }
+    $preview = Invoke-MihariManagementCasesRoute -Session $session -Method 'POST' -Path '/api/v2/change-requests/preview' -Query '' -Body $previewRequest
+    Assert-MihariManagementCases ($preview.StatusCode -eq 200 -and $preview.Value.result.included.proposals -eq 1) 'change-request preview returns a redaction summary and selected proposal count'
+    $previewJson = ConvertTo-Json -InputObject $preview.Value -Depth 12 -Compress
+    Assert-MihariManagementCases ($previewJson -notmatch 'change-request-secret' -and $previewJson -notmatch 'fixture-secret') 'preview excludes secret-like fields and query values'
+
+    $exportRequest = [pscustomobject]@{}
+    foreach ($property in $previewRequest.PSObject.Properties) { $exportRequest | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value }
+    $exportRequest | Add-Member -NotePropertyName previewId -NotePropertyValue ([string]$preview.Value.result.previewId)
+    $exportRequest | Add-Member -NotePropertyName format -NotePropertyValue 'csv'
+    $export = Invoke-MihariManagementCasesRoute -Session $session -Method 'POST' -Path '/api/v2/change-requests/export' -Query '' -Body $exportRequest
+    Assert-MihariManagementCases ($export.StatusCode -eq 200 -and $export.Value.result.completed -and $export.Value.result.files.Count -eq 1) 'change-request export requires and completes a current preview'
+    Assert-MihariManagementCases ($export.Value.result.files[0].relativePath.StartsWith('change-requests/')) 'exports are stored under the case output root and return only a relative path'
+    $exportPath = Join-Path $temporaryRoot ($export.Value.result.files[0].relativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+    $exportText = [System.IO.File]::ReadAllText($exportPath, [System.Text.Encoding]::UTF8)
+    Assert-MihariManagementCases ($exportText -notmatch 'change-request-secret' -and $exportText -notmatch 'fixture-secret') 'CSV export excludes secret-like values and query values'
+
+    $resetNecessity = Invoke-MihariManagementCasesRoute -Session $session -Method 'POST' -Path ('/api/v2/dependencies/' + $dependency.dependencyId + '/necessity') -Query '' -Body ([pscustomobject]@{ state = 'necessity_unconfirmed' })
+    Assert-MihariManagementCases ($resetNecessity.StatusCode -eq 200) 'the operator can remove a prior necessity confirmation'
+    $staleExport = Invoke-MihariManagementCasesRoute -Session $session -Method 'POST' -Path '/api/v2/change-requests/export' -Query '' -Body $exportRequest
+    Assert-MihariManagementCases ($staleExport.StatusCode -eq 409 -and $staleExport.Value.error -eq 'preview_stale') 'export rejects proposal changes made after preview'
+
     $comparison = Invoke-MihariManagementCasesRoute -Session $session -Method 'GET' -Path '/api/v2/comparisons' -Query ('beforeTrialId=' + $beforeTrial.trialId + '&afterTrialId=' + $afterTrial.trialId) -Body $null
     Assert-MihariManagementCases ($comparison.StatusCode -eq 200 -and $comparison.Value.before.trialId -eq $beforeTrial.trialId -and $comparison.Value.after.trialId -eq $afterTrial.trialId) 'comparison uses the actual before/after trial records'
     Assert-MihariManagementCases ($comparison.Value.collectionCoverage.status -eq 'observed') 'comparison reports canonical event collection coverage'
