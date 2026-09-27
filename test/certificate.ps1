@@ -45,7 +45,9 @@ try {
     $leafThumbprint = $leaf.Thumbprint
     Write-Host '[certificate] after leaf issuance'
     Assert-MihariTest -Condition ($leaf.HasPrivateKey) -Message 'The exact-host leaf must have an in-memory private key.'
-    Assert-MihariTest -Condition ($cache['localhost'].PrivateKey.Key.IsEphemeral) -Message 'The exact-host leaf RSA key must be ephemeral.'
+    $leafKey = $cache['localhost'].PrivateKey
+    Assert-MihariTest -Condition ($leafKey -is [System.Security.Cryptography.RSACryptoServiceProvider]) -Message 'The exact-host TLS leaf must use the Schannel-compatible CAPI RSA provider.'
+    Assert-MihariTest -Condition (-not $leafKey.PersistKeyInCsp) -Message 'The exact-host leaf RSA key must not persist in the CAPI key store.'
     Write-Host '[certificate] before leaf-store scan'
     Assert-MihariTest -Condition (Test-MihariTestThumbprintAbsent -Thumbprint $leaf.Thumbprint) -Message 'An exact-host leaf must not be installed in any certificate store.'
     Write-Host '[certificate] after leaf-store scan'

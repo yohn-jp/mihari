@@ -65,7 +65,8 @@ try {
     $leaf = Get-MihariLeaf -Session $session -DestinationHost 'localhost'
     $leafThumbprint = $leaf.Thumbprint
     Assert-MihariTest -Condition $leaf.HasPrivateKey -Message 'The exact-host leaf needs a private key in memory.'
-    Assert-MihariTest -Condition $cache['localhost'].PrivateKey.Key.IsEphemeral -Message 'The exact-host RSA key must be ephemeral.'
+    Assert-MihariTest -Condition ($cache['localhost'].PrivateKey -is [System.Security.Cryptography.RSACryptoServiceProvider]) -Message 'The exact-host RSA key must use the ephemeral Windows CAPI provider.'
+    Assert-MihariTest -Condition (-not $cache['localhost'].PrivateKey.PersistKeyInCsp) -Message 'The exact-host RSA key must not persist in the CAPI provider.'
     Assert-MihariTest -Condition (Test-MihariTestThumbprintAbsent -Thumbprint $leafThumbprint) -Message 'The leaf must not be in a certificate store.'
     Assert-MihariTest -Condition (Test-MihariTestThumbprintAbsent -Thumbprint $ca.Thumbprint) -Message 'The CA must not be in a certificate store for this isolated proof.'
 

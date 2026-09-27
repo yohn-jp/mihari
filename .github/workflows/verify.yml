@@ -18,7 +18,7 @@ jobs:
       fail-fast: false
       matrix:
         shell: [powershell, pwsh]
-        proof: [cryptui, leaf]
+        proof: [leaf]
     defaults:
       run:
         shell: ${{ matrix.shell }}

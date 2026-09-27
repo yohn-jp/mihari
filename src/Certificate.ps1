@@ -1,4 +1,5 @@
-# Keys are explicitly ephemeral CNG keys. No PFX or private key is exported.
+# The CA uses ephemeral CNG; TLS leaves use ephemeral Windows CAPI keys.
+# No PFX or private key is exported.
 function New-MihariEphemeralRsa {
     [CmdletBinding()]
     param([int] $KeySize = 2048)
@@ -13,6 +14,34 @@ function New-MihariEphemeralRsa {
         }
         if ($rsa.KeySize -ne $KeySize) {
             throw 'CNG returned an RSA key with an unexpected size.'
+        }
+        return $rsa
+    }
+    catch {
+        $rsa.Dispose()
+        throw
+    }
+}
+
+# Schannel may reject a certificate backed by an unnamed CNG key during
+# SslStream server authentication. Try a Windows CAPI key whose provider
+# context is explicitly ephemeral and remains owned by this RSA object.
+function New-MihariEphemeralTlsRsa {
+    [CmdletBinding()]
+    param([int] $KeySize = 2048)
+
+    $parameters = [System.Security.Cryptography.CspParameters]::new(
+        24, 'Microsoft Enhanced RSA and AES Cryptographic Provider'
+    )
+    $parameters.KeyNumber = 1
+    $parameters.Flags = [System.Security.Cryptography.CspProviderFlags]::CreateEphemeralKey -bor
+        [System.Security.Cryptography.CspProviderFlags]::NoPrompt
+    $rsa = [System.Security.Cryptography.RSACryptoServiceProvider]::new($KeySize, $parameters)
+    try {
+        # Force generation now, while the provider context is still owned.
+        [void] $rsa.ExportParameters($false)
+        if ($rsa.KeySize -ne $KeySize -or $rsa.PersistKeyInCsp) {
+            throw 'CAPI returned a persistent or incorrectly sized TLS RSA key.'
         }
         return $rsa
     }
@@ -199,7 +228,7 @@ function New-MihariLeafCertificate {
     $issued = $null
     $certificate = $null
     try {
-        $rsa = New-MihariEphemeralRsa
+        $rsa = New-MihariEphemeralTlsRsa
         $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
             "CN=$($NormalizedHost.Name)",
             $rsa,
