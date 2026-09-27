@@ -181,9 +181,10 @@ try {
 finally {
     Close-MihariEventWriter -Writer $writer
     $events = [IO.File]::ReadAllText((Join-Path $temporary 'events.jsonl'))
-    Assert-MihariTest -Condition ($events.Contains('/one?token=[REDACTED]') -and -not $events.Contains('topsecret')) -Message 'HTTP/2 path evidence must redact query values.'
-    Assert-MihariTest -Condition ($events.Contains('http2.grpc_status') -and $events.Contains('http2.reset')) -Message 'RPC trailer and reset facts must remain distinct.'
-    Assert-MihariTest -Condition ($events.Contains('http2.flow_wait') -and $events.Contains('http2.goaway')) -Message 'Measured flow wait and GOAWAY direction must remain distinct facts.'
     [IO.Directory]::Delete($temporary,$true)
 }
+$requestEvents = @($events -split "`r?`n" | Where-Object { $_ -match '"stage":"http.request"' })
+Assert-MihariTest -Condition ($events.Contains('/one?token=[REDACTED]') -and -not $events.Contains('topsecret')) -Message ('HTTP/2 path evidence must redact query values; observed request event count: {0}; safe path present: {1}.' -f $requestEvents.Count, $events.Contains('/one?token=[REDACTED]'))
+Assert-MihariTest -Condition ($events.Contains('http2.grpc_status') -and $events.Contains('http2.reset')) -Message 'RPC trailer and reset facts must remain distinct.'
+Assert-MihariTest -Condition ($events.Contains('http2.flow_wait') -and $events.Contains('http2.goaway')) -Message 'Measured flow wait and GOAWAY direction must remain distinct facts.'
 Write-Host 'PASS phase2-http2-native: bounded frame parser, concurrent streams, safe path evidence'
