@@ -85,34 +85,38 @@ try {
     }
     $requestEncoder = New-MihariHpackContext -MaxTableSize 4096
     $responseEncoder = New-MihariHpackContext -MaxTableSize 4096
-    $requestBlock = Encode-MihariHpackBlock -Context $requestEncoder -Headers @(
+    $requestHeaders = @(
         [pscustomobject]@{ name = ':method'; value = 'GET' },
         [pscustomobject]@{ name = ':scheme'; value = 'https' },
         [pscustomobject]@{ name = ':authority'; value = 'localhost' },
         [pscustomobject]@{ name = ':path'; value = '/one?token=topsecret' }
     )
     foreach ($id in @(1,3)) {
+        $requestBlock = Encode-MihariHpackBlock -Context $requestEncoder -Headers $requestHeaders
         $wire = New-MihariTestH2Frame -Type 1 -Flags 5 -StreamId $id -Payload $requestBlock
         $frame = (Add-MihariHttp2Input -State $client -Bytes $wire -Count $wire.Length).Items[0]
         $forwarded = (Invoke-MihariHttp2Frame -Context $ctx -State $client -Opposite $upstream -Frame $frame).Frames
         Assert-MihariTest -Condition ($forwarded.Count -eq 1 -and $ctx.Streams.ContainsKey($id)) -Message 'Independent concurrent request streams must forward.'
     }
-    $responseBlock = Encode-MihariHpackBlock -Context $responseEncoder -Headers @([pscustomobject]@{ name = ':status'; value = '200' })
+    $responseHeaders = @([pscustomobject]@{ name = ':status'; value = '200' })
     foreach ($id in @(3,1)) {
+        $responseBlock = Encode-MihariHpackBlock -Context $responseEncoder -Headers $responseHeaders
         $wire = New-MihariTestH2Frame -Type 1 -Flags 5 -StreamId $id -Payload $responseBlock
         $frame = (Add-MihariHttp2Input -State $upstream -Bytes $wire -Count $wire.Length).Items[0]
         $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
     }
     Assert-MihariTest -Condition ($ctx.Streams.Count -eq 0) -Message 'Both concurrent streams must close independently.'
-    $requestBlock = Encode-MihariHpackBlock -Context $requestEncoder -Headers @(
+    $requestHeaders = @(
         [pscustomobject]@{ name = ':method'; value = 'POST' },
         [pscustomobject]@{ name = ':scheme'; value = 'https' },
         [pscustomobject]@{ name = ':authority'; value = 'localhost' },
         [pscustomobject]@{ name = ':path'; value = '/rpc.Service/Call' }
     )
+    $requestBlock = Encode-MihariHpackBlock -Context $requestEncoder -Headers $requestHeaders
     $wire = New-MihariTestH2Frame -Type 1 -Flags 5 -StreamId 5 -Payload $requestBlock
     $frame = (Add-MihariHttp2Input -State $client -Bytes $wire -Count $wire.Length).Items[0]
     $null = Invoke-MihariHttp2Frame -Context $ctx -State $client -Opposite $upstream -Frame $frame
+    $responseBlock = Encode-MihariHpackBlock -Context $responseEncoder -Headers $responseHeaders
     $wire = New-MihariTestH2Frame -Type 1 -Flags 4 -StreamId 5 -Payload $responseBlock
     $frame = (Add-MihariHttp2Input -State $upstream -Bytes $wire -Count $wire.Length).Items[0]
     $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
@@ -122,6 +126,7 @@ try {
     $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
     Assert-MihariTest -Condition ($ctx.Streams.Count -eq 0) -Message 'gRPC trailer status must close the stream.'
 
+    $requestBlock = Encode-MihariHpackBlock -Context $requestEncoder -Headers $requestHeaders
     $wire = New-MihariTestH2Frame -Type 1 -Flags 5 -StreamId 7 -Payload $requestBlock
     $frame = (Add-MihariHttp2Input -State $client -Bytes $wire -Count $wire.Length).Items[0]
     $null = Invoke-MihariHttp2Frame -Context $ctx -State $client -Opposite $upstream -Frame $frame
