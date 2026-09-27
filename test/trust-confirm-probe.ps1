@@ -201,7 +201,14 @@ if ($Role -eq 'Operator') {
                 $handle = [IntPtr] $window.Current.NativeWindowHandle
             }
             catch { continue } # Window closed during enumeration.
-            if ($title -cne 'Security Warning' -or $handle -eq [IntPtr]::Zero) { continue }
+            if ($processId -eq $WorkerProcessId -and $title) {
+                Write-Host "[trust-confirm] worker window title='$title'"
+            }
+            $expectedWarning = ($title -ceq 'Security Warning')
+            if ($Operation -eq 'Remove' -and $title -ceq 'Root Certificate Store') {
+                $expectedWarning = $true
+            }
+            if (-not $expectedWarning -or $handle -eq [IntPtr]::Zero) { continue }
             $owner = [IntPtr] $native.GetWindow.Invoke($null, [object[]] @($handle, [int] 4)) # GW_OWNER
             $ownerPid = 0
             if ($owner -ne [IntPtr]::Zero) {
@@ -221,7 +228,10 @@ if ($Role -eq 'Operator') {
             Write-Host '[trust-confirm] posted IDYES to exact worker warning'
             exit 0
         }
-        if ($null -eq (Get-Process -Id $WorkerProcessId -ErrorAction SilentlyContinue)) { break }
+        if ($null -eq (Get-Process -Id $WorkerProcessId -ErrorAction SilentlyContinue)) {
+            Write-Host '[trust-confirm] worker exited without a Security Warning'
+            exit 0
+        }
         Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "No Security Warning owned by worker PID $WorkerProcessId was found."
