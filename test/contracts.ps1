@@ -6,6 +6,7 @@ $sourceRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'src'
 . (Join-Path $sourceRoot 'Http.ps1')
 . (Join-Path $sourceRoot 'Observation.ps1')
 . (Join-Path $sourceRoot 'Diagnosis.ps1')
+. (Join-Path $sourceRoot 'Cli.ps1')
 
 function New-MihariTestMemoryStream {
     param([Parameter(Mandatory = $true)][byte[]] $Bytes)
@@ -151,7 +152,18 @@ try {
     Assert-MihariTest -Condition ([IO.File]::Exists((Join-Path $reportDirectory 'report.json'))) -Message 'JSON report must be written.'
     Assert-MihariTest -Condition ([IO.File]::Exists((Join-Path $reportDirectory 'report.txt'))) -Message 'Text report must be written.'
     Assert-MihariTest -Condition ($report.eventCount -eq 1 -and $report.sessionId -eq $session.Id) -Message 'Report must carry event count and session identity.'
-    Write-Host 'PASS contracts: HTTP framing/binary/chunked/authority/hop headers, redaction/JSONL, conservative diagnoses/evidence, reports'
+    $help = Get-MihariHelpText
+    Assert-MihariTest -Condition ($help -match '(?m)^Usage:' -and $help -match '\.\\mihari\.ps1 start' -and $help -match '\.\\mihari\.ps1 status') -Message 'CLI help must expose the primary user workflow.'
+    $emptyStatus = Format-MihariStatus -Metadata $null
+    Assert-MihariTest -Condition ($emptyStatus -eq 'No Mihari session found. Start one with: .\mihari.ps1 start') -Message 'CLI status must explain the no-session state.'
+    $runningStatus = Format-MihariStatus -Metadata ([pscustomobject]@{
+        effectiveStatus = 'running'; mode = 'Inspect'; sessionId = 'abc'; processAlive = $true; processId = 1234
+        actualPort = 8899; port = 8899; outputDirectory = 'C:\Mihari\sessions\abc'
+    })
+    Assert-MihariTest -Condition ($runningStatus -match 'Status: running' -and $runningStatus -match 'Proxy: http://127\.0\.0\.1:8899') -Message 'CLI status must expose runtime state and the usable proxy endpoint.'
+    $stopText = Format-MihariStopResult -Result ([pscustomobject]@{ requested = $false; reason = 'no_session'; sessionId = $null })
+    Assert-MihariTest -Condition ($stopText -eq 'No Mihari session found.') -Message 'CLI stop must explain the no-session state.'
+    Write-Host 'PASS contracts: HTTP framing/binary/chunked/authority/hop headers, redaction/JSONL, conservative diagnoses/evidence, reports, CLI UX'
 }
 finally {
     Remove-Item -LiteralPath $tempDirectory -Recurse -Force -ErrorAction SilentlyContinue

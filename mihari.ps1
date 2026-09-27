@@ -1,7 +1,7 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'browser', 'status', 'report', 'stop', 'cleanup')]
-    [string] $Command = 'status',
+    [ValidateSet('help', 'start', 'browser', 'status', 'report', 'stop', 'cleanup')]
+    [string] $Command = 'help',
     [ValidateSet('Inspect', 'Tunnel')]
     [string] $Mode = 'Inspect',
     [int] $Port = 8899,
@@ -14,27 +14,35 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $sourceRoot = Join-Path $PSScriptRoot 'src'
-foreach ($name in @('Compatibility', 'Certificate', 'Observation', 'Http', 'Upstream', 'Tls', 'Connection', 'Listener', 'Diagnosis', 'Cleanup', 'Session', 'Browser')) {
+foreach ($name in @('Compatibility', 'Certificate', 'Observation', 'Http', 'Upstream', 'Tls', 'Connection', 'Listener', 'Diagnosis', 'Cleanup', 'Session', 'Browser', 'Cli')) {
     . (Join-Path $sourceRoot ($name + '.ps1'))
 }
 
 switch ($Command) {
+    'help' {
+        Get-MihariHelpText
+        break
+    }
     'start' {
         $session = New-MihariSession -Mode $Mode -Port $Port -UpstreamProxy $UpstreamProxy -OutputRoot $OutputRoot -MaxWorkers $MaxWorkers
+        Format-MihariStartMessage -Session $session
         try {
             Start-MihariListener -Session $session
         }
         finally {
-            Stop-MihariSession -Session $session
+            $final = Stop-MihariSession -Session $session
+            Format-MihariFinalStop -Result $final
         }
         break
     }
     'status' {
-        Get-MihariSessionStatus -OutputRoot $OutputRoot
+        $metadata = Get-MihariSessionStatus -OutputRoot $OutputRoot
+        Format-MihariStatus -Metadata $metadata
         break
     }
     'stop' {
-        Request-MihariSessionStop -OutputRoot $OutputRoot
+        $result = Request-MihariSessionStop -OutputRoot $OutputRoot
+        Format-MihariStopResult -Result $result
         break
     }
     'browser' {
@@ -42,17 +50,20 @@ switch ($Command) {
         if ($null -eq $metadata -or -not $metadata.processAlive -or $metadata.effectiveStatus -ne 'running') {
             throw 'No running Mihari session is available for Edge launch. Start a session and retry.'
         }
-        Start-MihariBrowser -SessionMetadata $metadata -Url $Url
+        $result = Start-MihariBrowser -SessionMetadata $metadata -Url $Url
+        Format-MihariBrowserResult -Result $result
         break
     }
     'report' {
         $metadata = Get-MihariSessionStatus -OutputRoot $OutputRoot
         if ($null -eq $metadata) { throw 'No Mihari session is available to report.' }
-        New-MihariReport -EventsPath $metadata.eventsPath -OutputDirectory $metadata.outputDirectory -CompareEventsPath $CompareEventsPath
+        $report = New-MihariReport -EventsPath $metadata.eventsPath -OutputDirectory $metadata.outputDirectory -CompareEventsPath $CompareEventsPath
+        Format-MihariReportResult -Report $report
         break
     }
     'cleanup' {
-        Invoke-MihariCleanup -OutputRoot $OutputRoot
+        $result = Invoke-MihariCleanup -OutputRoot $OutputRoot
+        Format-MihariCleanupResult -Result $result
         break
     }
 }

@@ -255,9 +255,13 @@ Each diagnosis must include the event IDs or connection/request IDs that constit
 
 ## 13. Initial user interface
 
-The implementation should expose one thin entry point, for example:
+The implementation should expose one thin entry point. Invoking it with no command must show usage rather than silently treating the invocation as a status request. User-facing commands should produce concise human-readable output, including an explicit no-session result for `status`.
+
+For example:
 
 ```powershell
+.\mihari.ps1
+.\mihari.ps1 help
 .\mihari.ps1 start
 .\mihari.ps1 start -Mode Inspect -Port 8899
 .\mihari.ps1 browser
