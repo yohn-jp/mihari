@@ -258,9 +258,16 @@ function Get-MihariDependencyTrialAssignment {
     $directCaseIds = @($Events | Where-Object { $_.CaseId } | Select-Object -ExpandProperty CaseId -Unique)
     if ($directTrialIds.Count -eq 1) {
         $trial = @($Trials | Where-Object { [string]$_.trialId -eq [string]$directTrialIds[0] } | Select-Object -First 1)
+        $sessionIds = @($Events | Select-Object -ExpandProperty SessionId -Unique)
+        if ($sessionIds.Count -ne 1 -or ($trial.Count -gt 0 -and [string]$trial[0].sessionId -ne [string]$sessionIds[0])) {
+            return [pscustomobject]@{ TrialId = $null; CaseId = $null; Attribution = 'ambiguous'; AmbiguousTrialIds = @($directTrialIds) }
+        }
         $caseId = $null
-        if ($directCaseIds.Count -eq 1) { $caseId = [string]$directCaseIds[0] }
-        elseif ($trial.Count -gt 0) { $caseId = [string]$trial[0].caseId }
+        if ($directCaseIds.Count -eq 1) {
+            $caseId = [string]$directCaseIds[0]
+            if ($trial.Count -gt 0 -and [string]$trial[0].caseId -ne $caseId) { $caseId = $null }
+        }
+        elseif ($directCaseIds.Count -eq 0 -and $trial.Count -gt 0) { $caseId = [string]$trial[0].caseId }
         return [pscustomobject]@{ TrialId = [string]$directTrialIds[0]; CaseId = $caseId; Attribution = 'direct'; AmbiguousTrialIds = @() }
     }
     if ($directTrialIds.Count -gt 1 -or $directCaseIds.Count -gt 1) {
@@ -372,6 +379,35 @@ function Get-MihariDependencyHash {
     finally { $sha.Dispose() }
 }
 
+function Get-MihariDependencyPage {
+    param(
+        [Parameter(Mandatory = $true)][object[]] $Items,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 200)][int] $MaximumItems,
+        [Parameter(Mandatory = $true)][ValidateSet('dependencies', 'policy', 'proposals')][string] $Kind,
+        [Parameter(Mandatory = $true)][string] $Revision,
+        [string] $Cursor
+    )
+
+    $offset = 0
+    if (-not [string]::IsNullOrWhiteSpace($Cursor)) {
+        $escapedKind = [regex]::Escape($Kind)
+        if ($Cursor -notmatch ('^' + $escapedKind + '-v1:(?<revision>[0-9a-f]{64}):(?<offset>\d+)$')) {
+            throw 'The dependency query cursor is invalid.'
+        }
+        if (-not [string]::Equals([string]$Matches.revision, $Revision, [StringComparison]::Ordinal)) {
+            throw 'The dependency query cursor was invalidated because its source revision changed.'
+        }
+        $offset = [int]$Matches.offset
+        if ($offset -lt 0 -or $offset -gt $Items.Count) { throw 'The dependency query cursor offset is invalid.' }
+    }
+    $pageItems = @($Items | Select-Object -Skip $offset -First $MaximumItems)
+    $nextCursor = $null
+    if (($offset + $pageItems.Count) -lt $Items.Count) {
+        $nextCursor = $Kind + '-v1:' + $Revision + ':' + ($offset + $pageItems.Count).ToString([Globalization.CultureInfo]::InvariantCulture)
+    }
+    return [pscustomobject]@{ Items = $pageItems; NextCursor = $nextCursor; Revision = $Revision; ScopeTotal = [int]$Items.Count }
+}
+
 function Get-MihariDependencyTargetSummary {
     param([Parameter(Mandatory = $true)][object[]] $Events)
 
@@ -454,9 +490,10 @@ function Get-MihariDependencyAttemptSummary {
         if ($event.SourceVersion -and -not $sourceVersions.Contains($event.SourceVersion)) { $sourceVersions.Add($event.SourceVersion) }
     }
     $httpClass = 'unknown'
-    if ($statuses.Count -gt 0) {
-        $hasHttpSuccess = @($statuses.ToArray() | Where-Object { $_ -ge 200 -and $_ -lt 400 }).Count -gt 0
-        $hasHttpError = @($statuses.ToArray() | Where-Object { $_ -ge 400 }).Count -gt 0
+    $finalStatuses = @($statuses.ToArray() | Where-Object { $_ -ge 200 })
+    if ($finalStatuses.Count -gt 0) {
+        $hasHttpSuccess = @($finalStatuses | Where-Object { $_ -lt 400 }).Count -gt 0
+        $hasHttpError = @($finalStatuses | Where-Object { $_ -ge 400 }).Count -gt 0
         if ($hasHttpSuccess -and $hasHttpError) { $httpClass = 'mixed_responses' }
         elseif ($hasHttpSuccess) { $httpClass = 'response_2xx_3xx' }
         else { $httpClass = 'response_4xx_5xx' }
@@ -493,9 +530,12 @@ function Get-MihariDependencyProjection {
         [object[]] $Markers = @(),
         [AllowNull()][object] $NecessityRecords,
         [Alias('OutputDirectory', 'StoreRoot')][string] $CaseRoot,
-        [ValidateRange(1, 200)][int] $MaximumItems = 200
+        [ValidateRange(1, 200)][int] $MaximumItems = 200,
+        [string] $Cursor
     )
 
+    # Events must represent the complete declared session/trial scope, not the
+    # current UI page. Paging below applies only after the full projection.
     if ($CaseRoot) {
         $snapshot = Get-MihariCaseStoreSnapshot -CaseRoot $CaseRoot
         if ($Trials.Count -eq 0) { $Trials = @($snapshot.Trials) }
@@ -656,10 +696,21 @@ function Get-MihariDependencyProjection {
         })
     }
     $orderedDependencies = @($dependencies.ToArray() | Sort-Object -Property host, path, trialId, dependencyId)
+    $revisionPayload = [pscustomobject]@{
+        items = @($orderedDependencies)
+        missingIdentityEventCount = [int]$missingIdentityCount
+        duplicateEventCount = [int]$duplicateEventCount
+        targetConflictAttemptCount = [int]$targetConflictCount
+        heuristicTrialAttributionCount = [int]$heuristicTrialCount
+        ambiguousTrialAttributionCount = [int]$ambiguousTrialCount
+    }
+    $revisionJson = ConvertTo-Json -InputObject $revisionPayload -Depth 8 -Compress -ErrorAction Stop
+    $revision = Get-MihariDependencyHash -Text $revisionJson
+    $page = Get-MihariDependencyPage -Items $orderedDependencies -MaximumItems $MaximumItems -Kind dependencies -Revision $revision -Cursor $Cursor
     return [pscustomobject]@{
-        items = @($orderedDependencies | Select-Object -First $MaximumItems)
-        nextCursor = $null; revision = $null; ordering = 'host:path:trialId:dependencyId'
-        scopeTotal = [int]$orderedDependencies.Count
+        items = @($page.Items)
+        nextCursor = $page.NextCursor; revision = $page.Revision; ordering = 'host:path:trialId:dependencyId'
+        scopeTotal = [int]$page.ScopeTotal
         coverage = [pscustomobject]@{
             status = $(if ($missingIdentityCount -gt 0 -or $targetConflictCount -gt 0 -or $ambiguousTrialCount -gt 0) { 'incomplete' } else { 'observed' })
             inputEventCount = [int]@($Events).Count; projectedEventCount = [int]$normalizedEvents.Count
@@ -767,7 +818,8 @@ function Compare-MihariDependencyPolicy {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Dependencies,
         [Parameter(Mandatory = $true)][AllowNull()][object] $PolicyDocument,
-        [ValidateRange(1, 200)][int] $MaximumItems = 200
+        [ValidateRange(1, 200)][int] $MaximumItems = 200,
+        [string] $Cursor
     )
 
     $policy = ConvertTo-MihariNeutralPolicyRuleSet -PolicyDocument $PolicyDocument
@@ -825,11 +877,14 @@ function Compare-MihariDependencyPolicy {
             scheme = $scheme; host = $host; port = $port; path = $path
         })
     }
-    $allItems = @($items.ToArray())
+    $allItems = @($items.ToArray() | Sort-Object -Property dependencyId)
+    $revisionJson = ConvertTo-Json -InputObject @($allItems) -Depth 8 -Compress -ErrorAction Stop
+    $revision = Get-MihariDependencyHash -Text ($policy.Reason + [char]0 + $revisionJson)
+    $page = Get-MihariDependencyPage -Items $allItems -MaximumItems $MaximumItems -Kind policy -Revision $revision -Cursor $Cursor
     return [pscustomobject]@{
-        schemaVersion = 1; policyFormat = 'mihari-neutral-url-policy'; items = @($allItems | Select-Object -First $MaximumItems)
-        nextCursor = $null; revision = $null; ordering = 'dependencyId:asc'; scopeTotal = [int]$allItems.Count
-        coverage = $(if ($policy.Supported) { 'observed' } else { 'unsupported' })
+        schemaVersion = 1; policyFormat = 'mihari-neutral-url-policy'; items = @($page.Items)
+        nextCursor = $page.NextCursor; revision = $page.Revision; ordering = 'dependencyId:asc'; scopeTotal = [int]$page.ScopeTotal
+        coverage = $(if (-not $policy.Supported) { 'unsupported' } elseif ($policy.UnsupportedRules.Count -gt 0) { 'incomplete' } else { 'observed' })
         unsupportedRuleCount = [int]$policy.UnsupportedRules.Count; freshnessUtc = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
     }
 }
@@ -858,10 +913,17 @@ function Test-MihariTlsExclusionEvidence {
     $tunnelTrialId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $Evidence -Names @('tunnelTrialId')) -MaximumLength 128
     $refs = Get-MihariDependencyValue -InputObject $Evidence -Names @('evidenceReferences', 'evidence')
     $safeRefs = New-Object 'System.Collections.Generic.List[object]'
+    $seenRefs = New-MihariOrdinalHashtable
     foreach ($reference in @($refs)) {
         $sessionId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $reference -Names @('sessionId')) -MaximumLength 128
         $eventId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $reference -Names @('eventId')) -MaximumLength 128
-        if ($sessionId -and $eventId) { $safeRefs.Add([pscustomobject]@{ sessionId = $sessionId; eventId = $eventId }) }
+        if ($sessionId -and $eventId) {
+            $referenceKey = $sessionId + [char]0 + $eventId
+            if (-not $seenRefs.ContainsKey($referenceKey)) {
+                $seenRefs[$referenceKey] = $true
+                $safeRefs.Add([pscustomobject]@{ sessionId = $sessionId; eventId = $eventId })
+            }
+        }
     }
     $valid = ($classification -eq 'tls_interception_incompatible' -and $strength -eq 'comparison_supported' -and
         $inspectFailure -eq $true -and $tunnelOutcome -eq 'succeeded' -and $sameRoute -eq $true -and
@@ -879,7 +941,9 @@ function New-MihariPolicyProposals {
         [object[]] $TlsEvidence = @(),
         [ValidateSet('exact', 'pathPrefix')][string] $PathMatch = 'exact',
         [switch] $ConfirmBroadenedPathPrefix,
-        [ValidateRange(1, 200)][int] $MaximumItems = 200
+        [switch] $ConfirmTlsExclusionHostScope,
+        [ValidateRange(1, 200)][int] $MaximumItems = 200,
+        [string] $Cursor
     )
 
     $proposals = New-Object 'System.Collections.Generic.List[object]'
@@ -939,6 +1003,7 @@ function New-MihariPolicyProposals {
         })
     }
 
+    $seenTlsProposalScopes = New-MihariOrdinalHashtable
     foreach ($tlsEvidence in $TlsEvidence) {
         $validated = Test-MihariTlsExclusionEvidence -Evidence $tlsEvidence
         if (-not $validated.Valid) { continue }
@@ -950,15 +1015,19 @@ function New-MihariPolicyProposals {
                 ($null -eq $caseId -or [string](Get-MihariDependencyValue -InputObject $_ -Names @('caseId')) -eq $caseId)
             })
         if ($matchingDependencies.Count -eq 0) { continue }
-        $dependency = $matchingDependencies[0]
+        $comparisonId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $tlsEvidence -Names @('comparisonId')) -MaximumLength 128
+        if ($null -eq $comparisonId) { $comparisonId = 'comparison-' + (Get-MihariDependencyHash -Text ($validated.InspectTrialId + [char]0 + $validated.TunnelTrialId + [char]0 + $host)).Substring(0, 24) }
+        $scopeKey = [string]$caseId + [char]0 + $comparisonId + [char]0 + $host
+        if ($seenTlsProposalScopes.ContainsKey($scopeKey)) { continue }
+        $seenTlsProposalScopes[$scopeKey] = $true
+        $dependency = @($matchingDependencies | Sort-Object -Property dependencyId | Select-Object -First 1)[0]
         $dependencyId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $dependency -Names @('dependencyId')) -MaximumLength 128
         $necessityState = [string](Get-MihariDependencyValue -InputObject $dependency -Names @('necessityState'))
         $requiredConfirmations = New-Object 'System.Collections.Generic.List[string]'
         if ($necessityState -ne 'business_required_confirmed') { $requiredConfirmations.Add('business_necessity') }
+        if (-not $ConfirmTlsExclusionHostScope) { $requiredConfirmations.Add('exact_host_scope') }
         $status = 'candidate'
         if ($requiredConfirmations.Count -gt 0) { $status = 'requires_confirmation' }
-        $comparisonId = ConvertTo-MihariDependencySafeText -Value (Get-MihariDependencyValue -InputObject $tlsEvidence -Names @('comparisonId')) -MaximumLength 128
-        if ($null -eq $comparisonId) { $comparisonId = 'comparison-' + (Get-MihariDependencyHash -Text ($validated.InspectTrialId + [char]0 + $validated.TunnelTrialId + [char]0 + $host)).Substring(0, 24) }
         $proposalSeed = @('tls_inspection_exclusion', $dependencyId, $comparisonId, $host) -join [char]0
         $proposals.Add([pscustomobject]@{
             schemaVersion = 1; proposalId = 'proposal-' + (Get-MihariDependencyHash -Text $proposalSeed).Substring(0, 24)
@@ -967,7 +1036,7 @@ function New-MihariPolicyProposals {
             localAction = 'New Mihari client connections to this host use Tunnel mode.'
             upstreamRoute = 'unchanged'; upstreamTlsValidation = 'unchanged'; proposalStatus = $status
             necessityState = $(if ($necessityState) { $necessityState } else { 'necessity_unconfirmed' })
-            requiresConfirmation = @($requiredConfirmations.ToArray()); comparisonId = $comparisonId
+            requiresConfirmation = @($requiredConfirmations.ToArray()); exactHostScopeConfirmed = [bool]$ConfirmTlsExclusionHostScope; comparisonId = $comparisonId
             inspectTrialId = $validated.InspectTrialId; tunnelTrialId = $validated.TunnelTrialId
             evidenceStrength = 'comparison_supported'; rationale = 'A comparable Inspect failure and Tunnel business success supports a local inspection exclusion for this exact host; it does not identify pinning or mTLS.'
             limitations = @('Tunnel bytes alone are not application success.','This local Mihari setting does not change upstream routing or enterprise TLS policy.')
@@ -976,9 +1045,12 @@ function New-MihariPolicyProposals {
         })
     }
     $all = @($proposals.ToArray() | Sort-Object -Property proposalType, host, path, proposalId)
+    $revisionJson = ConvertTo-Json -InputObject ([pscustomobject]@{ items = @($all); withheld = @($withheld.ToArray()) }) -Depth 8 -Compress -ErrorAction Stop
+    $revision = Get-MihariDependencyHash -Text $revisionJson
+    $page = Get-MihariDependencyPage -Items $all -MaximumItems $MaximumItems -Kind proposals -Revision $revision -Cursor $Cursor
     return [pscustomobject]@{
-        schemaVersion = 1; items = @($all | Select-Object -First $MaximumItems); nextCursor = $null; revision = $null
-        ordering = 'proposalType:host:path:proposalId'; scopeTotal = [int]$all.Count
+        schemaVersion = 1; items = @($page.Items); nextCursor = $page.NextCursor; revision = $page.Revision
+        ordering = 'proposalType:host:path:proposalId'; scopeTotal = [int]$page.ScopeTotal
         coverage = $(if ($withheld.Count -gt 0) { 'incomplete' } else { 'observed' })
         withheld = @($withheld.ToArray()); unsupportedTlsEvidenceCount = [int]@($TlsEvidence | Where-Object { -not (Test-MihariTlsExclusionEvidence -Evidence $_).Valid }).Count
         freshnessUtc = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
@@ -1120,13 +1192,15 @@ function ConvertTo-MihariCsvCell {
 
 function ConvertTo-MihariChangeRequestCsv {
     param([Parameter(Mandatory = $true)][object] $Payload)
-    $columns = @('proposalId', 'proposalType', 'policyDomain', 'caseId', 'trialId', 'scheme', 'host', 'port', 'matchType', 'path', 'methods', 'necessityState', 'existingPolicyStatus', 'proposalStatus', 'requiresConfirmation', 'rationale', 'evidenceReferences')
+    $columns = @('businessAction', 'reproductionConditions', 'proposalId', 'proposalType', 'policyDomain', 'caseId', 'trialId', 'scheme', 'host', 'port', 'matchType', 'path', 'methods', 'necessityState', 'existingPolicyStatus', 'proposalStatus', 'requiresConfirmation', 'rationale', 'evidenceReferences')
     $lines = New-Object 'System.Collections.Generic.List[string]'
     $lines.Add([string]::Join(',', @($columns | ForEach-Object { ConvertTo-MihariCsvCell -Value $_ })))
     foreach ($proposal in @($Payload.proposals)) {
         $values = New-Object 'System.Collections.Generic.List[object]'
         foreach ($column in $columns) {
-            $value = Get-MihariDependencyValue -InputObject $proposal -Names @($column)
+            if ($column -eq 'businessAction') { $value = $Payload.businessAction }
+            elseif ($column -eq 'reproductionConditions') { $value = ConvertTo-Json -InputObject $Payload.reproductionConditions -Depth 8 -Compress }
+            else { $value = Get-MihariDependencyValue -InputObject $proposal -Names @($column) }
             if ($column -eq 'requiresConfirmation' -and $null -ne $value) { $value = [string]::Join('; ', @($value)) }
             if ($column -eq 'evidenceReferences' -and $null -ne $value) {
                 $value = [string]::Join('; ', @($value | ForEach-Object { [string]$_.sessionId + ':' + [string]$_.eventId }))
@@ -1180,7 +1254,7 @@ function Write-MihariChangeRequestFileAtomic {
     $directory = [System.IO.Path]::GetDirectoryName($fullPath)
     if (-not [System.IO.Directory]::Exists($directory)) { [void][System.IO.Directory]::CreateDirectory($directory) }
     $temporaryPath = $fullPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
-    $encoding = New-Object System.Text.UTF8Encoding($false)
+    $encoding = [System.Text.UTF8Encoding]::new($false)
     try {
         [System.IO.File]::WriteAllText($temporaryPath, $Text, $encoding)
         if ([System.IO.File]::Exists($fullPath)) { [System.IO.File]::Delete($fullPath) }
