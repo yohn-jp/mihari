@@ -89,6 +89,7 @@ $browser = $null
 $addOperator = $null
 $originListener = $null
 $pauseListener = $null
+$caseListener = $null
 $diagnosticProfile = $null
 $cleanupFailure = $null
 try {
@@ -100,6 +101,14 @@ try {
     $browser = Start-Issue3UiEdge -Uri $managementUrl -ProfilePath (Join-Path $tempRoot 'management-edge')
     $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("session-id")?.textContent || ""' -Predicate {
         param($value) [string]$value -eq [string]$metadata.sessionId
+    }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'var language=document.getElementById("language-switch"); language.value="ja"; language.dispatchEvent(new Event("change")); true'
+    $null = Wait-Issue3UiValue -Browser $browser -Expression '(document.documentElement.lang==="ja" && document.getElementById("tab-traffic").textContent!=="Traffic Inspector" && document.getElementById("tab-evidence").textContent!=="Evidence" && document.querySelector(".workspace-nav").getAttribute("aria-label")!=="Diagnostic workspaces")' -Predicate {
+        param($value) $value -eq $true
+    }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'var language=document.getElementById("language-switch"); language.value="en"; language.dispatchEvent(new Event("change")); true'
+    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("tab-traffic").textContent' -Predicate {
+        param($value) [string]$value -eq 'Traffic Inspector'
     }
 
     # The protected mode action must work from the served token bootstrap.
@@ -196,12 +205,62 @@ try {
     $finalState = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('JSON.stringify({rows:document.querySelectorAll("#request-rows .traffic-row[data-request-key]").length,visible:document.getElementById("traffic-view").hidden===false,paused:document.getElementById("traffic-display-state").textContent})')
     $final = ConvertFrom-Json -InputObject ([string]$finalState)
     Assert-MihariTest -Condition ($final.rows -ge 2 -and $final.visible) -Message 'The live Traffic Inspector must recover and render both real local requests in Edge.'
-    Write-Host 'PASS phase2-ui-browser: real Edge mode and browser actions, filtered request selection, evidence drill-down, pause/resume capture, query redaction, and API recovery.'
+
+    # Create a case and two marker-bounded trials through the actual workbench.
+    $caseTitle = 'Phase 2 UI case ' + [guid]::NewGuid().ToString('N')
+    $caseTitleJson = ConvertTo-Json -InputObject $caseTitle -Compress
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("tab-dependencies").click(); document.getElementById("new-case-title").value={0}; document.getElementById("create-case").click(); true' -f $caseTitleJson)
+    $caseIdValue = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("case-picker").value' -Predicate { param($value) [string]$value -match '^case-[0-9a-f]{32}$' }
+    $caseId = [string]$caseIdValue
+    Assert-MihariTest -Condition ([string](Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("case-trial-summary").textContent') -match [regex]::Escape($caseTitle)) -Message 'The case created through the workbench must appear in the selected case summary.'
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("create-trial").click(); true'
+    $beforeTrialId = [string](Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("trial-picker").value' -Predicate { param($value) [string]$value -match '^trial-[0-9a-f]{32}$' })
+    $operationLabelJson = ConvertTo-Json -InputObject 'Upload report' -Compress
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("marker-boundary").value="start"; document.getElementById("marker-label").value={0}; document.getElementById("add-marker").click(); true' -f $operationLabelJson)
+    $caseListener = New-MihariTestListener
+    $casePathBefore = $pathPrefix + '/comparison-before'
+    $caseResponseBefore = Invoke-Phase2UiProxyGet -ProxyPort ([int]$metadata.actualPort) -Origin $caseListener -Path $casePathBefore -QueryToken $queryToken
+    Assert-MihariTest -Condition ($caseResponseBefore.Headers.StartsWith('HTTP/1.1 200') -and $caseResponseBefore.Body -eq 'phase2-ui-ok') 'A trial-bounded local request must pass through the actual proxy.'
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("marker-boundary").value="end"; document.getElementById("marker-label").value={0}; document.getElementById("add-marker").click(); document.getElementById("case-note").value="Captured from a local fixture"; document.getElementById("add-case-note").click(); document.getElementById("trial-outcome").value="failed"; document.getElementById("complete-trial").click(); true' -f $operationLabelJson)
+    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("case-trial-summary").textContent' -Predicate { param($value) [string]$value -match 'failed' }
+
+    # Change one diagnostic condition, then capture and compare another real local trial.
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("inspect-toggle").click(); true'
+    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("mode-state").textContent' -Predicate { param($value) [string]$value -eq 'Inspect' }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("create-trial").click(); true'
+    $afterTrialId = [string](Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("trial-picker").value' -Predicate { param($value) [string]$value -match '^trial-[0-9a-f]{32}$' -and [string]$value -ne [string]$beforeTrialId })
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("marker-boundary").value="start"; document.getElementById("marker-label").value={0}; document.getElementById("add-marker").click(); true' -f $operationLabelJson)
+    $casePathAfter = $pathPrefix + '/comparison-after'
+    $caseResponseAfter = Invoke-Phase2UiProxyGet -ProxyPort ([int]$metadata.actualPort) -Origin $caseListener -Path $casePathAfter -QueryToken $queryToken
+    Assert-MihariTest -Condition ($caseResponseAfter.Headers.StartsWith('HTTP/1.1 200') -and $caseResponseAfter.Body -eq 'phase2-ui-ok') 'The changed-mode trial must also reach the local fixture.'
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("marker-boundary").value="end"; document.getElementById("marker-label").value={0}; document.getElementById("add-marker").click(); document.getElementById("trial-outcome").value="succeeded"; document.getElementById("complete-trial").click(); true' -f $operationLabelJson)
+    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("case-trial-summary").textContent' -Predicate { param($value) [string]$value -match 'succeeded' }
+    $beforeTrialJson = ConvertTo-Json -InputObject $beforeTrialId -Compress
+    $afterTrialJson = ConvertTo-Json -InputObject $afterTrialId -Compress
+    $compareExpression = 'document.getElementById("compare-before").value='+$beforeTrialJson+'; document.getElementById("compare-after").value='+$afterTrialJson+'; document.getElementById("tab-compare").click(); document.getElementById("run-comparison").click(); true'
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression $compareExpression
+    $comparisonText = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("comparison-result").textContent' -Predicate { param($value) [string]$value -match 'Changed conditions' -and [string]$value -match 'mode' }
+    Assert-MihariTest -Condition ([string]$comparisonText -match 'Inspect' -and [string]$comparisonText -match 'Tunnel') 'The comparison view must display the actual one-variable mode change from the two completed trials.'
+
+    # Confirm an evidence-backed dependency and export a current change-request preview.
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("tab-dependencies").click(); true'
+    $dependencyText = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("dependency-rows").textContent' -Predicate { param($value) [string]$value -match '127.0.0.1' -and [string]$value -match 'comparison-after' }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("dependency-rationale").value="Required for the report upload operation"; document.querySelector("#dependency-rows button[data-dependency-id]").click(); true'
+    $confirmedText = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("dependency-rows").textContent' -Predicate { param($value) [string]$value -match 'business_required_confirmed' }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("business-action").value="Upload report"; document.getElementById("preview-proposals").click(); true'
+    $changePreviewText = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("change-preview").textContent' -Predicate { param($value) [string]$value -match 'Change-request preview' -and [string]$value -match 'redactionSummary' }
+    Assert-MihariTest -Condition ([string]$dependencyText -match 'comparison-after' -and [string]$confirmedText -match 'business_required_confirmed' -and [string]$changePreviewText -match 'preview-') 'Dependencies, explicit necessity, and change-request preview must be connected to actual selected trial evidence.'
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("export-proposals").click(); true'
+    $proposalExportStatus = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("proposal-status").textContent' -Predicate { param($value) [string]$value -match 'Export complete' -and [string]$value -match 'change-requests/' }
+    Assert-MihariTest -Condition ([string]$proposalExportStatus -match 'change-requests/') 'The preview export action must return a locally written relative path.'
+
+    Write-Host 'PASS phase2-ui-browser: Traffic evidence drill-down, pause/resume, case and trial actions, mode comparison, dependency and change-request export, bilingual text, and API recovery.'
 }
 finally {
     if ($null -ne $addOperator) { Stop-MihariTestRootConfirmation -Operator $addOperator }
     if ($null -ne $originListener) { $originListener.Stop() }
     if ($null -ne $pauseListener) { $pauseListener.Stop() }
+    if ($null -ne $caseListener) { $caseListener.Stop() }
     if ($null -ne $browser) { $browser.Socket.Dispose() }
     foreach ($profile in @($diagnosticProfile, (Join-Path $tempRoot 'management-edge'))) {
         try { Stop-Issue3UiEdgeProfile -ProfilePath $profile }
