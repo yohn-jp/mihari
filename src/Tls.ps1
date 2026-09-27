@@ -1,3 +1,154 @@
+function Get-MihariTlsProtocolFacts {
+    param([Parameter(Mandatory=$true)][System.Net.Security.SslStream]$Tls)
+    $facts = @{
+        tlsProtocol = $Tls.SslProtocol.ToString()
+        tlsCipher = $Tls.CipherAlgorithm.ToString()
+        tlsCipherStrength = [int]$Tls.CipherStrength
+    }
+    foreach ($item in @(
+        @{ Property = 'NegotiatedApplicationProtocol'; Field = 'tlsAlpn' },
+        @{ Property = 'NegotiatedCipherSuite'; Field = 'tlsCipherSuite' }
+    )) {
+        $property = $Tls.GetType().GetProperty($item.Property)
+        if ($null -eq $property) { continue }
+        try {
+            $value = $property.GetValue($Tls, $null)
+            if ($null -ne $value) {
+                $display = [string]$value.ToString()
+                if (-not [string]::IsNullOrWhiteSpace($display)) { $facts[$item.Field] = $display }
+            }
+        }
+        catch [System.Reflection.TargetInvocationException] {
+            # Runtime exposes the property but not a negotiated value on this leg.
+        }
+    }
+    return $facts
+}
+
+function Get-MihariTlsCertificateFacts {
+    param([AllowNull()][System.Security.Cryptography.X509Certificates.X509Certificate]$Certificate)
+    $facts = @{}
+    if ($null -eq $Certificate) { return $facts }
+    $peer = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList @($Certificate)
+    try {
+        $facts.certificateSubject = [string]$peer.Subject
+        $facts.certificateIssuer = [string]$peer.Issuer
+        $facts.certificateThumbprint = [string]$peer.Thumbprint
+        $facts.certificateNotBefore = $peer.NotBefore.ToUniversalTime().ToString('o')
+        $facts.certificateNotAfter = $peer.NotAfter.ToUniversalTime().ToString('o')
+        $now = [DateTime]::UtcNow
+        $facts.validityState = $(if ($now -ge $peer.NotBefore.ToUniversalTime() -and $now -le $peer.NotAfter.ToUniversalTime()) { 'passed' } else { 'failed' })
+        $facts.ekuState = 'passed'
+        foreach ($extension in $peer.Extensions) {
+            if ($extension.Oid.Value -ne '2.5.29.37') { continue }
+            $eku = $extension -as [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]
+            if ($null -eq $eku) {
+                $eku = [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($extension, $extension.Critical)
+            }
+            $serverAllowed = $false
+            foreach ($usage in $eku.EnhancedKeyUsages) {
+                if ($usage.Value -in @('1.3.6.1.5.5.7.3.1', '2.5.29.37.0')) { $serverAllowed = $true; break }
+            }
+            if (-not $serverAllowed) { $facts.ekuState = 'failed' }
+            break
+        }
+    }
+    finally { $peer.Dispose() }
+    return $facts
+}
+
+function Get-MihariTlsValidationFacts {
+    param([Parameter(Mandatory=$true)]$Capture)
+    $facts = @{
+        validationPolicy = 'system_chain_and_hostname; revocation_not_performed'
+        certificateChainState = 'unknown'
+        hostnameState = 'unknown'
+        validityState = 'unknown'
+        ekuState = 'not_performed'
+        revocationState = 'not_performed'
+        clientCertificateState = 'not_performed'
+        peerIdentityRole = 'observed_upstream_tls_peer'
+    }
+    if (-not $Capture.Invoked) { return $facts }
+    $facts.certificateAccepted = [bool]$Capture.Accepted
+    if (-not [string]::IsNullOrWhiteSpace([string]$Capture.EvidenceErrorType)) {
+        $facts.certificateChainState = 'unavailable'
+        $facts.hostnameState = 'unavailable'
+        $facts.validityState = 'unavailable'
+        return $facts
+    }
+    if ($null -eq $Capture.CertificateFacts -or $Capture.CertificateFacts.Count -eq 0) {
+        $facts.certificateChainState = 'not_performed'
+        $facts.hostnameState = 'not_performed'
+        $facts.validityState = 'not_performed'
+        return $facts
+    }
+    foreach ($key in $Capture.CertificateFacts.Keys) { $facts[$key] = $Capture.CertificateFacts[$key] }
+    $errors = [System.Net.Security.SslPolicyErrors]$Capture.PolicyErrors
+    $chainErrors = [System.Net.Security.SslPolicyErrors]::RemoteCertificateChainErrors
+    $nameMismatch = [System.Net.Security.SslPolicyErrors]::RemoteCertificateNameMismatch
+    if (($errors -band $chainErrors) -ne 0) { $facts.certificateChainState = 'failed' }
+    elseif ($Capture.ChainProvided) { $facts.certificateChainState = 'passed' }
+    $facts.hostnameState = $(if (($errors -band $nameMismatch) -ne 0) { 'failed' } else { 'passed' })
+    if ($Capture.ChainElements.Count -gt 0) { $facts.certificateChain = $Capture.ChainElements }
+    return $facts
+}
+
+function New-MihariTlsValidationCapture {
+    return [pscustomobject]@{
+        Invoked = $false
+        Accepted = $false
+        PolicyErrors = [System.Net.Security.SslPolicyErrors]::None
+        CertificateFacts = @{}
+        ChainElements = @()
+        ChainStatus = @()
+        ChainProvided = $false
+        EvidenceErrorType = $null
+    }
+}
+
+function New-MihariTlsValidationCallback {
+    param([Parameter(Mandatory=$true)]$Capture)
+    $handler = {
+        param($sender, $certificate, $chain, $errors)
+        $Capture.Invoked = $true
+        $Capture.PolicyErrors = $errors
+        $Capture.Accepted = ($errors -eq [System.Net.Security.SslPolicyErrors]::None)
+        try {
+            $Capture.CertificateFacts = Get-MihariTlsCertificateFacts -Certificate $certificate
+            if ($null -ne $chain) {
+                $Capture.ChainProvided = $true
+                $elements = New-Object 'System.Collections.Generic.List[object]'
+                foreach ($element in $chain.ChainElements) {
+                    if ($elements.Count -ge 8) { break }
+                    $item = Get-MihariTlsCertificateFacts -Certificate $element.Certificate
+                    $elements.Add([pscustomobject]@{
+                        subject = $item.certificateSubject
+                        issuer = $item.certificateIssuer
+                        thumbprint = $item.certificateThumbprint
+                        notBefore = $item.certificateNotBefore
+                        notAfter = $item.certificateNotAfter
+                    })
+                }
+                $Capture.ChainElements = $elements.ToArray()
+                $statuses = New-Object 'System.Collections.Generic.List[string]'
+                foreach ($status in $chain.ChainStatus) {
+                    if ($statuses.Count -ge 16) { break }
+                    $statuses.Add($status.Status.ToString())
+                }
+                $Capture.ChainStatus = $statuses.ToArray()
+            }
+        }
+        catch {
+            # Evidence failure does not change the platform's trust decision.
+            $Capture.CertificateFacts = @{}
+            $Capture.EvidenceErrorType = $_.Exception.GetType().FullName
+        }
+        return [bool]$Capture.Accepted
+    }.GetNewClosure()
+    return [System.Net.Security.RemoteCertificateValidationCallback]$handler
+}
+
 function Invoke-MihariInspect {
     param(
         [Parameter(Mandatory=$true)]$Session,
@@ -16,6 +167,7 @@ function Invoke-MihariInspect {
     $upstream = $null
     $route = $null
     $leaf = $null
+    $validationCapture = New-MihariTlsValidationCapture
     $stage = 'client.tls'
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
     try {
@@ -26,11 +178,16 @@ function Invoke-MihariInspect {
         $clientTls.ReadTimeout = 30000
         $clientTls.WriteTimeout = 30000
         $clientTls.AuthenticateAsServer($leaf, $false, [System.Security.Authentication.SslProtocols]::Tls12, $false)
-        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -Stage 'client.tls' -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data @{
-            host = $ConnectHost; port = $ConnectPort
-            tlsProtocol = $clientTls.SslProtocol.ToString()
-            tlsCipher = $clientTls.CipherAlgorithm.ToString()
-        }
+        $clientTlsData = Get-MihariTlsProtocolFacts -Tls $clientTls
+        $clientTlsData.host = $ConnectHost
+        $clientTlsData.port = $ConnectPort
+        $clientTlsData.peerIdentityRole = 'local_inspection_leaf'
+        $clientTlsData.clientCertificateState = 'not_performed'
+        $clientTlsData.validationPolicy = 'session_issued_exact_host_leaf; client_certificate_not_requested'
+        $clientTlsData.certificateSubject = [string]$leaf.Subject
+        $clientTlsData.certificateIssuer = [string]$leaf.Issuer
+        $clientTlsData.certificateThumbprint = [string]$leaf.Thumbprint
+        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -Stage 'client.tls' -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -TransportLeg 'client' -Data $clientTlsData
 
         $stage = 'http.request'
         $timer.Restart()
@@ -96,29 +253,22 @@ function Invoke-MihariInspect {
 
         $stage = 'upstream.tls'
         $timer.Restart()
-        # No custom validation callback: .NET/Windows performs normal trust and
-        # hostname validation, including for an explicit proxy CONNECT tunnel.
-        $upstreamTls = New-Object System.Net.Security.SslStream -ArgumentList @($upstream.Stream, $true)
+        # The callback records platform policy errors and returns exactly the
+        # ordinary .NET acceptance decision. No trust or name check is bypassed.
+        $validationCallback = New-MihariTlsValidationCallback -Capture $validationCapture
+        $upstreamTls = [System.Net.Security.SslStream]::new($upstream.Stream, $true, $validationCallback)
         $upstreamTls.ReadTimeout = 30000
         $upstreamTls.WriteTimeout = 30000
         $emptyCerts = New-Object System.Security.Cryptography.X509Certificates.X509CertificateCollection
         # Keep .NET's normal chain and hostname checks. Revocation probing is
         # optional in this overload and blocks local/private CAs without CRLs.
         $upstreamTls.AuthenticateAsClient($ConnectHost, $emptyCerts, [System.Security.Authentication.SslProtocols]::Tls12, $false)
-        $tlsData = @{ host = $ConnectHost; port = $ConnectPort; certificateAccepted = $true; tlsProtocol = $upstreamTls.SslProtocol.ToString(); tlsCipher = $upstreamTls.CipherAlgorithm.ToString() }
-        if ($null -ne $upstreamTls.RemoteCertificate) {
-            $peer = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList @($upstreamTls.RemoteCertificate)
-            try {
-                $tlsData.certificateSubject = $peer.Subject
-                $tlsData.certificateIssuer = $peer.Issuer
-                $tlsData.certificateThumbprint = $peer.Thumbprint
-                $tlsData.certificateNotBefore = $peer.NotBefore.ToUniversalTime().ToString('o')
-                $tlsData.certificateNotAfter = $peer.NotAfter.ToUniversalTime().ToString('o')
-            } finally {
-                $peer.Dispose()
-            }
-        }
-        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data $tlsData
+        $tlsData = Get-MihariTlsProtocolFacts -Tls $upstreamTls
+        $tlsData.host = $ConnectHost
+        $tlsData.port = $ConnectPort
+        $validationFacts = Get-MihariTlsValidationFacts -Capture $validationCapture
+        foreach ($key in $validationFacts.Keys) { $tlsData[$key] = $validationFacts[$key] }
+        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -TransportLeg 'upstream' -Data $tlsData
 
         $stage = 'upstream.http'
         $timer.Restart()
@@ -152,12 +302,24 @@ function Invoke-MihariInspect {
         }
     } catch {
         $failure = @{ host = $ConnectHost; port = $ConnectPort; exception = $_ }
-        if ($stage -eq 'upstream.tls') { $failure.certificateAccepted = $false }
+        if ($stage -eq 'upstream.tls') {
+            $validationFacts = Get-MihariTlsValidationFacts -Capture $validationCapture
+            foreach ($key in $validationFacts.Keys) { $failure[$key] = $validationFacts[$key] }
+        }
         if ($null -ne $route) { $failure.routeKind = $route.Kind }
         if ($stage -eq 'http.request' -and $_.Exception -is [System.NotSupportedException]) {
             $failure.errorCode = 'unsupported_protocol'
         }
-        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'failed' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data $failure
+        if ($stage -eq 'client.tls') {
+            $failure.peerIdentityRole = 'local_inspection_leaf'
+            $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'failed' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -TransportLeg 'client' -Data $failure
+        }
+        elseif ($stage -eq 'upstream.tls') {
+            $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'failed' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -TransportLeg 'upstream' -Data $failure
+        }
+        else {
+            $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'failed' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data $failure
+        }
     } finally {
         $cleanupErrors = New-Object 'System.Collections.Generic.List[System.Exception]'
         try { if ($null -ne $upstreamTls) { $upstreamTls.Dispose() } }

@@ -365,3 +365,86 @@ function Clear-MihariLeafCache {
         [System.Threading.Monitor]::Exit($cache.SyncRoot)
     }
 }
+
+function Get-MihariCertificateCleanupStatus {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)]$Session)
+
+    $leafCount = 0
+    $activeLeases = 0
+    $cache = $Session.LeafCache
+    if ($null -ne $cache) {
+        [System.Threading.Monitor]::Enter($cache.SyncRoot)
+        try {
+            $leafCount = [int]$cache.Count
+            foreach ($item in $cache.Values) { $activeLeases += [int]$item.InUse }
+        }
+        finally { [System.Threading.Monitor]::Exit($cache.SyncRoot) }
+    }
+
+    $ca = $Session.CA
+    $thumbprint = $null
+    $subject = $null
+    if ($null -ne $ca) {
+        $thumbprint = [string]$ca.Thumbprint
+        $subject = [string]$ca.Subject
+    }
+    $rootPresent = $null
+    $rootCoverage = 'not_performed'
+    $errorType = $null
+    if (-not [string]::IsNullOrWhiteSpace($thumbprint) -and
+        -not [string]::IsNullOrWhiteSpace($subject)) {
+        $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+            [System.Security.Cryptography.X509Certificates.StoreName]::Root,
+            [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+        )
+        try {
+            $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+            $rootPresent = $false
+            foreach ($candidate in $store.Certificates.Find(
+                [System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
+                $thumbprint,
+                $false
+            )) {
+                if ($candidate.Subject -ceq $subject -and
+                    (Test-MihariCAOwnership -Certificate $candidate -Thumbprint $thumbprint)) {
+                    $rootPresent = $true
+                    break
+                }
+            }
+            $rootCoverage = 'observed'
+        }
+        catch [System.Security.SecurityException] {
+            $rootCoverage = 'permission_denied'
+            $errorType = $_.Exception.GetType().FullName
+        }
+        catch [System.UnauthorizedAccessException] {
+            $rootCoverage = 'permission_denied'
+            $errorType = $_.Exception.GetType().FullName
+        }
+        catch {
+            $rootCoverage = 'unknown'
+            $errorType = $_.Exception.GetType().FullName
+        }
+        finally {
+            try { $store.Close() }
+            catch {
+                $rootCoverage = 'unknown'
+                $errorType = $_.Exception.GetType().FullName
+            }
+        }
+    }
+    return [pscustomobject]@{
+        source = 'mihari.session_certificate_state'
+        capturedAtUtc = [DateTime]::UtcNow.ToString('o')
+        caSubject = $subject
+        caThumbprint = $thumbprint
+        caTrustPresent = $rootPresent
+        caTrustCoverage = $rootCoverage
+        leafCacheCount = $leafCount
+        activeLeafLeases = $activeLeases
+        temporaryLeafKeyFiles = 'unavailable'
+        temporaryLeafKeyFileReason = 'Provider and container ownership cannot be verified from the current certificate handle.'
+        errorType = $errorType
+    }
+}
