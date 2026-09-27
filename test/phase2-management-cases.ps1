@@ -103,8 +103,13 @@ $session = [pscustomobject]@{
 }
 
 try {
+    $domainEmptyCases = Get-MihariCases -CaseRoot $temporaryRoot
+    Assert-MihariManagementCases ($domainEmptyCases.items.Count -eq 0 -and $domainEmptyCases.scopeTotal -eq 0 -and
+        $null -ne $domainEmptyCases.PSObject.Properties['nextCursor'] -and $null -ne $domainEmptyCases.PSObject.Properties['revision']) 'The domain case list returns a complete empty-page envelope.'
+
     $listEmpty = Invoke-MihariManagementCasesRoute -Session $session -Method 'GET' -Path '/api/v2/cases' -Query '' -Body $null
-    Assert-MihariManagementCases ($listEmpty.StatusCode -eq 200 -and $listEmpty.Value.scopeTotal -eq 0) 'GET cases returns the domain list envelope'
+    $emptyResponseDiagnostic = 'status=' + [string]$listEmpty.StatusCode + ' value=' + (ConvertTo-Json -InputObject $listEmpty.Value -Depth 8 -Compress)
+    Assert-MihariManagementCases ($listEmpty.StatusCode -eq 200 -and $listEmpty.Value.scopeTotal -eq 0) ('GET cases returns the domain list envelope (' + $emptyResponseDiagnostic + ')')
     Assert-MihariManagementCases ($null -ne $listEmpty.Value.PSObject.Properties['nextCursor'] -and $null -ne $listEmpty.Value.PSObject.Properties['revision']) 'case list cursor and revision are present'
 
     $createdCaseResponse = Invoke-MihariManagementCasesRoute -Session $session -Method 'POST' -Path '/api/v2/cases' -Query '' -Body ([pscustomobject]@{ title = 'Upload fails' })

@@ -273,7 +273,7 @@ function Get-MihariCaseJournalRevision {
 
 function Get-MihariCaseQueryPage {
     param(
-        [Parameter(Mandatory = $true)][object[]] $Items,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Items,
         [Parameter(Mandatory = $true)][int] $MaximumItems,
         [Parameter(Mandatory = $true)][string] $Revision,
         [string] $Cursor
