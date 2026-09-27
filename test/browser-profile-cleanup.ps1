@@ -3,6 +3,7 @@ $repoRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $repoRoot 'src/Browser.ps1')
 . (Join-Path $repoRoot 'src/BrowserObservation.ps1')
 . (Join-Path $repoRoot 'src/Management.ps1')
+. (Join-Path $repoRoot 'src/ManagementUi.ps1')
 
 function Assert-MihariBrowserProfileTest {
     param([bool] $Condition, [string] $Message)
