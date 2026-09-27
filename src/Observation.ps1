@@ -29,10 +29,46 @@ function New-MihariEventWriter {
         SyncRoot = (New-Object System.Object)
         Closed = $false
         Sequence = [long]0
+        BytesWritten = [long]$fileStream.Length
         LastWriteLagMs = [long]0
         MaxWriteLagMs = [long]0
     }
     return $writer
+}
+
+function Set-MihariCaptureIncomplete {
+    param(
+        [Parameter(Mandatory = $true)]$Session,
+        [Parameter(Mandatory = $true)][ValidateSet('event_writer_failed', 'evidence_limit_reached')][string]$Reason
+    )
+
+    if ($null -eq $Session.PSObject.Properties['CaptureState'] -or $null -eq $Session.CaptureState) { return }
+    $stateLock = $null
+    if ($null -ne $Session.PSObject.Properties['StateLock']) { $stateLock = $Session.StateLock }
+    if ($null -ne $stateLock) { [System.Threading.Monitor]::Enter($stateLock) }
+    try {
+        if (-not $Session.CaptureState.Incomplete) {
+            $Session.CaptureState.Incomplete = $true
+            $Session.CaptureState.Reason = $Reason
+            $Session.CaptureState.AtUtc = [DateTime]::UtcNow.ToString('o')
+        }
+        if (Get-Command Save-MihariSessionMetadata -ErrorAction SilentlyContinue) {
+            try { [void](Save-MihariSessionMetadata -Session $Session) }
+            catch { Write-Warning ('Mihari capture failure metadata could not be saved: {0}' -f $_.Exception.GetType().FullName) }
+        }
+    }
+    finally { if ($null -ne $stateLock) { [System.Threading.Monitor]::Exit($stateLock) } }
+    # Continuing the proxy after facts cannot be written would silently turn a
+    # diagnostic session into unobserved forwarding. Stop acceptance instead.
+    if ($null -ne $Session.PSObject.Properties['Cancellation'] -and $null -ne $Session.Cancellation) {
+        try { $Session.Cancellation.Cancel() }
+        catch { Write-Warning 'Mihari capture failure could not signal cancellation.' }
+    }
+    if ($null -ne $Session.PSObject.Properties['StopPath'] -and
+        -not [string]::IsNullOrWhiteSpace([string]$Session.StopPath)) {
+        try { [void](New-Item -ItemType File -Path ([string]$Session.StopPath) -Force) }
+        catch { Write-Warning 'Mihari capture failure could not request listener stop.' }
+    }
 }
 
 function Close-MihariEventWriter {
@@ -143,7 +179,11 @@ function Write-MihariEvent {
         $event['monotonicFrequency'] = [long][System.Diagnostics.Stopwatch]::Frequency
     }
     $writer = $Session.Writer
+    if ($null -ne $Session.PSObject.Properties['CaptureState'] -and $Session.CaptureState.Incomplete) {
+        throw ('Mihari capture is incomplete: {0}' -f [string]$Session.CaptureState.Reason)
+    }
     $writeWait = [System.Diagnostics.Stopwatch]::StartNew()
+    $captureFailure = $null
     [System.Threading.Monitor]::Enter($writer.SyncRoot)
     try {
         $writeWait.Stop()
@@ -152,14 +192,26 @@ function Write-MihariEvent {
         if ($writer.Closed) {
             throw 'The Mihari event writer is closed.'
         }
-        $writer.Sequence = [long]$writer.Sequence + 1
-        $event['sequence'] = [long]$writer.Sequence
+        $event['sequence'] = [long]$writer.Sequence + 1
         $json = ConvertTo-Json -InputObject $event -Depth 8 -Compress -ErrorAction Stop
+        $wireBytes = [long][System.Text.Encoding]::UTF8.GetByteCount($json + [Environment]::NewLine)
+        if ($null -ne $Session.PSObject.Properties['CaptureState'] -and
+            $writer.BytesWritten + $wireBytes -gt [long]$Session.CaptureState.EvidenceByteLimit) {
+            $captureFailure = 'evidence_limit_reached'
+            throw 'Mihari evidence byte limit reached.'
+        }
         $writer.Stream.WriteLine($json)
         $writer.Stream.Flush()
+        $writer.BytesWritten = [long]$writer.BytesWritten + $wireBytes
+        $writer.Sequence = [long]$event['sequence']
+    }
+    catch {
+        if ($null -eq $captureFailure) { $captureFailure = 'event_writer_failed' }
+        throw
     }
     finally {
         [System.Threading.Monitor]::Exit($writer.SyncRoot)
+        if ($null -ne $captureFailure) { Set-MihariCaptureIncomplete -Session $Session -Reason $captureFailure }
     }
 
     return [pscustomobject]$event
@@ -194,7 +246,8 @@ function ConvertTo-MihariSafeEventData {
         'cpuTotalMs', 'evidenceBytes', 'writerLagMs', 'activeLongLivedCount',
         'maxConcurrentStreams', 'maxFrameSize', 'initialWindowSize',
         'headerTableSize', 'lastStreamId', 'grpcStatus', 'httpStatus',
-        'waitMs', 'durationMs', 'activeStreamsAtClose'
+        'waitMs', 'durationMs', 'activeStreamsAtClose', 'queueLength',
+        'queueCapacity', 'queuePeak', 'saturationCount'
     )
     $booleanFields = @('certificateAccepted', 'caTrusted', 'fromDiskCache', 'fromServiceWorker', 'reused', 'queueSaturated', 'pendingConnections', 'informational')
     $allowed = @{}
