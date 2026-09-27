@@ -353,14 +353,21 @@ function Handle-MihariConnection {
         $cleanupData = @{ host = $hostName; routeKind = $routeKind; exception = $cleanupError }
         if ($targetPort -gt 0) { $cleanupData.port = $targetPort }
         $writer = $Session.Writer
-        if (-not $eventWriterFailed -and $null -ne $writer -and -not $writer.Closed) {
-            try {
-                $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage 'connection.cleanup' -Outcome $cleanupOutcome -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data $cleanupData
+        if (-not $eventWriterFailed -and $null -ne $writer) {
+            if ($writer.Closed) {
+                if (-not (Test-MihariConnectionStopping -Session $Session)) {
+                    throw 'The Mihari event writer closed before the connection completed.'
+                }
             }
-            catch {
-                # Stop may close the writer after the open check. Other writer
-                # failures reach the worker boundary as observable failures.
-                if (-not $writer.Closed) { throw }
+            else {
+                try {
+                    $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage 'connection.cleanup' -Outcome $cleanupOutcome -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data $cleanupData
+                }
+                catch {
+                    # Stop may close the writer after the open check. Other
+                    # writer failures reach the worker boundary.
+                    if (-not ($writer.Closed -and (Test-MihariConnectionStopping -Session $Session))) { throw }
+                }
             }
         }
     }
