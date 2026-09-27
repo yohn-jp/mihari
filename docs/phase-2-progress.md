@@ -1,24 +1,21 @@
 # Phase 2 implementation ledger
 
-Base: remote `main` fetched 2026-09-27 at
-`681255bf4f9b9ec900f34a7f986388911e611510`; later main changes are
-preserved. The existing untracked `.codegraph/` directory is unrelated and retained.
+Remote `main` was fetched on 2026-09-27 before work began. Development started
+from `681255bf4f9b9ec900f34a7f986388911e611510` without resetting later
+changes. The unrelated local `.codegraph/` directory was retained.
 
-| Milestone / capability | State | Evidence / remaining gate |
+| Milestone / capability | Current state | Implementation and verification evidence |
 | --- | --- | --- |
-| M0 contracts | Implemented, integration verification pending | `docs/phase-2-contracts.md`, `src/Observation.ps1`, `src/ManagementProjection.ps1`; schema-v2 writer/legacy reader passed Windows contracts in run `36303455415`. |
-| M0 presentation corrections | Implemented, browser proof pending | `src/ManagementUi.ps1`; real Edge verification is now included in `phase2-workbench`. |
-| HTTP/2 feasibility | Gate measured | `docs/http2-feasibility.md`; Windows run `36302954897` jobs `108573967172` (5.1: managed ALPN unavailable) and `108573967158` (7: h2 ALPN both legs, leaf/trust/cleanup passed). The overall run failed elsewhere. |
-| M1 Traffic investigation | Integrated candidate, acceptance pending | `src/TrafficProjection.ps1`, `/api/v2/requests`, Traffic UI, real Edge fixture; persistent findings adapter and exact current-HEAD Windows result pending. |
-| M2 Business dependencies | Domain implemented, integration pending | `src/Case.ps1`, `src/Dependencies.ps1`; API, UI, fixture and export round-trip pending. |
-| M3 Comparison and endpoint | Domain implemented, integration pending | `src/Comparison.ps1`, `src/Environment.ps1`, `src/Tls.ps1`; controlled-trial API/UI and live proof pending. |
-| M4 Browser-assisted HTTP/2 | Browser source integrated, acceptance pending | `src/BrowserObservation.ps1`; owned Edge observation and import tests queued on Windows; local h2 Tunnel trial and UI integration pending. |
-| M5 Fidelity and enterprise operation | Integrated candidate, acceptance pending | `src/Http.ps1`, `src/Connection.ps1`, `src/Tls.ps1`, `src/Evidence.ps1`; live streaming, offline review, retention, bilingual UI, resource/soak proof pending. |
-| M6 native HTTP/2 Inspect | Gated implementation in progress | PS7 gate positive, PS5.1 managed ALPN unavailable on tested runtime. `src/Hpack.ps1` and `src/Http2.ps1` frame unit are integrated; TLS-leg entry, live proxy fixture and Windows verification pending. |
+| M0 contracts and corrections | Implemented; final HEAD regression pending | `docs/phase-2-contracts.md`, schema-v2 facts and legacy reader, request/trial/source contracts, bounded management queries. Windows contracts and original integration jobs have passed on earlier integration HEADs; final HEAD matrix remains required. |
+| M1 Traffic investigation | Integrated; end-to-end workbench gate pending | `TrafficProjection.ps1`, `FindingProjection.ps1`, `/api/v2/requests`, `/api/v2/findings`, Traffic UI, byte-offset paging, rotation and partial-line handling. Real Edge Traffic DOM test is registered in `phase2-workbench`. Run `36304869091` passed traffic projection on both runtimes. The persistent snapshot replacement defect found in run `36306558533` was corrected after that run and is under retest. |
+| M2 Business dependencies | Integrated; Windows workbench gate pending | File-backed cases/trials/markers/notes, dependency projection, necessity confirmation, neutral policy comparison, distinct URL and local TLS exclusion proposals, preview/export API and UI. `test/cases-dependencies.ps1` now includes separate login and upload event chains and proposal evidence. |
+| M3 Comparison and endpoint diagnosis | Integrated; Windows workbench gate pending | Controlled comparisons, TLS two-leg evidence, host exclusions, environment/capability snapshots, connected API/UI. Empty exclusion arrays are preserved as recorded conditions. The DOM trial comparison test is registered in `phase2-workbench`. |
+| M4 Browser-assisted HTTP/2 | Integrated; real Edge verification pending | Owned Edge DevTools observation, cache/initiator/failure facts, profile verification, local h2 Tunnel origin, safe HAR/NetLog import. `browser-observation-edge.ps1` is registered in `phase2-workbench`; that suite has not yet reached it on the current HEAD. |
+| M5 Fidelity and enterprise operation | Transport proof passed; remaining UI/integration gate pending | Bounded large transfer, early bytes, persistent HTTP/1.1, SSE/WebSocket, stop cancellation: Windows run `36304473438`, jobs `108578248437` (5.1) and `108578248494` (7). Evidence bundle/import/offline/retention API and connected UI, control protection, bilingual text, resource facts, and distribution manifest tool/docs are integrated. Real Edge Evidence DOM and final regression/soak evidence remain to be verified. |
+| HTTP/2 feasibility | Measured | Run `36302954897`: jobs `108573967172` (5.1 managed ALPN absent) and `108573967158` (7.6.6 both TLS legs selected h2, trust and cleanup passed). See `docs/http2-feasibility.md`. |
+| M6 native HTTP/2 Inspect | Implemented and live-proven on the tested PowerShell 7 runtime; final HEAD gate pending | Run `36306087425`, job `108582926192`: HPACK/frame tests and direct plus production CONNECT two-leg h2, two simultaneous streams, normal validation, CA cleanup passed. The job later failed in findings. PowerShell 5.1 native ALPN is unavailable on the tested .NET Framework runtime; shared frame/HPACK tests and precise startup rejection passed. Live gRPC interoperability has not been proven. |
 
-The prior integrated run `36303455415` at `46fc9c8` passed its PowerShell 7
-jobs but failed six PowerShell 5.1 jobs after worker initialization. A lazy
-evidence-module load correction is in current main; run `36304008666` at
-`6625388` is pending. States describe work, not acceptance. Final completion
-requires the exact main HEAD to pass the required Windows PowerShell 5.1 and
-PowerShell 7 matrix and the architecture's end-to-end conditions.
+The exact final main HEAD must pass the Windows PowerShell 5.1 and PowerShell 7
+matrix, including the real Edge DOM and local origin fixtures. A passing
+component test on an earlier HEAD does not close that gate. This ledger records
+implementation state and measured evidence, not enterprise certification.
