@@ -214,6 +214,7 @@ function Invoke-MihariInspect {
         [ValidateSet('Inspect', 'Tunnel')][string]$ConnectionMode,
         [AllowNull()][string]$ProxyAuthorization,
         [AllowNull()][string]$AcceptedConfigurationRevision,
+        [long]$AcceptedConnectionElapsedMs = 0,
         [ValidateSet('close', 'reuse')][string]$AcceptedHttpConnectionPolicy = 'close'
     )
 
@@ -230,6 +231,7 @@ function Invoke-MihariInspect {
     $longLivedSlot = $false
     $validationCapture = New-MihariTlsValidationCapture
     $stage = 'client.tls'
+    $connectionClock = [System.Diagnostics.Stopwatch]::StartNew()
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         # Connection.ps1 has already acknowledged CONNECT. Keep the underlying
@@ -429,10 +431,15 @@ function Invoke-MihariInspect {
             }
             break
         }
+        $bodyRelayStartedMs = $AcceptedConnectionElapsedMs + $connectionClock.ElapsedMilliseconds
         $responseTransfer = Copy-MihariHttpBody -Source $upstreamTls -Destination $clientTls -Framing $responseFraming -Session $Session
+        $firstByteAtMs = $null
+        $lastByteAtMs = $null
+        if ($null -ne $responseTransfer.FirstByteMs) { $firstByteAtMs = $bodyRelayStartedMs + $responseTransfer.FirstByteMs }
+        if ($null -ne $responseTransfer.LastByteMs) { $lastByteAtMs = $bodyRelayStartedMs + $responseTransfer.LastByteMs }
         $clientTls.Flush()
         $null = Write-MihariEvent -Session $Session -ConfigurationRevision $AcceptedConfigurationRevision -ConnectionId $ConnectionId -RequestId $requestId -UpstreamConnectionId $upstreamConnectionId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data @{
-            host = $ConnectHost; port = $ConnectPort; statusCode = [int]$response.StatusCode; responseBytes = $responseTransfer.Bytes; firstByteMs = $responseTransfer.FirstByteMs; lastByteMs = $responseTransfer.LastByteMs
+            host = $ConnectHost; port = $ConnectPort; statusCode = [int]$response.StatusCode; responseBytes = $responseTransfer.Bytes; firstByteMs = $firstByteAtMs; lastByteMs = $lastByteAtMs; forwardWriteMs = $responseTransfer.ForwardWriteMs; framing = $responseTransfer.Framing
         }
         if ($isSse -and $longLivedSlot) {
             Exit-MihariLongLivedSlot -Session $Session
