@@ -575,11 +575,16 @@ function Get-MihariFindingIdentityParts {
     if ($facts.Count -gt 0) { $fact = $facts[0] }
     $evidenceRefs = @()
     if ($null -ne $Finding.PSObject.Properties['evidenceRefs']) { $evidenceRefs = @($Finding.evidenceRefs) }
+    $sessionIds = @($evidenceRefs | ForEach-Object { ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $_ -Names @('sessionId')) } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
+    $trialIds = @($facts | ForEach-Object { ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $_ -Names @('trialId')) } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
+    $caseIds = @($facts | ForEach-Object { ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $_ -Names @('caseId')) } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
     $sessionId = $null
     $trialId = $null
     $caseId = $null
     if ($evidenceRefs.Count -gt 0) { $sessionId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $evidenceRefs[0] -Names @('sessionId')) }
     if ($null -eq $sessionId -and $null -ne $fact) { $sessionId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('sessionId')) }
+    if ($sessionIds.Count -eq 1) { $sessionId = $sessionIds[0] }
+    elseif ($sessionIds.Count -gt 1) { $sessionId = [string]::Join('+', $sessionIds) }
     if ($null -ne $fact) {
         $trialId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('trialId'))
         $caseId = ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $fact -Names @('caseId'))
@@ -614,11 +619,8 @@ function Get-MihariFindingIdentityParts {
     if ($null -eq $scope) { $scope = 'session' }
     if ($null -eq $code) { $code = 'unclassified_failure' }
     if ($code -eq 'tls_interception_incompatible' -and $facts.Count -gt 1) {
-        $sessionIds = @($evidenceRefs | ForEach-Object { ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $_ -Names @('sessionId')) } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
         if ($sessionIds.Count -gt 0) { $sessionId = [string]::Join('+', $sessionIds) }
-        $trialIds = @($facts | ForEach-Object { ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $_ -Names @('trialId')) } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
         if ($trialIds.Count -gt 0) { $trialId = [string]::Join('+', $trialIds) }
-        $caseIds = @($facts | ForEach-Object { ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $_ -Names @('caseId')) } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
         if ($caseIds.Count -gt 0) { $caseId = [string]::Join('+', $caseIds) }
         $stage = 'inspect.client-tls+tunnel.transport'
         $routes = @($facts | ForEach-Object { ConvertTo-MihariDiagnosisSafeText -Value (Get-MihariMemberValue -InputObject $_ -Names @('routeKind')) } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
@@ -645,11 +647,20 @@ function Get-MihariFindingIdentityParts {
     if ($code -eq 'http_error_response') { $identity['statusCode'] = $statusCode }
     if ($code -eq 'unsupported_protocol' -or $code -eq 'tls_interception_incompatible') { $identity['protocolProfile'] = $protocolProfile }
 
+    $outputSessionId = $sessionId
+    if ($sessionIds.Count -gt 1) { $outputSessionId = $null }
+    $outputTrialId = $trialId
+    if ($trialIds.Count -gt 1) { $outputTrialId = $null }
+    $outputCaseId = $caseId
+    if ($caseIds.Count -gt 1) { $outputCaseId = $null }
     return [pscustomobject][ordered]@{
         Identity = [pscustomobject]$identity
-        SessionId = $sessionId
-        TrialId = $trialId
-        CaseId = $caseId
+        SessionId = $outputSessionId
+        SessionIds = @($sessionIds)
+        TrialId = $outputTrialId
+        TrialIds = @($trialIds)
+        CaseId = $outputCaseId
+        CaseIds = @($caseIds)
         Host = $hostName
         Port = $port
         Stage = $stage
@@ -714,8 +725,11 @@ function Merge-MihariFindingGroups {
                 summary = $finding.summary
                 scope = $finding.scope
                 sessionId = $parts.SessionId
+                sessionIds = @($parts.SessionIds)
                 trialId = $parts.TrialId
+                trialIds = @($parts.TrialIds)
                 caseId = $parts.CaseId
+                caseIds = @($parts.CaseIds)
                 ruleVersion = 'mihari-diagnosis/1'
                 evidenceRefs = @()
                 evidenceIds = @()
@@ -860,8 +874,9 @@ function Update-MihariFindingSnapshot {
         [Parameter(Mandatory = $false)][long] $FirstSequence = 0,
         [Parameter(Mandatory = $false)][long] $LastSequence = 0,
         [Parameter(Mandatory = $false)][ValidateSet('observed', 'unknown', 'unsupported', 'permission_denied', 'truncated', 'lost')][string] $Coverage = 'unknown',
-        [Parameter(Mandatory = $false)][ValidateRange(0, 1000000)][int] $MalformedLineCount = 0,
+        [Parameter(Mandatory = $false)][ValidateRange(0, 2147483647)][int] $MalformedLineCount = 0,
         [Parameter(Mandatory = $false)][AllowNull()][string] $ReadError,
+        [Parameter(Mandatory = $false)][switch] $HistoryGapDetected,
         [Parameter(Mandatory = $false)][switch] $RebuiltFromCanonicalHistory
     )
 
@@ -910,9 +925,12 @@ function Update-MihariFindingSnapshot {
         if ($FirstSequence -gt 0 -and $FirstSequence -gt ($previousLastSequence + 1)) { $sequenceGap = $true }
         elseif ($FirstSequence -eq 0 -and $LastSequence -gt ($previousLastSequence + 1)) { $sequenceGap = $true }
     }
-    $historyGap = $rotationDetected -or $sequenceGap -or $MalformedLineCount -gt 0 -or -not [string]::IsNullOrWhiteSpace($ReadError)
+    elseif ($previousLastSequence -eq 0 -and $FirstSequence -gt 1 -and -not $RebuiltFromCanonicalHistory) {
+        $sequenceGap = $true
+    }
+    $historyGap = $HistoryGapDetected -or $rotationDetected -or $sequenceGap -or $MalformedLineCount -gt 0 -or -not [string]::IsNullOrWhiteSpace($ReadError)
     if ($previousHistoryGap -and -not $RebuiltFromCanonicalHistory) { $historyGap = $true }
-    if ($RebuiltFromCanonicalHistory -and $MalformedLineCount -eq 0 -and [string]::IsNullOrWhiteSpace($ReadError) -and -not $sequenceGap) { $historyGap = $false }
+    if ($RebuiltFromCanonicalHistory -and $MalformedLineCount -eq 0 -and [string]::IsNullOrWhiteSpace($ReadError) -and -not $sequenceGap -and -not $rotationDetected -and -not $HistoryGapDetected) { $historyGap = $false }
 
     $effectiveCoverage = $Coverage
     if ($historyGap) { $effectiveCoverage = 'truncated' }
