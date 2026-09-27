@@ -5,9 +5,11 @@ function Invoke-MihariInspect {
         [Parameter(Mandatory=$true)][string]$ConnectHost,
         [Parameter(Mandatory=$true)][int]$ConnectPort,
         [Parameter(Mandatory=$true)][string]$ConnectionId,
+        [ValidateSet('Inspect', 'Tunnel')][string]$ConnectionMode,
         [AllowNull()][string]$ProxyAuthorization
     )
 
+    if (-not $PSBoundParameters.ContainsKey('ConnectionMode')) { $ConnectionMode = [string]$Session.Mode }
     $requestId = $null
     $clientTls = $null
     $upstreamTls = $null
@@ -24,7 +26,7 @@ function Invoke-MihariInspect {
         $clientTls.ReadTimeout = 30000
         $clientTls.WriteTimeout = 30000
         $clientTls.AuthenticateAsServer($leaf, $false, [System.Security.Authentication.SslProtocols]::Tls12, $false)
-        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -Stage 'client.tls' -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -Stage 'client.tls' -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data @{
             host = $ConnectHost; port = $ConnectPort
             tlsProtocol = $clientTls.SslProtocol.ToString()
             tlsCipher = $clientTls.CipherAlgorithm.ToString()
@@ -40,14 +42,14 @@ function Invoke-MihariInspect {
             throw (New-Object System.NotSupportedException -ArgumentList @('Inspected CONNECT requires an HTTPS HTTP/1.1 request.'))
         }
         $safePath = Get-MihariSafePath -Target $target.Path
-        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage 'http.request' -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage 'http.request' -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data @{
             host = $ConnectHost; port = $ConnectPort; method = $request.Method; path = $safePath
         }
 
         $stage = 'upstream.resolve'
         $timer.Restart()
         $builder = New-Object System.UriBuilder -ArgumentList @('https', $ConnectHost, $ConnectPort, '/')
-        $route = Resolve-MihariRoute -Uri $builder.Uri -Override $Session.UpstreamProxy
+        $route = Resolve-MihariRoute -Uri $builder.Uri -Override $Session.UpstreamProxy -PlatformSnapshot $Session.PlatformProxySnapshot -MihariProxyPort $Session.ActualPort
         $routeData = @{ host = $ConnectHost; port = $ConnectPort; routeKind = $route.Kind; routeSource = $route.Source }
         if ($route.Kind -eq 'ExplicitProxy') {
             $routeData.proxyHost = $route.Host
@@ -56,13 +58,14 @@ function Invoke-MihariInspect {
         if ($route.Kind -eq 'Unsupported') {
             $routeData.reason = $route.Reason
             $routeData.errorCode = 'upstream_route_unresolved'
-            $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'failed' -ElapsedMs $timer.ElapsedMilliseconds -Data $routeData
+            if (-not [string]::IsNullOrWhiteSpace([string]$route.ErrorCode)) { $routeData.errorCode = [string]$route.ErrorCode }
+            $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'failed' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data $routeData
             $wire = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 502 Upstream Route Unresolved`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
             $clientTls.Write($wire, 0, $wire.Length)
             $clientTls.Flush()
             return
         }
-        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Data $routeData
+        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data $routeData
 
         $stage = 'upstream.tcp'
         $timer.Restart()
@@ -72,14 +75,14 @@ function Invoke-MihariInspect {
         }
         $upstream.Stream.ReadTimeout = 30000
         $upstream.Stream.WriteTimeout = 30000
-        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Data $routeData
+        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data $routeData
 
         if ($null -ne $upstream.ProxyStatus) {
             $stage = 'upstream.proxy.connect'
             $proxyStatus = [int]$upstream.ProxyStatus.StatusCode
             $proxyData = @{ host = $ConnectHost; port = $ConnectPort; routeKind = 'ExplicitProxy'; proxyStatus = $proxyStatus; proxyHost = $route.Host; proxyPort = $route.Port }
             if ($proxyStatus -ne 200) {
-                $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'failed' -ElapsedMs $timer.ElapsedMilliseconds -Data $proxyData
+                $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'failed' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data $proxyData
                 # The browser already has a TLS channel with Mihari. Report the
                 # concrete upstream proxy status as an HTTP response inside it.
                 $statusText = [string]$proxyStatus
@@ -88,7 +91,7 @@ function Invoke-MihariInspect {
                 $clientTls.Flush()
                 return
             }
-            $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Data $proxyData
+            $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data $proxyData
         }
 
         $stage = 'upstream.tls'
@@ -115,7 +118,7 @@ function Invoke-MihariInspect {
                 $peer.Dispose()
             }
         }
-        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Data $tlsData
+        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data $tlsData
 
         $stage = 'upstream.http'
         $timer.Restart()
@@ -136,7 +139,7 @@ function Invoke-MihariInspect {
         if ($null -eq $response) {
             throw (New-Object System.IO.IOException -ArgumentList @('Upstream closed before an HTTP response.'))
         }
-        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data @{
             host = $ConnectHost; port = $ConnectPort; method = $request.Method; path = $safePath; statusCode = [int]$response.StatusCode
         }
 
@@ -144,7 +147,7 @@ function Invoke-MihariInspect {
         $timer.Restart()
         Write-MihariHttpMessage -Stream $clientTls -Message $response -CloseConnection
         $clientTls.Flush()
-        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data @{
             host = $ConnectHost; port = $ConnectPort; statusCode = [int]$response.StatusCode
         }
     } catch {
@@ -154,7 +157,7 @@ function Invoke-MihariInspect {
         if ($stage -eq 'http.request' -and $_.Exception -is [System.NotSupportedException]) {
             $failure.errorCode = 'unsupported_protocol'
         }
-        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'failed' -ElapsedMs $timer.ElapsedMilliseconds -Data $failure
+        $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'failed' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data $failure
     } finally {
         $cleanupErrors = New-Object 'System.Collections.Generic.List[System.Exception]'
         try { if ($null -ne $upstreamTls) { $upstreamTls.Dispose() } }
@@ -170,7 +173,7 @@ function Invoke-MihariInspect {
         try { if ($null -ne $leaf) { Release-MihariLeaf -Session $Session -Certificate $leaf } }
         catch { $cleanupErrors.Add($_.Exception) }
         foreach ($cleanupError in $cleanupErrors) {
-            $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage 'connection.cleanup' -Outcome 'failed' -ElapsedMs 0 -Data @{
+            $null = Write-MihariEvent -Session $Session -ConnectionId $ConnectionId -RequestId $requestId -Stage 'connection.cleanup' -Outcome 'failed' -ElapsedMs 0 -Mode $ConnectionMode -Data @{
                 host = $ConnectHost; port = $ConnectPort; exception = $cleanupError
             }
         }

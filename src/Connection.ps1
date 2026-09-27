@@ -146,9 +146,13 @@ function New-MihariRouteUri {
 function Handle-MihariConnection {
     param(
         [Parameter(Mandatory = $true)]$Session,
-        [Parameter(Mandatory = $true)][System.Net.Sockets.TcpClient]$Client
+        [Parameter(Mandatory = $true)][System.Net.Sockets.TcpClient]$Client,
+        [ValidateSet('Inspect', 'Tunnel')][string]$AcceptedMode
     )
 
+    # The listener passes the mode captured when it accepted the socket. Direct
+    # callers retain the old behavior, with a single snapshot at entry.
+    if (-not $PSBoundParameters.ContainsKey('AcceptedMode')) { $AcceptedMode = [string]$Session.Mode }
     $connectionId = [guid]::NewGuid().ToString('N')
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
     $stage = 'proxy.request'
@@ -165,7 +169,7 @@ function Handle-MihariConnection {
         $clientStream.WriteTimeout = 30000
         $clientEndpoint = $null
         if ($null -ne $Client.Client.RemoteEndPoint) { $clientEndpoint = $Client.Client.RemoteEndPoint.ToString() }
-        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -Stage 'listener.accept' -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -Stage 'listener.accept' -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
             clientEndpoint = $clientEndpoint
         }
         $request = Read-MihariHttpMessage -Stream $clientStream -Kind Request
@@ -177,33 +181,38 @@ function Handle-MihariConnection {
         $isConnect = [string]::Equals([string]$request.Method, 'CONNECT', [System.StringComparison]::OrdinalIgnoreCase)
         $safePath = $null
         if (-not $isConnect) { $safePath = Get-MihariSafePath -Target $target.Path }
-        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage 'proxy.request' -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage 'proxy.request' -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
             clientEndpoint = $clientEndpoint; method = $request.Method; host = $hostName; port = $targetPort; path = $safePath
         }
 
         if ($isConnect) {
-            if ($Session.Mode -eq 'Inspect') {
+            if ($AcceptedMode -eq 'Inspect') {
+                if ($null -eq $Session.CA -or $null -eq $Session.PublicCARoot) {
+                    throw (New-Object System.InvalidOperationException -ArgumentList 'Inspect requires an installed session CA before accepting CONNECT.')
+                }
                 Write-MihariProxyStatus -Stream $clientStream -StatusCode 200 -Reason 'Connection Established' -ConnectSuccess $true
                 $responseStarted = $true
-                Invoke-MihariInspect -Session $Session -ClientStream $clientStream -ConnectHost $hostName -ConnectPort $targetPort -ConnectionId $connectionId -ProxyAuthorization (Get-MihariHeaderText -Headers $request.Headers -Name 'Proxy-Authorization')
+                Invoke-MihariInspect -Session $Session -ClientStream $clientStream -ConnectHost $hostName -ConnectPort $targetPort -ConnectionId $connectionId -ConnectionMode $AcceptedMode -ProxyAuthorization (Get-MihariHeaderText -Headers $request.Headers -Name 'Proxy-Authorization')
                 return
             }
-            if ($Session.Mode -ne 'Tunnel') {
+            if ($AcceptedMode -ne 'Tunnel') {
                 throw (New-Object System.NotSupportedException -ArgumentList 'Unsupported CONNECT mode.')
             }
             $stage = 'upstream.resolve'
             $routeUri = New-Object System.UriBuilder -ArgumentList 'https', $hostName, $targetPort
-            $route = Resolve-MihariRoute -Uri $routeUri.Uri -Override $Session.UpstreamProxy
+            $route = Resolve-MihariRoute -Uri $routeUri.Uri -Override $Session.UpstreamProxy -PlatformSnapshot $Session.PlatformProxySnapshot -MihariProxyPort $Session.ActualPort
             $routeKind = [string]$route.Kind
             if ($routeKind -eq 'Unsupported') {
-                $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'unsupported' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
-                    host = $hostName; port = $targetPort; routeKind = $routeKind; routeSource = $route.Source; reason = $route.Reason; errorCode = 'upstream_route_unresolved'
+                $routeErrorCode = 'upstream_route_unresolved'
+                if (-not [string]::IsNullOrWhiteSpace([string]$route.ErrorCode)) { $routeErrorCode = [string]$route.ErrorCode }
+                $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'unsupported' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
+                    host = $hostName; port = $targetPort; routeKind = $routeKind; routeSource = $route.Source; reason = $route.Reason; errorCode = $routeErrorCode
                 }
                 Write-MihariProxyStatus -Stream $clientStream -StatusCode 502 -Reason 'Upstream Route Unresolved'
                 $responseStarted = $true
                 return
             }
-            $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+            $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
                 host = $hostName; port = $targetPort; routeKind = $routeKind; routeSource = $route.Source; proxyHost = $(if ($routeKind -eq 'ExplicitProxy') { $route.Host } else { $null }); proxyPort = $(if ($routeKind -eq 'ExplicitProxy') { $route.Port } else { $null })
             }
             $stage = $(if ($routeKind -eq 'ExplicitProxy') { 'upstream.proxy.connect' } else { 'upstream.tcp' })
@@ -211,7 +220,7 @@ function Handle-MihariConnection {
             if ($null -ne $upstream.ProxyStatus) {
                 $proxyStatus = [int]$upstream.ProxyStatus.StatusCode
                 $proxyOutcome = $(if ($proxyStatus -ge 200 -and $proxyStatus -lt 300) { 'success' } else { 'rejected' })
-                $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage 'upstream.proxy.connect' -Outcome $proxyOutcome -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+                $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage 'upstream.proxy.connect' -Outcome $proxyOutcome -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
                     host = $hostName; port = $targetPort; routeKind = 'ExplicitProxy'; proxyHost = $route.Host; proxyPort = $route.Port; proxyStatus = $proxyStatus
                 }
                 if ($proxyStatus -lt 200 -or $proxyStatus -ge 300) {
@@ -220,7 +229,7 @@ function Handle-MihariConnection {
                     return
                 }
             } else {
-                $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage 'upstream.tcp' -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+                $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage 'upstream.tcp' -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
                     host = $hostName; port = $targetPort; routeKind = $routeKind
                 }
             }
@@ -231,7 +240,7 @@ function Handle-MihariConnection {
             $relayOutcome = 'success'
             if ($relay.Cancelled) { $relayOutcome = 'cancelled' }
             if ($null -ne $relay.Exception) { $relayOutcome = 'failed' }
-            $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome $relayOutcome -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+            $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome $relayOutcome -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
                 host = $hostName; port = $targetPort; routeKind = $routeKind; bytesClientToUpstream = $relay.ClientToUpstreamBytes; bytesUpstreamToClient = $relay.UpstreamToClientBytes; direction = $relay.FirstFailureDirection; exception = $relay.Exception
             }
             return
@@ -240,22 +249,24 @@ function Handle-MihariConnection {
         if ($target.Scheme -ne 'http') {
             throw (New-Object System.NotSupportedException -ArgumentList 'Plain proxy requests require HTTP/1.1 over http; use CONNECT for HTTPS.')
         }
-        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage 'http.request' -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage 'http.request' -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
             host = $hostName; port = $targetPort; path = $safePath; method = $request.Method
         }
         $stage = 'upstream.resolve'
         $uri = New-MihariRouteUri -Target $target
-        $route = Resolve-MihariRoute -Uri $uri -Override $Session.UpstreamProxy
+        $route = Resolve-MihariRoute -Uri $uri -Override $Session.UpstreamProxy -PlatformSnapshot $Session.PlatformProxySnapshot -MihariProxyPort $Session.ActualPort
         $routeKind = [string]$route.Kind
         if ($routeKind -eq 'Unsupported') {
-            $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'unsupported' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
-                host = $hostName; port = $targetPort; path = $safePath; routeKind = $routeKind; routeSource = $route.Source; reason = $route.Reason; errorCode = 'upstream_route_unresolved'
+            $routeErrorCode = 'upstream_route_unresolved'
+            if (-not [string]::IsNullOrWhiteSpace([string]$route.ErrorCode)) { $routeErrorCode = [string]$route.ErrorCode }
+            $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'unsupported' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
+                host = $hostName; port = $targetPort; path = $safePath; routeKind = $routeKind; routeSource = $route.Source; reason = $route.Reason; errorCode = $routeErrorCode
             }
             Write-MihariProxyStatus -Stream $clientStream -StatusCode 502 -Reason 'Upstream Route Unresolved'
             $responseStarted = $true
             return
         }
-        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
             host = $hostName; port = $targetPort; path = $safePath; routeKind = $routeKind; routeSource = $route.Source; proxyHost = $(if ($routeKind -eq 'ExplicitProxy') { $route.Host } else { $null }); proxyPort = $(if ($routeKind -eq 'ExplicitProxy') { $route.Port } else { $null })
         }
         if ($target.OriginTarget -eq '*' -and $routeKind -eq 'ExplicitProxy') {
@@ -263,7 +274,7 @@ function Handle-MihariConnection {
         }
         $stage = 'upstream.tcp'
         $upstream = Open-MihariUpstream -Route $route -TargetHost $hostName -TargetPort $targetPort -Tunnel $false
-        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
             host = $hostName; port = $targetPort; routeKind = $routeKind
         }
         $forwardTarget = $target.OriginTarget
@@ -281,14 +292,14 @@ function Handle-MihariConnection {
             $response = Read-MihariHttpMessage -Stream $upstream.Stream -Kind Response -RequestMethod $request.Method
             if ($null -eq $response) { throw (New-Object System.IO.EndOfStreamException -ArgumentList 'Upstream closed after an informational HTTP response.') }
         }
-        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
             host = $hostName; port = $targetPort; path = $safePath; routeKind = $routeKind; method = $request.Method; statusCode = [int]$response.StatusCode
         }
         $stage = 'response.relay'
         $responseStarted = $true
         $preserveProxyChallenge = ($routeKind -eq 'ExplicitProxy' -and [int]$response.StatusCode -eq 407)
         Write-MihariHttpMessage -Stream $clientStream -Message $response -CloseConnection -PreserveProxyAuthenticate:$preserveProxyChallenge
-        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Data @{
+        $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome 'success' -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data @{
             host = $hostName; port = $targetPort; path = $safePath; statusCode = [int]$response.StatusCode
         }
     } catch {
@@ -311,7 +322,7 @@ function Handle-MihariConnection {
             $reason = 'Bad Request'
         }
         try {
-            $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome $outcome -ElapsedMs $timer.ElapsedMilliseconds -Data $failureData
+            $null = Write-MihariEvent -Session $Session -ConnectionId $connectionId -RequestId $requestId -Stage $stage -Outcome $outcome -ElapsedMs $timer.ElapsedMilliseconds -Mode $AcceptedMode -Data $failureData
         } catch {
             # Event storage failed. Preserve the original failure for the worker
             # boundary rather than recursively attempting another event write.

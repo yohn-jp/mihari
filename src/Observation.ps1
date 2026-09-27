@@ -74,9 +74,13 @@ function Write-MihariEvent {
         [double] $ElapsedMs,
 
         [AllowNull()]
-        [object] $Data
+        [object] $Data,
+
+        [ValidateSet('Inspect', 'Tunnel')]
+        [string] $Mode
     )
 
+    if (-not $PSBoundParameters.ContainsKey('Mode')) { $Mode = [string]$Session.Mode }
     $safeData = ConvertTo-MihariSafeEventData -Data $Data
     $elapsed = [long][Math]::Max(0, [Math]::Round($ElapsedMs, 0, [MidpointRounding]::AwayFromZero))
     $event = [ordered]@{
@@ -86,7 +90,7 @@ function Write-MihariEvent {
         sessionId = [string]$Session.Id
         connectionId = $ConnectionId
         requestId = $RequestId
-        mode = [string]$Session.Mode
+        mode = $Mode
         stage = $Stage
         outcome = $Outcome
         elapsedMs = $elapsed
