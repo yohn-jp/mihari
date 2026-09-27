@@ -217,12 +217,37 @@ try {
     $beforeTrialId = [string](Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("trial-picker").value' -Predicate { param($value) [string]$value -match '^trial-[0-9a-f]{32}$' })
     $operationLabelJson = ConvertTo-Json -InputObject 'Upload report' -Compress
     $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("marker-boundary").value="start"; document.getElementById("marker-label").value={0}; document.getElementById("add-marker").click(); true' -f $operationLabelJson)
+    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("case-trial-summary").textContent' -Predicate {
+        param($value) ([string]$value).Contains([string]$beforeTrialId) -and ([string]$value).Contains('Marker: start - Upload report')
+    }
     $caseListener = New-MihariTestListener
     $casePathBefore = $pathPrefix + '/comparison-before'
     $caseResponseBefore = Invoke-Phase2UiProxyGet -ProxyPort ([int]$metadata.actualPort) -Origin $caseListener -Path $casePathBefore -QueryToken $queryToken
     Assert-MihariTest -Condition ($caseResponseBefore.Headers.StartsWith('HTTP/1.1 200') -and $caseResponseBefore.Body -eq 'phase2-ui-ok') 'A trial-bounded local request must pass through the actual proxy.'
-    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("marker-boundary").value="end"; document.getElementById("marker-label").value={0}; document.getElementById("add-marker").click(); document.getElementById("case-note").value="Captured from a local fixture"; document.getElementById("add-case-note").click(); document.getElementById("trial-outcome").value="failed"; document.getElementById("complete-trial").click(); true' -f $operationLabelJson)
-    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("case-trial-summary").textContent' -Predicate { param($value) [string]$value -match 'failed' }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("marker-boundary").value="end"; document.getElementById("marker-label").value={0}; document.getElementById("add-marker").click(); true' -f $operationLabelJson)
+    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("case-trial-summary").textContent' -Predicate {
+        param($value) ([string]$value).Contains([string]$beforeTrialId) -and ([string]$value).Contains('Marker: end - Upload report')
+    }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("case-note").value="Captured from a local fixture"; document.getElementById("add-case-note").click(); true'
+    $trialNotesUri = $managementUrl + 'api/v2/trials?caseId=' + [Uri]::EscapeDataString($caseId)
+    $caseNoteDeadline = [DateTime]::UtcNow.AddSeconds(25)
+    $caseNoteFound = $false
+    do {
+        $trialPage = Get-Issue3UiHttpJson -Uri $trialNotesUri
+        foreach ($trialRecord in @($trialPage.items)) {
+            if ([string]$trialRecord.trialId -ne $beforeTrialId) { continue }
+            foreach ($noteRecord in @($trialRecord.notes)) {
+                if ([string]$noteRecord.text -eq 'Captured from a local fixture') { $caseNoteFound = $true; break }
+            }
+            if ($caseNoteFound) { break }
+        }
+        if (-not $caseNoteFound) { Start-Sleep -Milliseconds 200 }
+    } while (-not $caseNoteFound -and [DateTime]::UtcNow -lt $caseNoteDeadline)
+    Assert-MihariTest -Condition $caseNoteFound -Message 'The note submitted through the UI must appear in the selected trial API record before that trial is completed.'
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("trial-outcome").value="failed"; document.getElementById("complete-trial").click(); true'
+    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("case-trial-summary").textContent' -Predicate {
+        param($value) ([string]$value).Contains([string]$beforeTrialId) -and ([string]$value).Contains('Business outcome: failed')
+    }
 
     # Change one diagnostic condition, then capture and compare another real local trial.
     $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("inspect-toggle").click(); true'
@@ -230,11 +255,20 @@ try {
     $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("create-trial").click(); true'
     $afterTrialId = [string](Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("trial-picker").value' -Predicate { param($value) [string]$value -match '^trial-[0-9a-f]{32}$' -and [string]$value -ne [string]$beforeTrialId })
     $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("marker-boundary").value="start"; document.getElementById("marker-label").value={0}; document.getElementById("add-marker").click(); true' -f $operationLabelJson)
+    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("case-trial-summary").textContent' -Predicate {
+        param($value) ([string]$value).Contains([string]$afterTrialId) -and ([string]$value).Contains('Marker: start - Upload report')
+    }
     $casePathAfter = $pathPrefix + '/comparison-after'
     $caseResponseAfter = Invoke-Phase2UiProxyGet -ProxyPort ([int]$metadata.actualPort) -Origin $caseListener -Path $casePathAfter -QueryToken $queryToken
     Assert-MihariTest -Condition ($caseResponseAfter.Headers.StartsWith('HTTP/1.1 200') -and $caseResponseAfter.Body -eq 'phase2-ui-ok') 'The changed-mode trial must also reach the local fixture.'
-    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("marker-boundary").value="end"; document.getElementById("marker-label").value={0}; document.getElementById("add-marker").click(); document.getElementById("trial-outcome").value="succeeded"; document.getElementById("complete-trial").click(); true' -f $operationLabelJson)
-    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("case-trial-summary").textContent' -Predicate { param($value) [string]$value -match 'succeeded' }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.getElementById("marker-boundary").value="end"; document.getElementById("marker-label").value={0}; document.getElementById("add-marker").click(); true' -f $operationLabelJson)
+    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("case-trial-summary").textContent' -Predicate {
+        param($value) ([string]$value).Contains([string]$afterTrialId) -and ([string]$value).Contains('Marker: end - Upload report')
+    }
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression 'document.getElementById("trial-outcome").value="succeeded"; document.getElementById("complete-trial").click(); true'
+    $null = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("case-trial-summary").textContent' -Predicate {
+        param($value) ([string]$value).Contains([string]$afterTrialId) -and ([string]$value).Contains('Business outcome: succeeded')
+    }
     $beforeTrialJson = ConvertTo-Json -InputObject $beforeTrialId -Compress
     $afterTrialJson = ConvertTo-Json -InputObject $afterTrialId -Compress
     $compareExpression = 'document.getElementById("compare-before").value='+$beforeTrialJson+'; document.getElementById("compare-after").value='+$afterTrialJson+'; document.getElementById("tab-compare").click(); document.getElementById("run-comparison").click(); true'
