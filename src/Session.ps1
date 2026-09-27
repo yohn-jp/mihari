@@ -218,6 +218,7 @@ function Get-MihariSessionMetadataObject {
         upstreamSnapshotCapturedAtUtc = $(if ($null -ne $Session.PlatformProxySnapshot) { [string]$Session.PlatformProxySnapshot.CapturedAtUtc } else { $null })
         maxWorkers = [int]$Session.MaxWorkers
         error = $Session.Error
+        managementError = $Session.ManagementError
         cleanupErrors = @($Session.CleanupErrors)
     }
     return $data
@@ -476,6 +477,9 @@ function Get-MihariSessionStatus {
     Add-Member -InputObject $sessionMetadata -NotePropertyName processAlive -NotePropertyValue $alive -Force
     $proxyHealth = Get-MihariPersistedListenerHealth -Metadata $sessionMetadata -PortProperty 'actualPort' -HeartbeatProperty 'proxyHeartbeatUtc'
     $managementHealth = Get-MihariPersistedListenerHealth -Metadata $sessionMetadata -PortProperty 'actualManagementPort' -HeartbeatProperty 'managementHeartbeatUtc'
+    if (-not [string]::IsNullOrWhiteSpace([string]$sessionMetadata.managementError)) {
+        $managementHealth.healthy = $false
+    }
     Add-Member -InputObject $sessionMetadata -NotePropertyName proxyHealth -NotePropertyValue $proxyHealth -Force
     Add-Member -InputObject $sessionMetadata -NotePropertyName managementHealth -NotePropertyValue $managementHealth -Force
     $currentStatus = [string]$sessionMetadata.status
