@@ -7,28 +7,31 @@ require an operator to enroll a certificate.
 
 ## Create and verify an inventory
 
-Stage the release in a clean directory. Exclude session output, case bundles,
-browser profiles, temporary key files, private keys, debugger controls, and other
-runtime state. `src/Evidence.ps1` rejects common key/debugger artifacts and
-reparse points when it generates a manifest.
+Stage the release in a clean directory containing only the files to distribute.
+Exclude session output, case bundles, browser profiles, temporary key files,
+private keys, debugger controls, and other runtime state. The repository tool
+uses the canonical manifest implementation in `src/Evidence.ps1`; generation
+rejects common key/debugger artifacts and reparse points, and excludes the
+manifest file itself so it never hashes its own output.
 
 ```powershell
-. .\src\Evidence.ps1
-$manifest = New-MihariDistributionManifest `
+.\tools\distribution-manifest.ps1 `
+    -Action Create `
     -RootPath .\release `
-    -OutputPath .\release\distribution-manifest.json `
+    -ManifestPath .\release\distribution-manifest.json `
     -ApplicationRevision '2.0.0' `
     -CommitId '0123456789abcdef'
 
-$check = Test-MihariDistributionManifest `
+.\tools\distribution-manifest.ps1 `
+    -Action Verify `
     -RootPath .\release `
     -ManifestPath .\release\distribution-manifest.json
-if (-not $check.valid) { throw ('Distribution files failed verification: ' + ($check.errors -join ', ')) }
 ```
 
-The manifest lists each packaged relative path, byte length, and SHA-256 digest.
-Keep it beside the package or in the organization's trusted release record.
-Verify the inventory after transfer and before running scripts. Protect the
+The manifest lists each staged relative path, byte length, and SHA-256 digest.
+Verification checks each listed file and fails on a missing or modified file.
+Keep the inventory beside the package or in the organization's trusted release
+record. Verify it after transfer and before running scripts. Protect the
 manifest itself through the organization's release channel; a party able to
 replace both files and the inventory can recompute the hashes.
 
