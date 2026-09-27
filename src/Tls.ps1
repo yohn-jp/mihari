@@ -366,6 +366,11 @@ function Invoke-MihariInspect {
             $validationFacts = Get-MihariTlsValidationFacts -Capture $validationCapture
             foreach ($key in $validationFacts.Keys) { $tlsData[$key] = $validationFacts[$key] }
             $null = Write-MihariEvent -Session $Session -ConfigurationRevision $AcceptedConfigurationRevision -ConnectionId $ConnectionId -RequestId $requestId -UpstreamConnectionId $upstreamConnectionId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -TransportLeg 'upstream' -Data $tlsData
+            if (-not [string]::IsNullOrWhiteSpace([string]$validationCapture.EvidenceErrorType)) {
+                $null = Write-MihariEvent -Session $Session -ConfigurationRevision $AcceptedConfigurationRevision -ConnectionId $ConnectionId -RequestId $requestId -UpstreamConnectionId $upstreamConnectionId -Stage 'observer.tls_evidence' -Outcome 'failed' -ElapsedMs 0 -Mode $ConnectionMode -TransportLeg 'upstream' -Data @{
+                    host = $ConnectHost; port = $ConnectPort; errorCode = 'tls_evidence_unavailable'; errorType = $validationCapture.EvidenceErrorType
+                }
+            }
         }
 
         $stage = 'upstream.http'
@@ -463,6 +468,11 @@ function Invoke-MihariInspect {
         }
         elseif ($stage -like 'upstream.*') {
             $null = Write-MihariEvent -Session $Session -ConfigurationRevision $AcceptedConfigurationRevision -ConnectionId $ConnectionId -RequestId $requestId -UpstreamConnectionId $upstreamConnectionId -Stage $stage -Outcome 'failed' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -TransportLeg 'upstream' -Data $failure
+            if ($stage -eq 'upstream.tls' -and -not [string]::IsNullOrWhiteSpace([string]$validationCapture.EvidenceErrorType)) {
+                $null = Write-MihariEvent -Session $Session -ConfigurationRevision $AcceptedConfigurationRevision -ConnectionId $ConnectionId -RequestId $requestId -UpstreamConnectionId $upstreamConnectionId -Stage 'observer.tls_evidence' -Outcome 'failed' -ElapsedMs 0 -Mode $ConnectionMode -TransportLeg 'upstream' -Data @{
+                    host = $ConnectHost; port = $ConnectPort; errorCode = 'tls_evidence_unavailable'; errorType = $validationCapture.EvidenceErrorType
+                }
+            }
         }
         else {
             $null = Write-MihariEvent -Session $Session -ConfigurationRevision $AcceptedConfigurationRevision -ConnectionId $ConnectionId -RequestId $requestId -UpstreamConnectionId $upstreamConnectionId -Stage $stage -Outcome 'failed' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data $failure
