@@ -329,8 +329,11 @@ function Invoke-MihariHttp2Frame {
                             $State.Settings.initialWindowSize = $value
                         }
                         5 {
-                            if ($value -lt 16384 -or $value -gt 65536) { throw [System.IO.InvalidDataException]::new('HTTP/2 maximum frame size exceeds local bound.') }
-                            $Opposite.MaxFrame = [int]$value
+                            if ($value -lt 16384 -or $value -gt 16777215) { throw [System.IO.InvalidDataException]::new('Invalid HTTP/2 maximum frame size setting.') }
+                            # An advertisement is not a frame. Keep the
+                            # observed setting and enforce the local 64 KiB
+                            # frame buffer only if a larger frame arrives.
+                            $Opposite.MaxFrame = [int][Math]::Min($value, 65536)
                             $State.Settings.maxFrameSize = $value
                         }
                         6 { $State.Settings.maxHeaderListSize = $value }

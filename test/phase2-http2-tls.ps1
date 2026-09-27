@@ -266,7 +266,7 @@ finally { $Accepted.Dispose() }
     Close-MihariEventWriter -Writer $writer; $writer = $null
     $events = [IO.File]::ReadAllText((Join-Path $temp 'events.jsonl'))
     Assert-MihariTest -Condition ($events.Contains('"tlsAlpn":"h2"') -and $events.Contains('"transportLeg":"upstream"')) -Message 'Both native TLS legs must emit measured ALPN evidence.'
-    Assert-MihariTest -Condition ($events.Contains('/native-1?token=REDACTED') -and $events.Contains('/native-3?token=REDACTED') -and -not $events.Contains('secret')) -Message 'Native stream facts must retain safe paths for both streams.'
+    Assert-MihariTest -Condition ($events.Contains('/native-1?token=[REDACTED]') -and $events.Contains('/native-3?token=[REDACTED]') -and -not $events.Contains('secret')) -Message 'Native stream facts must retain safe paths for both streams.'
     Assert-MihariTest -Condition ($events.Contains('"statusCode":200') -and $events.Contains('http2.stream')) -Message 'Native h2 response and stream outcomes must be observed.'
 
     # Exercise the actual entry point, listener and CONNECT dispatch, including
@@ -323,7 +323,7 @@ finally { $Accepted.Dispose() }
     Complete-MihariTestNativeWorker -Worker $endOriginWorker -Name 'End-to-end origin'
     $nativeFinal = Stop-MihariTestSession -Child $nativeChild -Metadata $nativeMetadata
     $endEvents = [IO.File]::ReadAllText([string]$nativeFinal.eventsPath)
-    Assert-MihariTest -Condition ($endEvents.Contains('"tlsAlpn":"h2"') -and $endEvents.Contains('/entry-1?token=REDACTED') -and $endEvents.Contains('/entry-3?token=REDACTED')) -Message 'Production JSONL must contain actual ALPN and safe path observations.'
+    Assert-MihariTest -Condition ($endEvents.Contains('"tlsAlpn":"h2"') -and $endEvents.Contains('/entry-1?token=[REDACTED]') -and $endEvents.Contains('/entry-3?token=[REDACTED]')) -Message 'Production JSONL must contain actual ALPN and safe path observations.'
     Assert-MihariTest -Condition (-not $endEvents.Contains('entry-secret') -and $endEvents.Contains('"statusCode":200')) -Message 'Production events must exclude query secrets and retain response status.'
     Write-Host 'PASS phase2-http2-tls: direct and production CONNECT two-leg h2, concurrent streams, normal trust, CA cleanup'
 }
