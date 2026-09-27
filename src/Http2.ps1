@@ -315,7 +315,7 @@ function Invoke-MihariHttp2Frame {
                     $value = Get-MihariHttp2UInt32 -Bytes $bytes -Offset ($offset + 2)
                     switch ($setting) {
                         1 {
-                            if ($value -gt 4096) { throw [System.IO.InvalidDataException]::new('HTTP/2 header table exceeds local bound.') }
+                            if ($value -gt 65536) { throw [System.IO.InvalidDataException]::new('HTTP/2 header table exceeds local bound.') }
                             $State.Settings.headerTableSize = $value
                             $tableLimit = [int]$value
                         }

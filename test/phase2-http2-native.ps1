@@ -83,6 +83,18 @@ try {
         $frame = (Add-MihariHttp2Input -State $direction -Bytes $settings -Count $settings.Length).Items[0]
         $null = Invoke-MihariHttp2Frame -Context $ctx -State $direction -Opposite $(if ($direction.Leg -eq 'client') { $upstream } else { $client }) -Frame $frame
     }
+    $initialAck = New-MihariTestH2Frame -Type 4 -Flags 1 -StreamId 0
+    foreach ($direction in @($client,$upstream)) {
+        $frame = (Add-MihariHttp2Input -State $direction -Bytes $initialAck -Count $initialAck.Length).Items[0]
+        $null = Invoke-MihariHttp2Frame -Context $ctx -State $direction -Opposite $(if ($direction.Leg -eq 'client') { $upstream } else { $client }) -Frame $frame
+    }
+    $largerTable = New-MihariTestH2Frame -Type 4 -Flags 0 -StreamId 0 -Payload ([byte[]]@(0,1,0,1,0,0))
+    $frame = (Add-MihariHttp2Input -State $client -Bytes $largerTable -Count $largerTable.Length).Items[0]
+    $null = Invoke-MihariHttp2Frame -Context $ctx -State $client -Opposite $upstream -Frame $frame
+    $ack = New-MihariTestH2Frame -Type 4 -Flags 1 -StreamId 0
+    $frame = (Add-MihariHttp2Input -State $upstream -Bytes $ack -Count $ack.Length).Items[0]
+    $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
+    Assert-MihariTest -Condition ($upstream.Hpack.MaxTableSize -eq 65536) -Message 'A bounded 64 KiB HPACK table limit must apply after SETTINGS ACK.'
     $requestEncoder = New-MihariHpackContext -MaxTableSize 4096
     $responseEncoder = New-MihariHpackContext -MaxTableSize 4096
     $requestHeaders = @(
