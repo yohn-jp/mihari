@@ -341,6 +341,7 @@ function New-MihariSession {
             MetadataLock = New-Object System.Object
             Listener = $null
             ManagementListener = $null
+            ManagementError = $null
             ProxyHeartbeatUtc = $null
             ManagementHeartbeatUtc = $null
             ActiveConnectionCount = 0
