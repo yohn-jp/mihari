@@ -22,7 +22,7 @@ The process contains:
 - the loopback listener;
 - a bounded connection worker pool;
 - the session CA private key;
-- the in-memory leaf certificate cache;
+- the in-memory leaf certificate cache and its temporary Windows user-key files;
 - the event writer;
 - session state.
 
@@ -71,7 +71,7 @@ At startup, verify the APIs actually needed by the selected mode, especially:
 - `TcpListener` / `TcpClient`;
 - `SslStream`;
 - RSA key generation;
-- X.509 request/issuance APIs needed for in-memory leaf certificates;
+- X.509 request/issuance APIs needed for exact-host leaf certificates;
 - certificate store access;
 - JSON serialization;
 - runspace APIs;
@@ -200,11 +200,13 @@ When a client starts TLS for a CONNECT destination:
 3. if missing, create an RSA leaf certificate in memory;
 4. place the exact DNS name or IP address in SAN;
 5. sign it with the session CA;
-6. attach the private key in memory;
-7. use it with `SslStream.AuthenticateAsServer`;
-8. never import the leaf into CurrentUser or LocalMachine certificate stores.
+6. attach the key in memory, then import an in-memory PFX byte array into a temporary current-user key set because Windows Schannel rejects ephemeral server keys;
+7. use the imported certificate with `SslStream.AuthenticateAsServer` and dispose it on eviction or stop so Windows deletes its temporary key file;
+8. never write a PFX file or import the leaf into CurrentUser or LocalMachine certificate stores.
 
 Do not use a global wildcard certificate.
+
+An abrupt process termination can leave a temporary Windows leaf-key file. Stale cleanup removes only positively identified CA roots; it does not delete unrelated or unverified user key files.
 
 ### TLS versions
 
@@ -383,7 +385,7 @@ Focused tests should cover:
 - upstream route selection;
 - exact certificate ownership matching;
 - CA creation/trust/removal;
-- in-memory leaf issuance;
+- exact-host leaf issuance and temporary key-file disposal;
 - no leaf-store residue;
 - plain HTTP proxying;
 - CONNECT tunnel relay;

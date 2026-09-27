@@ -64,12 +64,13 @@ One active Inspect session owns one ephemeral root CA.
 
 - Unique CA per session.
 - RSA key stays in process memory.
+- Windows Schannel may require a temporary, current-user leaf private-key file during Inspect; dispose it on cache eviction and normal stop. Never write a PFX file.
 - Install a public-only root into `Cert:\CurrentUser\Root`.
 - Short validity.
 - Subject includes a Mihari marker and session ID.
 - Exact-host leaf certificates are generated on demand.
 - Leaf SAN matches the requested DNS host/IP.
-- Leaves are signed by the session CA and kept only in memory.
+- Leaves are signed by the session CA and their certificate objects stay only in memory.
 - Use a bounded in-memory cache keyed by normalized destination.
 - Never install leaves into certificate stores.
 - Never use one global wildcard leaf.

@@ -160,7 +160,8 @@ Requirements:
 - generate leaf certificates on demand for the exact requested host;
 - include the correct SAN for the requested DNS name or IP where supported;
 - sign leaf certificates with the session CA;
-- keep leaf certificates only in memory;
+- keep leaf certificate objects only in memory; Windows Schannel may use a temporary, current-user private-key file for an active leaf;
+- remove temporary leaf key files on cache eviction and normal session stop; never write a PFX file;
 - cache leaf certificates only for the current session, with a bounded cache;
 - never install per-host leaf certificates into Windows certificate stores;
 - remove the trusted session CA at normal stop;
@@ -285,7 +286,7 @@ The first usable release is complete when all of the following work on Windows:
 2. PowerShell 7 can run the same implementation.
 3. A loopback proxy accepts HTTP/1.1 requests.
 4. CONNECT tunnel mode can relay an HTTPS connection.
-5. Inspect mode can issue an in-memory host leaf certificate from a session CA and read the HTTP request path over TLS 1.2.
+5. Inspect mode can issue an exact-host leaf certificate from a session CA and read the HTTP request path over TLS 1.2.
 6. No per-host certificate remains in a Windows certificate store.
 7. Normal stop removes the trusted Mihari CA.
 8. Cleanup removes a deliberately orphaned Mihari CA without removing unrelated certificates.
