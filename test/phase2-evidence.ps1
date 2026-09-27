@@ -6,6 +6,9 @@ $evidenceSourceRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'src'
 . (Join-Path $evidenceSourceRoot 'Evidence.ps1')
 . (Join-Path $evidenceSourceRoot 'Diagnosis.ps1')
 
+$compressionAssembly = Ensure-MihariEvidenceCompression
+Assert-MihariTest -Condition ($null -ne $compressionAssembly.GetType('System.IO.Compression.ZipArchive', $false)) -Message 'The current PowerShell runtime must load its platform ZIP archive API.'
+
 function New-MihariEvidenceTestZip {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Files, [string]$SymlinkEntry)
     $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
