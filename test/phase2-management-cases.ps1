@@ -215,7 +215,8 @@ try {
     $comparison = Invoke-MihariManagementCasesRoute -Session $session -Method 'GET' -Path '/api/v2/comparisons' -Query ('beforeTrialId=' + $beforeTrial.trialId + '&afterTrialId=' + $afterTrial.trialId) -Body $null
     Assert-MihariManagementCases ($comparison.StatusCode -eq 200 -and $comparison.Value.before.trialId -eq $beforeTrial.trialId -and $comparison.Value.after.trialId -eq $afterTrial.trialId) 'comparison uses the actual before/after trial records'
     Assert-MihariManagementCases ($comparison.Value.collectionCoverage.status -eq 'observed') 'comparison reports canonical event collection coverage'
-    Assert-MihariManagementCases ($comparison.Value.changedConditions | Where-Object { $_.name -eq 'mode' }) 'comparison exposes the changed diagnostic mode'
+    $modeChanges = @($comparison.Value.changedConditions | Where-Object { $_.name -eq 'mode' })
+    Assert-MihariManagementCases ($modeChanges.Count -eq 1 -and [string]$modeChanges[0].before -eq 'Inspect' -and [string]$modeChanges[0].after -eq 'Tunnel') 'comparison exposes the changed diagnostic mode'
 
     $badQuery = Invoke-MihariManagementCasesRoute -Session $session -Method 'GET' -Path '/api/v2/dependencies' -Query 'host=unvalidated.example' -Body $null
     Assert-MihariManagementCases ($badQuery.StatusCode -eq 400) 'unsupported dependency query fields are rejected'
