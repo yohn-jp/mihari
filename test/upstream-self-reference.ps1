@@ -73,7 +73,7 @@ try {
     # external DNS dependency.
     $localhostAlias = Resolve-MihariRoute -Uri $target -Override ('http://mihari.localhost:{0}' -f $proxyPort) -PlatformSnapshot $snapshot -MihariProxyPort $proxyPort
     Assert-MihariUpstreamTest -Condition ($localhostAlias.Kind -eq 'Unsupported' -and $localhostAlias.ErrorCode -eq 'upstream_route_self_reference') `
-        -Message 'A .localhost alias on Mihari’s listener port must be treated as self-reference.'
+        -Message 'A .localhost alias on the Mihari listener port must be treated as self-reference.'
 
     Write-Host 'PASS upstream snapshot and self-reference guards'
 }
