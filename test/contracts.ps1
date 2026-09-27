@@ -104,9 +104,12 @@ try {
     foreach ($secret in @('secret', 'authorization-secret', 'cookie-secret', 'proxy-secret', 'set-cookie-secret', 'body-secret', 'header-secret')) {
         Assert-MihariTest -Condition (-not $serializedEvent.Contains($secret)) -Message 'Event JSONL must exclude query, credential, cookie, body, and arbitrary-header values.'
     }
-    Assert-MihariTest -Condition ($serializedEvent.Contains('/safe/path?token=[REDACTED]&x=[REDACTED]')) -Message 'Event JSONL must preserve the path and redact query values.'
     $event = ConvertFrom-Json -InputObject $serializedEvent
+    Assert-MihariTest -Condition ($event.data.path -eq '/safe/path?token=[REDACTED]&x=[REDACTED]') -Message 'Event JSONL must preserve the path and redact query values.'
     Assert-MihariTest -Condition ($event.schemaVersion -eq 1 -and $event.sessionId -eq $session.Id -and $event.connectionId -eq 'connection-contract' -and $event.requestId -eq 'request-contract') -Message 'Event envelope must include the required correlation fields.'
+
+    $emptyFindings = @(Get-MihariDiagnosis -Events @())
+    Assert-MihariTest -Condition ($emptyFindings.Count -eq 0) -Message 'Diagnosis must accept an empty event collection and return no findings.'
 
     $diagnosticEvents = @(
         [pscustomobject]@{ eventId = 'proxy-407'; sessionId = 's1'; connectionId = 'c1'; requestId = 'r1'; mode = 'Tunnel'; stage = 'upstream.proxy.connect'; outcome = 'rejected'; data = [pscustomobject]@{ routeKind = 'ExplicitProxy'; host = 'blocked.test'; port = 443; proxyStatus = 407 } },

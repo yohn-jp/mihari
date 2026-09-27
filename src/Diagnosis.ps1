@@ -237,7 +237,7 @@ function Test-MihariSuccessfulOutcome {
 
 function Get-MihariDiagnosis {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $false)] [object[]] $Events = @())
+    param([Parameter(Mandatory = $false)] [AllowEmptyCollection()] [object[]] $Events = @())
 
     $records = New-Object 'System.Collections.Generic.List[object]'
     $index = 0
@@ -430,7 +430,7 @@ function Add-MihariJsonlEvents {
 }
 
 function Get-MihariFirstSessionId {
-    param([Parameter(Mandatory = $false)] [object[]] $Events = @())
+    param([Parameter(Mandatory = $false)] [AllowEmptyCollection()] [object[]] $Events = @())
 
     foreach ($event in $Events) {
         if ($null -eq $event) { continue }
