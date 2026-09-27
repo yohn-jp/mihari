@@ -44,7 +44,9 @@ function Invoke-Issue3ManagementRequest {
     $response = $null
     try { $response = $request.GetResponse() }
     catch [System.Net.WebException] {
-        if ($null -eq $_.Exception.Response) { throw }
+        if ($null -eq $_.Exception.Response) {
+            throw ('Management request {0} {1} failed before an HTTP response: {2}' -f $Method, ([Uri]$Endpoint).AbsolutePath, $_.Exception.Status)
+        }
         $response = $_.Exception.Response
     }
     try {
