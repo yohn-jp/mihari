@@ -610,7 +610,7 @@ try {
     $inspectChild.Process.Dispose()
     $inspectChild = $null
     Invoke-MihariTestReportCommand -OutputRoot $inspectRoot
-    Assert-MihariTest -Condition ($inspectFinal.caThumbprint) -Message 'Inspect session must own a session-specific CA.'
+    Assert-MihariTest -Condition (-not [string]::IsNullOrWhiteSpace([string]$inspectFinal.caThumbprint)) -Message 'Inspect session must own a session-specific CA.'
     $privateArtifacts = @(Get-ChildItem -LiteralPath $inspectFinal.outputDirectory -File -Recurse | Where-Object { $_.Extension -match '^\.(pfx|p12|key|pem)$' })
     Assert-MihariTest -Condition ($privateArtifacts.Count -eq 0) -Message 'The session output must not persist a CA private key or leaf certificate.'
     Write-Host 'PASS integration: child-process start/stop, local HTTP forwarding, TLS 1.2 CONNECT tunnel, TLS 1.2 Inspect/path redaction, JSONL, reports, CA cleanup'
