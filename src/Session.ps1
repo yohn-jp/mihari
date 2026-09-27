@@ -47,8 +47,21 @@ function Get-MihariSessionProcessAlive {
 function Read-MihariJsonFile {
     param([Parameter(Mandatory = $true)][string]$Path)
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
-    $raw = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+    # Another Mihari process can atomically replace session.json while status
+    # or stop reads it. Windows can briefly deny ReadAllText during Replace;
+    # retry that sharing race without treating a malformed document as valid.
+    $raw = $null
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+        try {
+            $raw = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+            break
+        }
+        catch [System.IO.IOException] {
+            if ($attempt -eq 9) { throw }
+            Start-Sleep -Milliseconds 25
+        }
+    }
     if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
     return ($raw | ConvertFrom-Json -ErrorAction Stop)
 }
