@@ -171,7 +171,8 @@ function Get-MihariBrowserH2TimeoutDiagnostics {
                 source = [string]$event.source; stage = $stage; outcome = [string]$event.outcome; coverage = [string]$event.coverage
                 host = [string]$data.host; port = $data.port; path = [string]$data.path; method = [string]$data.method
                 protocol = [string]$data.protocol; statusCode = $data.statusCode; initiatorType = [string]$data.initiatorType
-                browserError = [string]$data.browserError; bytesClientToUpstream = $data.bytesClientToUpstream
+                browserError = [string]$data.browserError; errorType = [string]$data.errorType
+                bytesClientToUpstream = $data.bytesClientToUpstream
                 bytesUpstreamToClient = $data.bytesUpstreamToClient
             }
             if ($eventSummary.Count -ge 24) { $eventSummary.RemoveAt(0) }

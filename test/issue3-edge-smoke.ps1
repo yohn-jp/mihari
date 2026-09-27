@@ -215,7 +215,14 @@ function Get-MihariIssue3SafeEventSummary {
         $code = [string]$event.data.errorCode
         $hostName = [string]$event.data.host
         $port = [string]$event.data.port
-        $summary.Add(('{0} {1} {2}:{3} {4}' -f $stage, $outcome, $hostName, $port, $code).Trim())
+        $lineSummary = ('{0} {1} {2}:{3} {4}' -f $stage, $outcome, $hostName, $port, $code).Trim()
+        if ([string]$event.source -eq 'browser' -and $stage -eq 'browser.observation') {
+            $browserError = [string]$event.data.browserError
+            $errorType = [string]$event.data.errorType
+            if ($browserError -match '^[A-Za-z0-9_.-]{1,80}$') { $lineSummary += ' browserError={0}' -f $browserError }
+            if ($errorType -match '^[A-Za-z0-9_.+`]{1,128}$') { $lineSummary += ' errorType={0}' -f $errorType }
+        }
+        $summary.Add($lineSummary)
     }
     if ($summary.Count -eq 0) { return 'no complete event lines were written' }
     return ($summary -join '; ')
