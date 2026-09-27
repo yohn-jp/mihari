@@ -542,7 +542,12 @@ function Get-MihariBrowserProfileState {
             )
             if ($referencesExactProfilePath -or $hasUnparsedProfileArgument) {
                 $base.state = 'process_identity_unverified'
-                $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. An ambiguous Edge process may refer to its profile, so cleanup is unavailable.'
+                if ($referencesExactProfilePath) {
+                    $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. An Edge process still refers to its exact profile path, so cleanup is unavailable.'
+                }
+                else {
+                    $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. An Edge profile argument could not be parsed, so cleanup is unavailable.'
+                }
                 return $base
             }
             if (-not $isRecordedOwnerPid) {

@@ -93,17 +93,22 @@ function Get-Phase2DiagnosticEdgeProcesses {
     foreach ($process in @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'msedge.exe'" -ErrorAction Stop)) {
         $commandLine = [string]$process.CommandLine
         $argument = [System.Text.RegularExpressions.Regex]::Match($commandLine, '(?i)(?:^|\s)--user-data-dir(?:=|\s+)(?:"([^"]+)"|([^\s]+))')
-        if (-not $argument.Success) { continue }
-        $argumentPath = $argument.Groups[1].Value
-        if (-not $argument.Groups[1].Success) { $argumentPath = $argument.Groups[2].Value.Trim([char]34) }
-        $sameProfile = $false
-        try {
-            $sameProfile = [string]::Equals(
-                [System.IO.Path]::GetFullPath($argumentPath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar),
-                [System.IO.Path]::GetFullPath($ProfilePath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar),
-                [StringComparison]::OrdinalIgnoreCase)
+        $mentionsExactProfile = ($commandLine.IndexOf($ProfilePath, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+        $sameProfile = $mentionsExactProfile
+        if ($argument.Success) {
+            $argumentPath = $argument.Groups[1].Value
+            if (-not $argument.Groups[1].Success) { $argumentPath = $argument.Groups[2].Value.Trim([char]34) }
+            try {
+                $sameProfile = [string]::Equals(
+                    [System.IO.Path]::GetFullPath($argumentPath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar),
+                    [System.IO.Path]::GetFullPath($ProfilePath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar),
+                    [StringComparison]::OrdinalIgnoreCase)
+            }
+            catch { $sameProfile = $false }
+            if (-not $sameProfile -and $mentionsExactProfile) {
+                throw 'An Edge process mentions the test profile but identifies another user-data directory.'
+            }
         }
-        catch { $sameProfile = $false }
         if (-not $sameProfile) { continue }
         if (-not [string]::Equals([string]$process.ExecutablePath, [System.IO.Path]::GetFullPath($ExecutablePath), [StringComparison]::OrdinalIgnoreCase)) {
             throw 'An Edge process refers to the test profile with an unexpected executable identity.'
