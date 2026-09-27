@@ -306,9 +306,18 @@ function Invoke-MihariInspect {
         }
         $null = Write-MihariEvent -Session $Session -ConfigurationRevision $AcceptedConfigurationRevision -ConnectionId $ConnectionId -RequestId $requestId -Stage $stage -Outcome 'succeeded' -ElapsedMs $timer.ElapsedMilliseconds -Mode $ConnectionMode -Data $routeData
 
+        $stage = 'upstream.tcp'
+        $timer.Restart()
         $currentKey = [string]$route.Kind + '|' + $ConnectHost + ':' + $ConnectPort
         if ($route.Kind -eq 'ExplicitProxy') { $currentKey += '|' + [string]$route.Host + ':' + [string]$route.Port }
-        $reused = ($null -ne $upstreamTls -and $null -ne $upstream -and $upstreamKey -eq $currentKey -and $requestKeepAlive)
+        # The current exchange may ask to close after its response while still
+        # using a previously authenticated upstream leg. Do not mix credentials.
+        $reused = ($null -ne $upstreamTls -and $null -ne $upstream -and $upstreamKey -eq $currentKey -and
+            -not $hasCredentials -and -not $webSocket)
+        if ($reused -and $upstream.Client.Client.Poll(0, [System.Net.Sockets.SelectMode]::SelectRead)) {
+            # A close alert, EOF, or unsolicited data makes the old leg unsafe.
+            $reused = $false
+        }
         if ($null -ne $upstream -and -not $reused) {
             Unregister-MihariActiveUpstream -Session $Session -ConnectionId $ConnectionId
             if ($null -ne $upstreamTls) { $upstreamTls.Dispose(); $upstreamTls = $null }
@@ -316,8 +325,6 @@ function Invoke-MihariInspect {
             $upstream = $null
             $upstreamConnectionId = $null
         }
-        $stage = 'upstream.tcp'
-        $timer.Restart()
         if (-not $reused) {
             $upstreamConnectionId = [Guid]::NewGuid().ToString('N')
             $upstream = Open-MihariUpstream -Route $route -TargetHost $ConnectHost -TargetPort $ConnectPort -Tunnel:$true -ProxyAuthorization $ProxyAuthorization
@@ -397,7 +404,7 @@ function Invoke-MihariInspect {
             throw [System.NotSupportedException]::new('Unexpected HTTP protocol upgrade.')
         }
         $acceptedWebSocket = $false
-        if ($webSocket) { $acceptedWebSocket = Test-MihariWebSocketResponse -Message $response }
+        if ($webSocket) { $acceptedWebSocket = Test-MihariWebSocketResponse -Message $response -Request $request }
         $responseFraming = Get-MihariHttpBodyFraming -Message $response -Kind Response -RequestMethod $request.Method
         $responseKeepAlive = (Test-MihariHttpKeepAlive -Message $response) -and
             $response.Version -eq 'HTTP/1.1' -and $responseFraming.Reusable -and

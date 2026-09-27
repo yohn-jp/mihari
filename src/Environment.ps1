@@ -136,7 +136,7 @@ function Get-MihariEnvironmentNetworkInterfaces {
 }
 
 function Get-MihariEnvironmentCapabilities {
-    $isWindows = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
+    $runningOnWindows = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
     $sslType = [System.Net.Security.SslStream]
     return [pscustomobject]@{
         capturedAtUtc = [DateTime]::UtcNow.ToString('o')
@@ -144,7 +144,7 @@ function Get-MihariEnvironmentCapabilities {
         powershellVersion = [string]$PSVersionTable.PSVersion
         clrVersion = [string][Environment]::Version
         osVersion = [string][Environment]::OSVersion.Version
-        windows = $isWindows
+        windows = $runningOnWindows
         tlsAlpnProperty = ($null -ne $sslType.GetProperty('NegotiatedApplicationProtocol'))
         tlsCipherSuiteProperty = ($null -ne $sslType.GetProperty('NegotiatedCipherSuite'))
         nativeH2Inspect = 'unproven'
@@ -160,7 +160,7 @@ function Get-MihariEnvironmentSnapshot {
         [AllowNull()][object]$Session,
         [AllowNull()][System.Uri[]]$Destinations
     )
-    $isWindows = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
+    $runningOnWindows = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
     $captured = [DateTime]::UtcNow.ToString('o')
     $environmentVariables = [ordered]@{}
     foreach ($name in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')) {
@@ -178,7 +178,7 @@ function Get-MihariEnvironmentSnapshot {
     $winHttp = [pscustomobject]@{ source = 'windows.winhttp.registry'; coverage = 'unsupported'; configured = $null; values = @{}; errorType = $null; effectiveSettings = 'unavailable' }
     $browserUser = [pscustomobject]@{ source = 'windows.edge_policy.current_user'; coverage = 'unsupported'; configured = $null; values = @{}; errorType = $null }
     $browserMachine = [pscustomobject]@{ source = 'windows.edge_policy.local_machine'; coverage = 'unsupported'; configured = $null; values = @{}; errorType = $null }
-    if ($isWindows) {
+    if ($runningOnWindows) {
         $internet = Get-MihariEnvironmentRegistrySource -Root ([Microsoft.Win32.Registry]::CurrentUser) -Path 'Software\Microsoft\Windows\CurrentVersion\Internet Settings' -Names @('ProxyEnable', 'ProxyServer', 'AutoConfigURL', 'AutoDetect') -Source 'windows.internet_settings.current_user'
         $winHttp = Get-MihariEnvironmentRegistrySource -Root ([Microsoft.Win32.Registry]::LocalMachine) -Path 'SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\Connections' -Names @('WinHttpSettings') -Source 'windows.winhttp.registry'
         $winHttp | Add-Member -NotePropertyName effectiveSettings -NotePropertyValue 'unavailable'
