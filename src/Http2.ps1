@@ -481,7 +481,14 @@ function Invoke-MihariHttp2Relay {
             $streams[1-$index].Flush()
             $pending[$index] = $streams[$index].BeginRead($buffers[$index],0,$buffers[$index].Length,$null,$null)
         }
-        Write-MihariHttp2Fact -Context $context -State $client -StreamId 0 -Stage 'http2.relay' -Outcome 'completed' -Data @{ bytesClientToUpstream = $toUpstream; bytesUpstreamToClient = $toClient; activeStreamsAtClose = $context.Streams.Count }
+        $unfinished = ($client.Preface -or $client.FirstSettings -or $upstream.FirstSettings -or
+            $client.PendingLength -gt 0 -or $upstream.PendingLength -gt 0 -or
+            $client.ContinuationStream -ne 0 -or $upstream.ContinuationStream -ne 0 -or $context.Streams.Count -gt 0)
+        $outcome = 'completed'
+        $data = @{ bytesClientToUpstream = $toUpstream; bytesUpstreamToClient = $toClient; activeStreamsAtClose = $context.Streams.Count }
+        if (Test-MihariConnectionStopping -Session $Session) { $outcome = 'cancelled' }
+        elseif ($unfinished) { $outcome = 'truncated'; $data.errorCode = 'http2_incomplete_on_eof' }
+        Write-MihariHttp2Fact -Context $context -State $client -StreamId 0 -Stage 'http2.relay' -Outcome $outcome -Data $data
     }
     catch {
         Write-MihariHttp2Fact -Context $context -State $client -StreamId 0 -Stage 'http2.relay' -Outcome 'failed' -Data @{ errorCode = 'http2_relay_failed'; errorType = $_.Exception.GetType().FullName; bytesClientToUpstream = $toUpstream; bytesUpstreamToClient = $toClient }
