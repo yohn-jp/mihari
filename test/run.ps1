@@ -93,6 +93,9 @@ try {
 }
 catch {
     $exitCode = 1
+    if (-not [string]::IsNullOrWhiteSpace([string]$_.ScriptStackTrace)) {
+        Write-Warning ('Test script stack: ' + [string]$_.ScriptStackTrace)
+    }
     Write-Error -ErrorRecord $_
 }
 finally {
