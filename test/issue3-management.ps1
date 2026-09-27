@@ -375,7 +375,8 @@ try {
     Assert-MihariTest -Condition ($eventJson.Contains('/management/poll?token=[REDACTED]')) -Message 'Management event data must retain the path while redacting its query value.'
 
     $findingsResponse = Invoke-Issue3ManagementRequest -Endpoint ($managementEndpoint + 'api/findings') -Method GET -Body $null
-    Assert-MihariTest -Condition ($findingsResponse.StatusCode -eq 200 -and $null -ne $findingsResponse.Json.findings) -Message 'The management findings endpoint must return canonical findings.'
+    $findingError = $(if ($null -ne $findingsResponse.Json) { [string]$findingsResponse.Json.error } else { '[no-json]' })
+    Assert-MihariTest -Condition ($findingsResponse.StatusCode -eq 200 -and $null -ne $findingsResponse.Json.findings) -Message ('The management findings endpoint must return canonical findings (HTTP {0}, error {1}).' -f $findingsResponse.StatusCode, $findingError)
     $findingJson = ConvertTo-Json -InputObject $findingsResponse.Json.findings -Depth 12 -Compress
     foreach ($secret in @('issue3-query-secret', 'issue3-auth-secret', 'issue3-cookie-secret', 'issue3-setcookie-secret', 'issue3-body-secret')) {
         Assert-MihariTest -Condition (-not $findingJson.Contains($secret)) -Message 'Management findings must preserve the event privacy boundary.'
