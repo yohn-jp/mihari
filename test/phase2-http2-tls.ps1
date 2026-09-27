@@ -41,7 +41,8 @@ if (-not (Test-MihariHttp2RuntimeCapability).Available) {
     try {
         Assert-MihariTest -Condition ($gate.Process.WaitForExit(15000)) -Message 'The 5.1 native profile gate must reject before listener startup.'
         $gate.Process.WaitForExit()
-        Assert-MihariTest -Condition ($gate.Process.ExitCode -ne 0 -and $gate.Stderr.Result -match 'managed ALPN API surface') -Message 'PowerShell 5.1 must reject native Inspect with a precise ALPN reason.'
+        $gateText = [string]$gate.Stderr.Result + [string]$gate.Stdout.Result
+        Assert-MihariTest -Condition ($gate.Process.ExitCode -ne 0 -and $gateText -match 'managed ALPN API surface') -Message 'PowerShell 5.1 must reject native Inspect with a precise ALPN reason.'
         Assert-MihariTest -Condition (-not [IO.File]::Exists((Join-Path $gateRoot 'active-session.json'))) -Message 'A rejected 5.1 native profile must not create a session.'
     }
     finally { if (-not $gate.Process.HasExited) { $gate.Process.Kill(); $gate.Process.WaitForExit(5000) }; $gate.Process.Dispose(); if ([IO.Directory]::Exists($gateRoot)) { [IO.Directory]::Delete($gateRoot,$true) } }
