@@ -57,7 +57,7 @@ try {
     Assert-MihariTest -Condition (-not $launchText.Contains('browser-secret')) -Message 'Successful launch metadata must not retain URL query values.'
     $launchMetadata = ConvertFrom-Json -InputObject $launchText -ErrorAction Stop
     Assert-MihariTest -Condition ($launchMetadata.proxiedSchemes.Count -eq 2 -and $launchMetadata.loopbackBypassDisabled -and $launchMetadata.quicDisabled -and $launchMetadata.http2Disabled -and $launchMetadata.nonProxiedWebRtcUdpDisabled -and $launchMetadata.maximumTlsVersion -eq 'tls1.2') -Message 'Compatibility metadata must retain the requested Edge transport policy.'
-    Assert-MihariTest -Condition ($launchMetadata.profile -eq 'compatibility' -and $launchMetadata.requestedHttp2Disabled -and $launchMetadata.observationStatus -eq 'launched_but_unverified' -and $launchMetadata.proxyBehaviorVerification -eq 'launched_but_unverified') -Message 'Requested browser switches must remain separate from observed behavior.'
+    Assert-MihariTest -Condition ($launchMetadata.profile -eq 'compatibility' -and $launchMetadata.requestedRemoteDebugging -and $launchMetadata.requestedHttp2Disabled -and $launchMetadata.observationStatus -eq 'launched_but_unverified' -and $launchMetadata.proxyBehaviorVerification -eq 'launched_but_unverified') -Message 'Requested browser switches must remain separate from observed behavior.'
 
     $h2Metadata = [pscustomobject]@{
         id = [guid]::NewGuid().ToString('N')
@@ -73,6 +73,30 @@ try {
     $launchText = [IO.File]::ReadAllText($launchPath)
     $launchMetadata = ConvertFrom-Json -InputObject $launchText -ErrorAction Stop
     Assert-MihariTest -Condition ($launchMetadata.profile -eq 'http2-observe' -and $launchMetadata.requestedHttp2Enabled -and $launchMetadata.requestedTlsPolicy -eq 'system_default' -and $null -eq $launchMetadata.maximumTlsVersion -and -not $launchMetadata.http2Disabled) -Message 'The HTTP/2 profile must persist requested policy without claiming an observed protocol.'
+
+    $h2InspectMetadata = [pscustomobject]@{
+        id = [guid]::NewGuid().ToString('N')
+        profile = 'http2-inspect'
+        mode = 'Inspect'
+        actualPort = 46666
+        outputDirectory = $temporaryDirectory
+    }
+    $h2InspectLaunch = Start-MihariBrowser -SessionMetadata $h2InspectMetadata -Url 'https://example.test/h2'
+    Assert-MihariTest -Condition ($h2InspectLaunch.Success -and $h2InspectLaunch.DiagnosticProfile -eq 'http2-inspect' -and $h2InspectLaunch.RequestedHttpVersion -eq 'allow_h2') -Message 'The native HTTP/2 Inspect profile must be retained in the browser launch result.'
+    Assert-MihariTest -Condition (-not $script:capturedEdgeStartInfo.Arguments.Contains('--disable-http2') -and $script:capturedEdgeStartInfo.Arguments.Contains('--ssl-version-max=tls1.2')) -Message 'The native HTTP/2 Inspect profile must allow h2 while keeping the client TLS leg at TLS 1.2.'
+    $launchText = [IO.File]::ReadAllText($launchPath)
+    $launchMetadata = ConvertFrom-Json -InputObject $launchText -ErrorAction Stop
+    Assert-MihariTest -Condition ($launchMetadata.profile -eq 'http2-inspect' -and $launchMetadata.requestedHttp2Enabled -and $launchMetadata.requestedTlsPolicy -eq 'maximum_tls_1_2' -and $launchMetadata.maximumTlsVersion -eq 'tls1.2' -and -not $launchMetadata.http2Disabled) -Message 'HTTP/2 Inspect metadata must record requested h2 and TLS 1.2 without claiming a negotiated protocol.'
+
+    $invalidH2InspectMetadata = [pscustomobject]@{
+        id = [guid]::NewGuid().ToString('N')
+        profile = 'http2-inspect'
+        mode = 'Tunnel'
+        actualPort = 47777
+        outputDirectory = $temporaryDirectory
+    }
+    $invalidH2InspectLaunch = Start-MihariBrowser -SessionMetadata $invalidH2InspectMetadata
+    Assert-MihariTest -Condition (-not $invalidH2InspectLaunch.Success -and $invalidH2InspectLaunch.Reason -match 'requires Inspect mode') -Message 'The HTTP/2 Inspect profile must reject a Tunnel session.'
 
     $invalidH2Metadata = [pscustomobject]@{
         id = [guid]::NewGuid().ToString('N')
