@@ -790,6 +790,10 @@ function Merge-MihariFindingGroups {
         }
 
         $group = $groupIndex[$findingId]
+        $previousAvailability = ConvertTo-MihariDiagnosisSafeText -Value $previous.evidenceAvailability
+        if ($previousAvailability -in @('verified_in_replay', 'unverified', 'possibly_rotated', 'possibly_missing')) {
+            $group.evidenceAvailability = $previousAvailability
+        }
         $references = New-Object 'System.Collections.Generic.List[object]'
         $referenceKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
         foreach ($reference in @($previous.evidenceRefs)) {

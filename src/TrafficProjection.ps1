@@ -1214,6 +1214,7 @@ function Get-MihariTrafficProjectionEvents {
                 [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
             $fileLength = [long]$stream.Length
             $useOffset = $PSBoundParameters.ContainsKey('AfterOffset')
+            $generationScopedRead = $useOffset -and $PSBoundParameters.ContainsKey('ExpectedFileGeneration')
             if ($useOffset) {
                 if ($AfterOffset -gt $fileLength) {
                     $invalid = [System.InvalidOperationException]::new('The indexed event history was rebuilt; restart the event cursor.')
@@ -1250,7 +1251,9 @@ function Get-MihariTrafficProjectionEvents {
                     try {
                         $row = ConvertFrom-Json -InputObject $line -ErrorAction Stop
                         $lineOrdinal = [long]$row.indexOrdinal
-                        if ($null -ne $row.event -and ($useOffset -or $lineOrdinal -gt $AfterOrdinal)) {
+                        $sameFileGeneration = (-not $generationScopedRead) -or
+                            [string]::Equals([string]$row.generationId, $fileGeneration, [StringComparison]::Ordinal)
+                        if ($null -ne $row.event -and $sameFileGeneration -and ($useOffset -or $lineOrdinal -gt $AfterOrdinal)) {
                             if ($events.Count -ge $Limit) { $hasMore = $true; break }
                             $events.Add([pscustomobject]@{
                                 ordinal = $lineOrdinal

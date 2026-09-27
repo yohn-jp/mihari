@@ -86,9 +86,26 @@ try {
     $replacement = New-MihariFindingProjectionTestEvent -SessionId $sessionId -Sequence 1153 -HostName 'after-rotation.test' -StatusCode 407
     [System.IO.File]::WriteAllText($eventsPath, (ConvertTo-Json -InputObject $replacement -Depth 8 -Compress) + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
     $null = Update-MihariTrafficProjectionStore -Store $store -MaximumEventsPerPoll 5000
+    $rotationWindow = Get-MihariTrafficProjectionEvents -Store $store -AfterOffset 0 -ExpectedFileGeneration $store.GenerationId -Limit 20
+    Assert-MihariTest -Condition ($rotationWindow.events.Count -eq 1 -and [string]$rotationWindow.events[0].generationId -eq [string]$store.GenerationId) -Message 'Byte-offset replay skips stale index rows from earlier file generations.'
     $afterRotation = Get-MihariPersistentFindings -SessionId $sessionId -ProjectionStore $store -SnapshotPath $snapshotPath -Limit 20
     $oldFinding = @($afterRotation.items | Where-Object { $_.findingId -eq $groupedAfterAppend.findingId }) | Select-Object -First 1
-    Assert-MihariTest -Condition ($afterRotation.coverage -eq 'truncated' -and $afterRotation.scopeTotal -ge 2 -and $oldFinding.evidenceAvailability -eq 'possibly_rotated' -and $oldFinding.resolutionState -eq 'open') -Message 'Rotation restarts indexing, retains prior findings, and marks old evidence as possibly rotated.'
+    $rotationCheckPassed = ($afterRotation.coverage -eq 'truncated' -and $afterRotation.scopeTotal -ge 2 -and $oldFinding.evidenceAvailability -eq 'possibly_rotated' -and $oldFinding.resolutionState -eq 'open')
+    if (-not $rotationCheckPassed) {
+        $oldEvidenceAvailability = 'missing'
+        $oldResolutionState = 'missing'
+        $oldEvidenceCount = 0
+        if ($null -ne $oldFinding) {
+            $oldEvidenceAvailability = [string]$oldFinding.evidenceAvailability
+            $oldResolutionState = [string]$oldFinding.resolutionState
+            $oldEvidenceCount = @($oldFinding.evidenceRefs).Count
+        }
+        Write-Host ('DIAGNOSTIC rotation: coverage={0}; scopeTotal={1}; staleIndexReturned={2}; currentGeneration={3}; oldFindingAvailability={4}; oldFindingState={5}; oldFindingEvidenceCount={6}' -f $afterRotation.coverage, $afterRotation.scopeTotal, $rotationWindow.events.Count, [string]$store.GenerationId, $oldEvidenceAvailability, $oldResolutionState, $oldEvidenceCount)
+    }
+    Assert-MihariTest -Condition $rotationCheckPassed -Message 'Rotation restarts indexing, retains prior findings, and marks old evidence as possibly rotated.'
+    $reobserved = New-MihariFindingProjectionTestEvent -SessionId $sessionId -Sequence 1154 -HostName 'blocked.test' -StatusCode 407
+    $mergedAfterReobserve = @(Get-MihariSessionFindings -Events @($reobserved) -PreviousFindings @($oldFinding) | Where-Object { $_.findingId -eq $oldFinding.findingId }) | Select-Object -First 1
+    Assert-MihariTest -Condition ($mergedAfterReobserve.evidenceAvailability -eq 'possibly_rotated') -Message 'Later incremental events preserve the possibly-rotated evidence status.'
 
     $crossSessionRejected = $false
     try { $null = Get-MihariPersistentFindings -SessionId 'other-session' -ProjectionStore $store -SnapshotPath $snapshotPath }
