@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('all', 'certificate', 'contracts', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-connection', 'upstream-self-reference')]
+    [ValidateSet('all', 'certificate', 'contracts', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference')]
     [string] $Suite = 'all'
 )
 
@@ -39,13 +39,13 @@ try {
     Write-Host ("PASS parse: {0} PowerShell files" -f $sourceFiles.Count)
 
     if ($Suite -eq 'all') {
-        $selectedSuites = @('certificate', 'contracts', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-connection', 'upstream-self-reference')
+        $selectedSuites = @('certificate', 'contracts', 'browser', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser', 'issue3-connection', 'upstream-self-reference')
     }
     else {
         $selectedSuites = @($Suite)
     }
     foreach ($selectedSuite in $selectedSuites) {
-        if ($env:OS -ne 'Windows_NT' -and $selectedSuite -in @('certificate', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke')) {
+        if ($env:OS -ne 'Windows_NT' -and $selectedSuite -in @('certificate', 'stale-cleanup', 'runtime-basic', 'integration', 'issue3-management', 'issue3-edge-smoke', 'issue3-ui-browser')) {
             Write-Warning ("Skipping suite '{0}': Windows certificate/runtime integration is required." -f $selectedSuite)
             continue
         }
@@ -59,6 +59,7 @@ try {
             'integration' { & (Join-Path $PSScriptRoot 'integration.ps1') }
             'issue3-management' { & (Join-Path $PSScriptRoot 'issue3-management.ps1') }
             'issue3-edge-smoke' { & (Join-Path $PSScriptRoot 'issue3-edge-smoke.ps1') }
+            'issue3-ui-browser' { & (Join-Path $PSScriptRoot 'issue3-ui-browser.ps1') }
             'issue3-connection' { & (Join-Path $PSScriptRoot 'issue3-connection.ps1') }
             'upstream-self-reference' { & (Join-Path $PSScriptRoot 'upstream-self-reference.ps1') }
         }
