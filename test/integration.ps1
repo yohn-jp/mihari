@@ -1,4 +1,4 @@
-param()
+param([switch] $LoadHelpersOnly)
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestSupport.ps1')
@@ -250,7 +250,8 @@ function Invoke-MihariTestExplicitProxyStatus {
     param(
         [Parameter(Mandatory = $true)][System.Net.Sockets.TcpListener]$ProxyListener,
         [Parameter(Mandatory = $true)][int]$MihariPort,
-        [Parameter(Mandatory = $true)][int]$StatusCode
+        [Parameter(Mandatory = $true)][int]$StatusCode,
+        [string]$ProxyAuthorization
     )
     $proxyAccept = $ProxyListener.AcceptTcpClientAsync()
     $client = [System.Net.Sockets.TcpClient]::new()
@@ -258,7 +259,9 @@ function Invoke-MihariTestExplicitProxyStatus {
     try {
         $client.Connect('127.0.0.1', $MihariPort)
         $clientStream = $client.GetStream()
-        $wire = [System.Text.Encoding]::ASCII.GetBytes("CONNECT 192.0.2.19:443 HTTP/1.1`r`nHost: 192.0.2.19:443`r`n`r`n")
+        $requestText = "CONNECT 192.0.2.19:443 HTTP/1.1`r`nHost: 192.0.2.19:443`r`n"
+        if (-not [string]::IsNullOrEmpty($ProxyAuthorization)) { $requestText += "Proxy-Authorization: $ProxyAuthorization`r`n" }
+        $wire = [System.Text.Encoding]::ASCII.GetBytes($requestText + "`r`n")
         $clientStream.Write($wire, 0, $wire.Length)
         $clientStream.Flush()
         Assert-MihariTest -Condition ($proxyAccept.Wait(15000)) -Message 'Mihari did not connect to the explicit proxy fixture.'
@@ -266,6 +269,9 @@ function Invoke-MihariTestExplicitProxyStatus {
         $proxyStream = $proxyServer.GetStream()
         $proxyRequest = Read-MihariTestHeaderText -Stream $proxyStream
         Assert-MihariTest -Condition ($proxyRequest.StartsWith('CONNECT 192.0.2.19:443 HTTP/1.1')) -Message 'Explicit proxy CONNECT target must match the requested authority.'
+        if (-not [string]::IsNullOrEmpty($ProxyAuthorization)) {
+            Assert-MihariTest -Condition ($proxyRequest -match '(?im)^Proxy-Authorization: Basic proxy-secret\r?$') -Message 'Explicit proxy CONNECT must receive the client proxy credential.'
+        }
         $reason = 'Proxy Rejected'
         if ($StatusCode -eq 407) { $reason = 'Proxy Authentication Required' }
         $responseText = "HTTP/1.1 $StatusCode $reason`r`nContent-Length: 0`r`nConnection: close`r`n"
@@ -382,6 +388,8 @@ function Remove-MihariTestFixtureTlsIdentity {
     if ($failures.Count -gt 0) { throw ('Fixture certificate cleanup failed: ' + ($failures -join '; ')) }
 }
 
+if ($LoadHelpersOnly) { return }
+
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('mihari-integration-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($tempRoot)
 $fixtureIdentity = $null
@@ -491,7 +499,7 @@ try {
     $proxyStatusMetadata = Wait-MihariTestSession -Child $proxyStatusChild
     [void](Invoke-MihariTestExplicitProxyStatus -ProxyListener $proxyStatusListener -MihariPort ([int]$proxyStatusMetadata.actualPort) -StatusCode 407)
     [void](Wait-MihariTestEvent -EventsPath ([string]$proxyStatusMetadata.eventsPath) -Stage 'upstream.proxy.connect')
-    [void](Invoke-MihariTestExplicitProxyStatus -ProxyListener $proxyStatusListener -MihariPort ([int]$proxyStatusMetadata.actualPort) -StatusCode 403)
+    [void](Invoke-MihariTestExplicitProxyStatus -ProxyListener $proxyStatusListener -MihariPort ([int]$proxyStatusMetadata.actualPort) -StatusCode 403 -ProxyAuthorization 'Basic proxy-secret')
     [void](Wait-MihariTestEvent -EventsPath ([string]$proxyStatusMetadata.eventsPath) -Stage 'upstream.proxy.connect')
     $proxyStatusFinal = Stop-MihariTestSession -Child $proxyStatusChild -Metadata $proxyStatusMetadata
     $proxyStatusChild.Process.Dispose()
@@ -500,6 +508,7 @@ try {
     $observedProxyStatuses = New-Object 'System.Collections.Generic.List[int]'
     foreach ($line in [IO.File]::ReadAllLines([string]$proxyStatusFinal.eventsPath)) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        Assert-MihariTest -Condition (-not $line.Contains('proxy-secret')) -Message 'JSONL must not retain an explicit proxy credential.'
         $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop
         if ($event.stage -eq 'upstream.proxy.connect') {
             $observedProxyStatuses.Add([int]$event.data.proxyStatus)

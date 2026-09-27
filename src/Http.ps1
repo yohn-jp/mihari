@@ -683,7 +683,7 @@ function Get-MihariSafePath {
     foreach ($part in $parts) {
         $equals = $part.IndexOf('=')
         if ($equals -lt 0) {
-            $safeParts.Add($part + '=REDACTED')
+            $safeParts.Add('value=REDACTED')
         }
         else {
             $safeParts.Add($part.Substring(0, $equals) + '=REDACTED')
@@ -699,7 +699,8 @@ function Write-MihariHttpMessage {
         [Parameter(Mandatory = $true)]$Message,
         [string]$RequestTarget,
         [switch]$CloseConnection,
-        [switch]$PreserveProxyAuthenticate
+        [switch]$PreserveProxyAuthenticate,
+        [switch]$ForwardProxyAuthorization
     )
 
     $encoding = [System.Text.Encoding]::GetEncoding(28591)
@@ -732,7 +733,7 @@ function Write-MihariHttpMessage {
     $drop['Connection'] = $true
     $drop['Keep-Alive'] = $true
     $drop['Proxy-Connection'] = $true
-    $drop['Proxy-Authorization'] = $true
+    if (-not $ForwardProxyAuthorization) { $drop['Proxy-Authorization'] = $true }
     if (-not $PreserveProxyAuthenticate) { $drop['Proxy-Authenticate'] = $true }
     $drop['Upgrade'] = $true
     $drop['TE'] = $true

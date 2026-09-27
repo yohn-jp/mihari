@@ -185,7 +185,7 @@ function Handle-MihariConnection {
             if ($Session.Mode -eq 'Inspect') {
                 Write-MihariProxyStatus -Stream $clientStream -StatusCode 200 -Reason 'Connection Established' -ConnectSuccess $true
                 $responseStarted = $true
-                Invoke-MihariInspect -Session $Session -ClientStream $clientStream -ConnectHost $hostName -ConnectPort $targetPort -ConnectionId $connectionId
+                Invoke-MihariInspect -Session $Session -ClientStream $clientStream -ConnectHost $hostName -ConnectPort $targetPort -ConnectionId $connectionId -ProxyAuthorization (Get-MihariHeaderText -Headers $request.Headers -Name 'Proxy-Authorization')
                 return
             }
             if ($Session.Mode -ne 'Tunnel') {
@@ -207,7 +207,7 @@ function Handle-MihariConnection {
                 host = $hostName; port = $targetPort; routeKind = $routeKind; routeSource = $route.Source; proxyHost = $(if ($routeKind -eq 'ExplicitProxy') { $route.Host } else { $null }); proxyPort = $(if ($routeKind -eq 'ExplicitProxy') { $route.Port } else { $null })
             }
             $stage = $(if ($routeKind -eq 'ExplicitProxy') { 'upstream.proxy.connect' } else { 'upstream.tcp' })
-            $upstream = Open-MihariUpstream -Route $route -TargetHost $hostName -TargetPort $targetPort -Tunnel $true
+            $upstream = Open-MihariUpstream -Route $route -TargetHost $hostName -TargetPort $targetPort -Tunnel $true -ProxyAuthorization (Get-MihariHeaderText -Headers $request.Headers -Name 'Proxy-Authorization')
             if ($null -ne $upstream.ProxyStatus) {
                 $proxyStatus = [int]$upstream.ProxyStatus.StatusCode
                 $proxyOutcome = $(if ($proxyStatus -ge 200 -and $proxyStatus -lt 300) { 'success' } else { 'rejected' })
@@ -269,7 +269,7 @@ function Handle-MihariConnection {
         $forwardTarget = $target.OriginTarget
         if ($routeKind -eq 'ExplicitProxy') { $forwardTarget = $target.AbsoluteTarget }
         $stage = 'upstream.http'
-        Write-MihariHttpMessage -Stream $upstream.Stream -Message $request -RequestTarget $forwardTarget -CloseConnection
+        Write-MihariHttpMessage -Stream $upstream.Stream -Message $request -RequestTarget $forwardTarget -CloseConnection -ForwardProxyAuthorization:($routeKind -eq 'ExplicitProxy')
         $response = Read-MihariHttpMessage -Stream $upstream.Stream -Kind Response -RequestMethod $request.Method
         if ($null -eq $response) { throw (New-Object System.IO.EndOfStreamException -ArgumentList 'Upstream closed before an HTTP response.') }
         $informationalCount = 0

@@ -4,7 +4,8 @@ function Invoke-MihariInspect {
         [Parameter(Mandatory=$true)][System.IO.Stream]$ClientStream,
         [Parameter(Mandatory=$true)][string]$ConnectHost,
         [Parameter(Mandatory=$true)][int]$ConnectPort,
-        [Parameter(Mandatory=$true)][string]$ConnectionId
+        [Parameter(Mandatory=$true)][string]$ConnectionId,
+        [AllowNull()][string]$ProxyAuthorization
     )
 
     $requestId = $null
@@ -65,7 +66,7 @@ function Invoke-MihariInspect {
 
         $stage = 'upstream.tcp'
         $timer.Restart()
-        $upstream = Open-MihariUpstream -Route $route -TargetHost $ConnectHost -TargetPort $ConnectPort -Tunnel:$true
+        $upstream = Open-MihariUpstream -Route $route -TargetHost $ConnectHost -TargetPort $ConnectPort -Tunnel:$true -ProxyAuthorization $ProxyAuthorization
         if ($null -eq $upstream -or $null -eq $upstream.Stream) {
             throw (New-Object System.IO.IOException -ArgumentList @('Upstream connection did not return a stream.'))
         }

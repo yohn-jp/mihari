@@ -45,6 +45,7 @@ try {
     Assert-MihariTest -Condition ($message.Body.Length -eq 3 -and $message.Body[0] -eq 0 -and $message.Body[1] -eq 255 -and $message.Body[2] -eq 1) -Message 'Content-Length framing must preserve binary request bodies.'
     $safePath = Get-MihariSafePath -Target $message.Path
     Assert-MihariTest -Condition ($safePath -eq '/upload?token=REDACTED') -Message 'Query values must be redacted while retaining the URL path.'
+    Assert-MihariTest -Condition ((Get-MihariSafePath -Target '/upload?raw-secret') -eq '/upload?value=REDACTED') -Message 'Keyless query tokens must be treated as values and redacted.'
 }
 finally { $stream.Dispose() }
 
@@ -85,6 +86,25 @@ try {
     Assert-MihariTest -Condition ($outgoing -match '(?im)^X-End-To-End: retain-me\r?$') -Message 'End-to-end headers must be forwarded.'
 }
 finally { $outputStream.Dispose() }
+
+$proxyAuthInput = ConvertTo-MihariTestBytes -Text "GET http://example.test/private HTTP/1.1`r`nHost: example.test`r`nProxy-Authorization: Basic proxy-secret`r`n`r`n"
+$proxyAuthStream = New-MihariTestMemoryStream -Bytes $proxyAuthInput
+try { $proxyAuthRequest = Read-MihariHttpMessage -Stream $proxyAuthStream -Kind Request }
+finally { $proxyAuthStream.Dispose() }
+foreach ($forwardToExplicitProxy in @($false, $true)) {
+    $outputStream = New-Object System.IO.MemoryStream
+    try {
+        Write-MihariHttpMessage -Stream $outputStream -Message $proxyAuthRequest -ForwardProxyAuthorization:$forwardToExplicitProxy
+        $outgoing = [System.Text.Encoding]::GetEncoding(28591).GetString($outputStream.ToArray())
+        if ($forwardToExplicitProxy) {
+            Assert-MihariTest -Condition ($outgoing -match '(?im)^Proxy-Authorization: Basic proxy-secret\r?$') -Message 'An explicit HTTP proxy must receive the client proxy credential.'
+        }
+        else {
+            Assert-MihariTest -Condition ($outgoing -notmatch '(?im)^Proxy-Authorization:') -Message 'A direct origin must not receive the client proxy credential.'
+        }
+    }
+    finally { $outputStream.Dispose() }
+}
 
 $tempDirectory = Join-Path ([IO.Path]::GetTempPath()) ('mihari-contract-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($tempDirectory)

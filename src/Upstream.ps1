@@ -370,6 +370,7 @@ function Open-MihariUpstream {
         [Parameter(Mandatory = $true)][string]$TargetHost,
         [Parameter(Mandatory = $true)][int]$TargetPort,
         [Parameter(Mandatory = $true)][bool]$Tunnel,
+        [AllowNull()][string]$ProxyAuthorization,
         [ValidateRange(100, 120000)][int]$TimeoutMs = 15000
     )
 
@@ -410,6 +411,12 @@ function Open-MihariUpstream {
             $stream.WriteTimeout = $TimeoutMs
             $stream.ReadTimeout = $TimeoutMs
             $connectRequest = 'CONNECT ' + $destinationAuthority + " HTTP/1.1`r`nHost: " + $destinationAuthority + "`r`nProxy-Connection: Keep-Alive`r`n`r`n"
+            if (-not [string]::IsNullOrEmpty($ProxyAuthorization)) {
+                if ($ProxyAuthorization -match '[\x00-\x1f\x7f]') {
+                    throw [System.IO.InvalidDataException]::new('The proxy authorization field contains invalid characters.')
+                }
+                $connectRequest = 'CONNECT ' + $destinationAuthority + " HTTP/1.1`r`nHost: " + $destinationAuthority + "`r`nProxy-Connection: Keep-Alive`r`nProxy-Authorization: " + $ProxyAuthorization + "`r`n`r`n"
+            }
             $requestBytes = [System.Text.Encoding]::ASCII.GetBytes($connectRequest)
             $stream.Write($requestBytes, 0, $requestBytes.Length)
             $stream.Flush()
