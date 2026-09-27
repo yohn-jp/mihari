@@ -631,7 +631,8 @@ function Invoke-MihariBrowserObservationWorker {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][object] $Session,
-        [Parameter(Mandatory = $true)][object] $Launch
+        [Parameter(Mandatory = $true)][object] $Launch,
+        [AllowNull()][string] $InitialUrl
     )
 
     $token = $Session.BrowserObservationCancellation.Token
@@ -671,6 +672,7 @@ function Invoke-MihariBrowserObservationWorker {
             -Outcome 'owned_profile_attached' -ConnectionId ('browser-profile-' + $sourceId) -RequestId $null `
             -ElapsedMs $watch.Elapsed.TotalMilliseconds -Data @{} -Coverage 'observed'
         $nextId = 0
+        $initialNavigationSent = $false
         $nextId = Send-MihariBrowserCdpCommand -Socket $socket -Method 'Target.setDiscoverTargets' `
             -Parameters @{ discover = $true } -NextCommandId $nextId -CancellationToken $token
         $nextId = Send-MihariBrowserCdpCommand -Socket $socket -Method 'Target.setAutoAttach' `
@@ -702,6 +704,13 @@ function Invoke-MihariBrowserObservationWorker {
                         $nextId = Send-MihariBrowserCdpCommand -Socket $socket -Method 'Target.setAutoAttach' `
                             -Parameters @{ autoAttach = $true; waitForDebuggerOnStart = $false; flatten = $true } `
                             -SessionId $childSession -NextCommandId $nextId -CancellationToken $token
+                        if (-not $initialNavigationSent -and $targetType -eq 'page' -and
+                            -not [string]::IsNullOrWhiteSpace($InitialUrl)) {
+                            $nextId = Send-MihariBrowserCdpCommand -Socket $socket -Method 'Page.navigate' `
+                                -Parameters @{ url = $InitialUrl } -SessionId $childSession `
+                                -NextCommandId $nextId -CancellationToken $token
+                            $initialNavigationSent = $true
+                        }
                     }
                 }
                 'Target.detachedFromTarget' {
@@ -887,7 +896,8 @@ function Start-MihariBrowserObservation {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][object] $Session,
-        [Parameter(Mandatory = $true)][object] $Launch
+        [Parameter(Mandatory = $true)][object] $Launch,
+        [AllowNull()][string] $InitialUrl
     )
 
     if ($null -eq $Session.Writer -or $null -eq $Session.Cancellation -or $Session.Writer.Closed) {
@@ -925,6 +935,9 @@ function Start-MihariBrowserObservation {
         if ($Session.BrowserObservationWorkers.Count -ge 2) {
             return [pscustomobject]@{ Status = 'unavailable'; Reason = 'Mihari reached its bounded diagnostic browser observation limit.' }
         }
+        if (-not $PSBoundParameters.ContainsKey('InitialUrl')) {
+            $InitialUrl = [string](Get-MihariBrowserMemberValue -InputObject $Launch -Name 'InitialNavigationUrl')
+        }
         $launch.SourceIdentity = Get-MihariBrowserScopedId -Scope ([string]$Session.Id) -Value ([string]$Launch.Pid + ':' + [string]$Launch.ProfilePath) -Prefix 'edge'
         $launch.ClockId = 'edge-clock-' + $launch.SourceIdentity
         $powerShell = [System.Management.Automation.PowerShell]::Create()
@@ -938,13 +951,13 @@ function Start-MihariBrowserObservation {
             $observationScriptPath = [System.IO.Path]::Combine([string]$Session.SourceRoot, 'Observation.ps1')
         }
         $workerScript = @'
-param($WorkerSession, $WorkerLaunch, $ObservationScriptPath, $WorkerScriptPath)
+param($WorkerSession, $WorkerLaunch, $ObservationScriptPath, $WorkerScriptPath, $WorkerInitialUrl)
 $ErrorActionPreference = 'Stop'
 . $ObservationScriptPath
 . $WorkerScriptPath
-Invoke-MihariBrowserObservationWorker -Session $WorkerSession -Launch $WorkerLaunch
+Invoke-MihariBrowserObservationWorker -Session $WorkerSession -Launch $WorkerLaunch -InitialUrl $WorkerInitialUrl
 '@
-        $null = $powerShell.AddScript($workerScript).AddArgument($Session).AddArgument($Launch).AddArgument($observationScriptPath).AddArgument($scriptPath)
+        $null = $powerShell.AddScript($workerScript).AddArgument($Session).AddArgument($Launch).AddArgument($observationScriptPath).AddArgument($scriptPath).AddArgument($InitialUrl)
         try {
             $asyncResult = $powerShell.BeginInvoke()
             [void]$Session.BrowserObservationWorkers.Add([pscustomobject]@{

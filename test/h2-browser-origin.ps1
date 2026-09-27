@@ -231,7 +231,7 @@ function Invoke-MihariH2FixtureConnection {
         Write-MihariH2FixtureFrame -Stream $tls -Type 4 -Flags 0 -StreamId 0 -Payload ([byte[]]@())
 
         $transactionCount = 0
-        while ($transactionCount -lt 20) {
+        while ($transactionCount -lt 2) {
             $frame = Read-MihariH2FixtureFrame -Stream $tls
             if ($frame.Type -eq 4 -and ($frame.Flags -band 0x01) -eq 0) {
                 Write-MihariH2FixtureFrame -Stream $tls -Type 4 -Flags 1 -StreamId 0 -Payload ([byte[]]@())
