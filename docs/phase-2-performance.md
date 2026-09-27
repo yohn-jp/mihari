@@ -27,6 +27,8 @@ on quota or writer failure. The slow-peer probe requires a bounded write
 timeout and prints its elapsed time and exception type. The >32 MiB transfer and concurrent SSE/WebSocket
 proof remain in `test/phase2-live-streaming.ps1`. `forwardWriteMs` is measured
 in transport relay facts; it is Mihari forwarding time, not origin latency.
+Stopping the full-queue fixture requires one cancellation fact per queued
+socket; active CONNECT relay cancellation is covered by the transport suite.
 
 ## Coverage and limits
 

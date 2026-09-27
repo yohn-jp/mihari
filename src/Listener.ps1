@@ -298,6 +298,17 @@ finally {
             $queued = $pendingClients.Dequeue()
             try { $queued.Client.Close() }
             catch { Write-Warning 'Mihari queued client socket cleanup failed.' }
+            if ($null -ne $Session.Writer -and -not $Session.CaptureState.Incomplete) {
+                try {
+                    $null = Write-MihariEvent -Session $Session -ConnectionId 'session' -Stage 'listener.queue' -Outcome 'cancelled' -ElapsedMs 0 -Data @{
+                        waitMs = [long]([DateTime]::UtcNow - $queued.AcceptedUtc).TotalMilliseconds
+                        queueLength = $pendingClients.Count
+                        queueCapacity = $queueCapacity
+                        reason = 'session_stop'
+                    }
+                }
+                catch { Write-Warning 'Mihari queued cancellation could not be recorded in the event stream.' }
+            }
         }
         $Session.ActiveConnectionCount = 0
         $registry = $Session.ActiveUpstreamClients
