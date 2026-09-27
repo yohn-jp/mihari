@@ -156,6 +156,17 @@ function ConvertTo-MihariBrowserSafeResponse {
     return [pscustomobject]$safe
 }
 
+function ConvertTo-MihariBrowserMonotonicTimestamp {
+    param([AllowNull()][object] $Value)
+
+    if ($null -eq $Value -or $Value -is [bool]) { return $null }
+    $parsed = 0.0
+    if (-not [double]::TryParse([string]$Value, [Globalization.NumberStyles]::Float,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed) -or
+        [double]::IsNaN($parsed) -or [double]::IsInfinity($parsed)) { return $null }
+    return $parsed
+}
+
 function ConvertTo-MihariBrowserRequestFact {
     [CmdletBinding()]
     param(
@@ -172,8 +183,8 @@ function ConvertTo-MihariBrowserRequestFact {
         [AllowNull()][object] $ErrorText,
         [AllowNull()][object] $BlockedReason,
         [AllowNull()][object] $CorsError,
-        [AllowNull()][double] $StartTimestamp,
-        [AllowNull()][double] $EndTimestamp,
+        [AllowNull()][object] $StartTimestamp,
+        [AllowNull()][object] $EndTimestamp,
         [AllowNull()][object] $BrowserConnectionId,
         [AllowNull()][object] $FromDiskCache,
         [AllowNull()][object] $FromServiceWorker
@@ -227,13 +238,12 @@ function ConvertTo-MihariBrowserRequestFact {
     }
 
     $elapsedMs = $null
-    if ($null -ne $StartTimestamp -and $null -ne $EndTimestamp -and
-        -not [double]::IsNaN($StartTimestamp) -and -not [double]::IsInfinity($StartTimestamp) -and
-        -not [double]::IsNaN($EndTimestamp) -and -not [double]::IsInfinity($EndTimestamp) -and
-        $EndTimestamp -ge $StartTimestamp) {
-        $elapsedMs = [long][Math]::Round(($EndTimestamp - $StartTimestamp) * 1000.0, 0, [MidpointRounding]::AwayFromZero)
+    $startMonotonic = ConvertTo-MihariBrowserMonotonicTimestamp -Value $StartTimestamp
+    $endMonotonic = ConvertTo-MihariBrowserMonotonicTimestamp -Value $EndTimestamp
+    if ($null -ne $startMonotonic -and $null -ne $endMonotonic -and $endMonotonic -ge $startMonotonic) {
+        $elapsedMs = [long][Math]::Round(($endMonotonic - $startMonotonic) * 1000.0, 0, [MidpointRounding]::AwayFromZero)
         $data['browserTimingOrigin'] = 'cdp_monotonic'
-        $data['browserTimingStartMs'] = [long][Math]::Max(0, [Math]::Round($StartTimestamp * 1000.0, 0, [MidpointRounding]::AwayFromZero))
+        $data['browserTimingStartMs'] = [long][Math]::Max(0, [Math]::Round($startMonotonic * 1000.0, 0, [MidpointRounding]::AwayFromZero))
         $data['browserTimingDurationMs'] = [long]$elapsedMs
     }
     return [pscustomobject]@{

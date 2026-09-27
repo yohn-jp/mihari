@@ -35,6 +35,16 @@ try {
         -BrowserConnectionId $null -FromDiskCache $null -FromServiceWorker $null
     Assert-MihariTest -Condition ($null -eq $unmeasuredFact.ElapsedMs -and -not $unmeasuredFact.Data.Contains('browserTimingDurationMs')) -Message 'Missing browser timing must remain unknown and must not be written as zero.'
     Assert-MihariTest -Condition ($unmeasuredFact.Data.browserError -eq 'net::ERR_NAME_NOT_RESOLVED') -Message 'Browser failures must retain only the allowlisted stable error token.'
+    $oneSidedTimingFact = ConvertTo-MihariBrowserRequestFact -SessionId 'session-test' -ProcessId 1234 `
+        -TargetId 'target-3' -BrowserRequestId 'request-3' -FrameId $null -RedirectIndex 0 `
+        -Request ([pscustomobject]@{ url = 'https://example.test/partial-timing'; method = 'GET' }) `
+        -Response $null -InitiatorType $null -Outcome 'incomplete' -ErrorText $null `
+        -BlockedReason $null -CorsError $null -StartTimestamp 41.0 -EndTimestamp $null `
+        -BrowserConnectionId $null -FromDiskCache $null -FromServiceWorker $null
+    Assert-MihariTest -Condition ($null -eq $oneSidedTimingFact.ElapsedMs -and
+        -not $oneSidedTimingFact.Data.Contains('browserTimingOrigin') -and
+        -not $oneSidedTimingFact.Data.Contains('browserTimingStartMs') -and
+        -not $oneSidedTimingFact.Data.Contains('browserTimingDurationMs')) -Message 'A single monotonic timestamp must not be promoted into a measured duration or timing pair.'
 
     $writerPath = Join-Path $temporaryDirectory 'browser-events.jsonl'
     $writer = New-MihariEventWriter -Path $writerPath
