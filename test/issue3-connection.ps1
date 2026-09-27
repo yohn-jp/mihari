@@ -41,7 +41,10 @@ try {
     Assert-MihariTest -Condition ($events[0].stage -eq 'listener.accept' -and $events[1].stage -eq 'connection.cleanup') -Message 'The terminal connection fact must follow acceptance.'
     Assert-MihariTest -Condition ($events[0].connectionId -eq $events[1].connectionId -and $events[0].connectionId) -Message 'The terminal fact must correlate to the accepted connection.'
     Assert-MihariTest -Condition ($events[0].mode -eq 'Tunnel' -and $events[1].mode -eq 'Tunnel') -Message 'A later mode toggle must not relabel an accepted connection.'
-    Assert-MihariTest -Condition ($events[1].outcome -eq 'success' -and $null -eq $events[1].requestId) -Message 'A clean EOF must finish successfully without inventing a request.'
+    Assert-MihariTest -Condition ($events[1].outcome -eq 'success') -Message ('A clean EOF must finish successfully; observed outcome was ' + [string]$events[1].outcome + '.')
+    $requestIdKind = 'null'
+    if ($null -ne $events[1].requestId) { $requestIdKind = 'string length ' + ([string]$events[1].requestId).Length }
+    Assert-MihariTest -Condition ($null -eq $events[1].requestId) -Message ('A clean EOF must not invent a request ID; observed ' + $requestIdKind + '.')
     Write-Host 'PASS issue3-connection: EOF terminal fact and immutable accepted mode'
 }
 finally {
