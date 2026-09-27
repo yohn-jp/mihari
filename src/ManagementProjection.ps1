@@ -83,7 +83,7 @@ function ConvertTo-MihariManagementEvent {
     $path = ConvertTo-MihariPath -Value (Get-MihariMemberValue -InputObject $rawData -Names @('path'))
     if ($null -ne $path) { $projectedData['path'] = $path }
 
-    foreach ($name in @('port', 'proxyPort', 'statusCode', 'proxyStatus', 'bytesClientToUpstream', 'bytesUpstreamToClient', 'tlsCipherStrength', 'browserRedirectIndex', 'browserTimingStartMs', 'browserTimingDurationMs', 'requestBytes', 'responseBytes', 'bytes', 'firstByteMs', 'lastByteMs', 'forwardWriteMs', 'workerOccupancy', 'maxWorkers', 'workingSetBytes', 'cpuTotalMs', 'evidenceBytes', 'writerLagMs', 'activeLongLivedCount', 'queueLength', 'queueCapacity', 'queuePeak', 'saturationCount')) {
+    foreach ($name in @('port', 'proxyPort', 'statusCode', 'proxyStatus', 'bytesClientToUpstream', 'bytesUpstreamToClient', 'tlsCipherStrength', 'browserRedirectIndex', 'browserTimingStartMs', 'browserTimingDurationMs', 'requestBytes', 'responseBytes', 'bytes', 'firstByteMs', 'lastByteMs', 'forwardWriteMs', 'workerOccupancy', 'maxWorkers', 'workingSetBytes', 'cpuTotalMs', 'evidenceBytes', 'writerLagMs', 'activeLongLivedCount', 'queueLength', 'queueCapacity', 'queuePeak', 'saturationCount', 'browserDroppedTargetCount', 'browserDroppedRequestCount')) {
         $number = ConvertTo-MihariManagementNumber -Value (Get-MihariMemberValue -InputObject $rawData -Names @($name))
         if ($null -ne $number -and $number -ge 0 -and $number -le [decimal]([long]::MaxValue)) {
             $projectedData[$name] = [long][Math]::Truncate($number)
