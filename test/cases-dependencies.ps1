@@ -228,9 +228,29 @@ try {
         inspectTrialId = 'trial-inspect'; tunnelTrialId = 'trial-tunnel'
         evidenceReferences = @([pscustomobject]@{ sessionId = 's1'; eventId = 'inspect-failed' }, [pscustomobject]@{ sessionId = 's2'; eventId = 'tunnel-business-success' })
     }
-    $validTlsProposals = New-MihariPolicyProposals -Dependencies @($confirmedChild) -TlsEvidence @($validTlsEvidence) -ConfirmTlsExclusionHostScope
+    $tlsHostScopeConfirmed = $true
+    $validTlsProposals = New-MihariPolicyProposals -Dependencies @($confirmedChild) -TlsEvidence @($validTlsEvidence) -ConfirmTlsExclusionHostScope:$tlsHostScopeConfirmed
     $tlsProposal = @($validTlsProposals.items | Where-Object { $_.proposalType -eq 'tls_inspection_exclusion' } | Select-Object -First 1)
-    Assert-MihariTest -Condition ($null -ne $tlsProposal -and $tlsProposal.policyDomain -eq 'mihari-local-inspection' -and $tlsProposal.upstreamRoute -eq 'unchanged' -and $tlsProposal.exactHostScopeConfirmed -and $tlsProposal.proposalStatus -eq 'candidate') -Message 'A supported TLS comparison needs separate explicit exact-host local-exclusion confirmation and cannot change the upstream route.'
+    $validTlsEvidenceCheck = Test-MihariTlsExclusionEvidence -Evidence $validTlsEvidence
+    $validTlsHost = ConvertTo-MihariNeutralPolicyHost -HostValue $validTlsEvidence.host
+    $tlsMatchedDependencies = @($confirmedChild | Where-Object {
+            (ConvertTo-MihariNeutralPolicyHost -HostValue $_.host) -eq $validTlsHost -and [string]$_.caseId -eq [string]$validTlsEvidence.caseId
+        })
+    $tlsProposalDiagnostics = @($validTlsProposals.items | ForEach-Object {
+            [pscustomobject]@{
+                proposalType = $_.proposalType; policyDomain = $_.policyDomain; host = $_.host
+                proposalStatus = $_.proposalStatus; exactHostScopeConfirmed = $_.exactHostScopeConfirmed
+                upstreamRoute = $_.upstreamRoute; necessityState = $_.necessityState
+                requiresConfirmation = @($_.requiresConfirmation)
+            }
+        })
+    $tlsProposalFailureDetails = [pscustomobject]@{
+        evidenceValid = [bool]$validTlsEvidenceCheck.Valid; evidenceReferenceCount = @($validTlsEvidenceCheck.EvidenceReferences).Count
+        normalizedEvidenceHost = $validTlsHost; matchingDependencyCount = $tlsMatchedDependencies.Count
+        matchingNecessityStates = @($tlsMatchedDependencies | ForEach-Object { $_.necessityState })
+        hostScopeConfirmationSupplied = [bool]$tlsHostScopeConfirmed; proposals = $tlsProposalDiagnostics
+    }
+    Assert-MihariTest -Condition ($null -ne $tlsProposal -and $tlsProposal.policyDomain -eq 'mihari-local-inspection' -and $tlsProposal.upstreamRoute -eq 'unchanged' -and $tlsProposal.exactHostScopeConfirmed -and $tlsProposal.proposalStatus -eq 'candidate') -Message ('A supported TLS comparison needs separate explicit exact-host local-exclusion confirmation and cannot change the upstream route. Diagnostics: ' + (ConvertTo-Json -InputObject $tlsProposalFailureDetails -Depth 8 -Compress))
     $unconfirmedTlsProposal = New-MihariPolicyProposals -Dependencies @($confirmedChild) -TlsEvidence @($validTlsEvidence)
     Assert-MihariTest -Condition (@($unconfirmedTlsProposal.items)[0].proposalStatus -eq 'requires_confirmation' -and 'exact_host_scope' -in @($unconfirmedTlsProposal.items)[0].requiresConfirmation) -Message 'A host-wide TLS exclusion stays withheld from use until exact-host scope is explicitly confirmed.'
 
