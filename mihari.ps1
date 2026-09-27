@@ -5,6 +5,7 @@ param(
     [ValidateSet('Inspect', 'Tunnel')]
     [string] $Mode = 'Inspect',
     [int] $Port = 8899,
+    [int] $UiPort = 0,
     [string] $UpstreamProxy,
     [string] $OutputRoot,
     [int] $MaxWorkers = 16,
@@ -14,7 +15,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $sourceRoot = Join-Path $PSScriptRoot 'src'
-foreach ($name in @('Compatibility', 'Certificate', 'Observation', 'Http', 'Upstream', 'Tls', 'Connection', 'Listener', 'Diagnosis', 'Cleanup', 'Session', 'Browser', 'Cli')) {
+foreach ($name in @('Compatibility', 'Certificate', 'Observation', 'Http', 'Upstream', 'Tls', 'Connection', 'Listener', 'Diagnosis', 'Cleanup', 'Session', 'Browser', 'ManagementUi', 'Management', 'Cli')) {
     . (Join-Path $sourceRoot ($name + '.ps1'))
 }
 
@@ -24,10 +25,14 @@ switch ($Command) {
         break
     }
     'start' {
-        $session = New-MihariSession -Mode $Mode -Port $Port -UpstreamProxy $UpstreamProxy -OutputRoot $OutputRoot -MaxWorkers $MaxWorkers
-        Format-MihariStartMessage -Session $session
+        $session = New-MihariSession -Mode $Mode -Port $Port -ManagementPort $UiPort -UpstreamProxy $UpstreamProxy -OutputRoot $OutputRoot -MaxWorkers $MaxWorkers
         try {
-            Start-MihariListener -Session $session
+            Start-MihariListener -Session $session -OnReady {
+                param($readySession)
+                Start-MihariManagementListener -Session $readySession
+                [void](Save-MihariSessionMetadata -Session $readySession)
+                Format-MihariStartMessage -Session $readySession
+            }
         }
         finally {
             $final = Stop-MihariSession -Session $session

@@ -105,6 +105,70 @@ function Get-MihariSafeProxyEndpoint {
     return $proxyHostName + ':' + $uri.Port
 }
 
+function Test-MihariSessionCATrust {
+    param($Session)
+
+    if ($null -eq $Session.CA) { return $false }
+    $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+        [System.Security.Cryptography.X509Certificates.StoreName]::Root,
+        [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+    )
+    try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+        foreach ($certificate in $store.Certificates) {
+            if ($certificate.Thumbprint -eq [string]$Session.CA.Thumbprint -and
+                $certificate.Subject -eq [string]$Session.CA.Subject) {
+                return $true
+            }
+        }
+        return $false
+    }
+    finally { $store.Close() }
+}
+
+function Set-MihariSessionMode {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Session,
+        [Parameter(Mandatory = $true)][ValidateSet('Inspect', 'Tunnel')][string]$Mode
+    )
+
+    if ([string]$Session.Status -ne 'running') {
+        throw 'Mihari mode can only change while both session listeners are running.'
+    }
+    [System.Threading.Monitor]::Enter($Session.StateLock)
+    try {
+        $previous = [string]$Session.Mode
+        if ($previous -eq $Mode) { return $previous }
+        if ($Mode -eq 'Inspect') {
+            $capability = Test-MihariCapability -Mode Inspect
+            if (-not $capability.Available) {
+                throw ('Mihari Inspect mode is unavailable: {0}' -f $capability.Reason)
+            }
+            if ($null -eq $Session.CA) {
+                $Session.CA = New-MihariCA -SessionId ([string]$Session.Id)
+                # Persist exact CA identity before adding public trust.
+                [void](Save-MihariSessionMetadata -Session $Session)
+            }
+            if (-not (Test-MihariSessionCATrust -Session $Session)) {
+                $Session.PublicCARoot = Install-MihariCARoot -CA $Session.CA
+            }
+            if (-not (Test-MihariSessionCATrust -Session $Session)) {
+                throw 'The session CA is not trusted; Inspect was not enabled.'
+            }
+        }
+        $Session.Mode = $Mode
+        [void](Save-MihariSessionMetadata -Session $Session)
+        if ($null -ne $Session.Writer) {
+            $null = Write-MihariEvent -Session $Session -ConnectionId 'session' -Stage 'session.mode' -Outcome 'changed' -ElapsedMs 0 -Data @{
+                previousMode = $previous; mode = $Mode; caTrusted = (Test-MihariSessionCATrust -Session $Session)
+            }
+        }
+        return $Mode
+    }
+    finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
+}
+
 function Get-MihariSessionMetadataObject {
     param([Parameter(Mandatory = $true)]$Session)
 
@@ -117,6 +181,12 @@ function Get-MihariSessionMetadataObject {
 
     $actualPort = $null
     if ($null -ne $Session.ActualPort) { $actualPort = [int]$Session.ActualPort }
+    $actualManagementPort = $null
+    if ($null -ne $Session.ActualManagementPort) { $actualManagementPort = [int]$Session.ActualManagementPort }
+    $proxyEndpoint = $null
+    if ($null -ne $actualPort -and $actualPort -gt 0) { $proxyEndpoint = 'http://127.0.0.1:' + $actualPort }
+    $uiEndpoint = $null
+    if ($null -ne $actualManagementPort -and $actualManagementPort -gt 0) { $uiEndpoint = 'http://127.0.0.1:' + $actualManagementPort + '/' }
     $data = [ordered]@{
         schemaVersion = 1
         sessionId = [string]$Session.Id
@@ -129,6 +199,12 @@ function Get-MihariSessionMetadataObject {
         bindAddress = '127.0.0.1'
         port = [int]$Session.Port
         actualPort = $actualPort
+        managementPort = [int]$Session.ManagementPort
+        actualManagementPort = $actualManagementPort
+        proxyEndpoint = $proxyEndpoint
+        uiEndpoint = $uiEndpoint
+        proxyHeartbeatUtc = $Session.ProxyHeartbeatUtc
+        managementHeartbeatUtc = $Session.ManagementHeartbeatUtc
         outputDirectory = [string]$Session.OutputDirectory
         eventsPath = [string]$Session.EventsPath
         stopPath = [string]$Session.StopPath
@@ -136,7 +212,9 @@ function Get-MihariSessionMetadataObject {
         reportTextPath = [System.IO.Path]::Combine([string]$Session.OutputDirectory, 'report.txt')
         caThumbprint = $caThumbprint
         caSubject = $caSubject
+        caTrusted = $(if ($null -ne $Session.CA) { Test-MihariSessionCATrust -Session $Session } else { $false })
         upstreamProxy = Get-MihariSafeProxyEndpoint -Proxy ([string]$Session.UpstreamProxy)
+        upstreamSnapshotCapturedAtUtc = $(if ($null -ne $Session.PlatformProxySnapshot) { [string]$Session.PlatformProxySnapshot.CapturedAtUtc } else { $null })
         maxWorkers = [int]$Session.MaxWorkers
         error = $Session.Error
         cleanupErrors = @($Session.CleanupErrors)
@@ -151,12 +229,16 @@ function Save-MihariSessionMetadata {
     if ($null -eq $Session -or [string]::IsNullOrWhiteSpace([string]$Session.OutputDirectory)) {
         throw 'A session with an output directory is required.'
     }
-    if ($null -ne $Session.ActualPort -and [string]$Session.Status -eq 'starting') {
+    if ($null -ne $Session.ActualPort -and $null -ne $Session.ActualManagementPort -and [string]$Session.Status -eq 'starting') {
         $Session.Status = 'running'
     }
     $document = Get-MihariSessionMetadataObject -Session $Session
-    Write-MihariJsonFileAtomic -Path ([string]$Session.MetadataPath) -Value $document
-    Write-MihariJsonFileAtomic -Path ([string]$Session.ActivePath) -Value $document
+    [System.Threading.Monitor]::Enter($Session.MetadataLock)
+    try {
+        Write-MihariJsonFileAtomic -Path ([string]$Session.MetadataPath) -Value $document
+        Write-MihariJsonFileAtomic -Path ([string]$Session.ActivePath) -Value $document
+    }
+    finally { [System.Threading.Monitor]::Exit($Session.MetadataLock) }
     return $document
 }
 
@@ -165,6 +247,7 @@ function New-MihariSession {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('Tunnel', 'Inspect')][string]$Mode,
         [Parameter(Mandatory = $true)][ValidateRange(0, 65535)][int]$Port,
+        [ValidateRange(0, 65535)][int]$ManagementPort = 0,
         [string]$UpstreamProxy,
         [string]$OutputRoot,
         [ValidateRange(1, 128)][int]$MaxWorkers = 16
@@ -222,12 +305,18 @@ function New-MihariSession {
         }
         $sessionSourceDirectory = Split-Path -Parent $sessionScriptPath
         $sourceRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $sessionSourceDirectory))
+        if (-not (Get-Command New-MihariUpstreamSnapshot -ErrorAction SilentlyContinue)) {
+            throw 'The upstream route snapshot function is unavailable.'
+        }
+        $platformProxySnapshot = New-MihariUpstreamSnapshot
 
         $session = [pscustomobject]@{
             Id = $id
             Mode = $Mode
             Port = $Port
             ActualPort = $null
+            ManagementPort = $ManagementPort
+            ActualManagementPort = $null
             OutputDirectory = $outputDirectory
             OutputRoot = $root
             EventsPath = $eventsPath
@@ -237,12 +326,18 @@ function New-MihariSession {
             SourceRoot = $sourceRoot
             MaxWorkers = $MaxWorkers
             UpstreamProxy = $UpstreamProxy
+            PlatformProxySnapshot = $platformProxySnapshot
             Writer = $null
             CA = $null
             PublicCARoot = $null
             LeafCache = [hashtable]::Synchronized(@{})
             Cancellation = New-Object System.Threading.CancellationTokenSource
+            StateLock = New-Object System.Object
+            MetadataLock = New-Object System.Object
             Listener = $null
+            ManagementListener = $null
+            ProxyHeartbeatUtc = $null
+            ManagementHeartbeatUtc = $null
             WorkerPool = $null
             ProcessId = [int]$PID
             ProcessStartTimeUtc = $processStart
@@ -316,6 +411,45 @@ function New-MihariSession {
     }
 }
 
+function Get-MihariPersistedListenerHealth {
+    param(
+        $Metadata,
+        [string]$PortProperty,
+        [string]$HeartbeatProperty
+    )
+
+    $port = 0
+    $listening = $false
+    if ([int]::TryParse([string]$Metadata.$PortProperty, [ref]$port) -and $port -gt 0 -and $port -le 65535) {
+        try {
+            $endpoints = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+            foreach ($endpoint in $endpoints) {
+                if ($endpoint.Port -eq $port -and [System.Net.IPAddress]::IsLoopback($endpoint.Address)) {
+                    $listening = $true
+                    break
+                }
+            }
+        }
+        catch {
+            $listening = $false
+        }
+    }
+    $heartbeatFresh = $false
+    $heartbeat = [string]$Metadata.$HeartbeatProperty
+    if (-not [string]::IsNullOrWhiteSpace($heartbeat)) {
+        $parsed = [DateTime]::MinValue
+        if ([DateTime]::TryParse($heartbeat, [ref]$parsed)) {
+            $age = ([DateTime]::UtcNow - $parsed.ToUniversalTime()).TotalSeconds
+            $heartbeatFresh = $age -ge -5 -and $age -le 5
+        }
+    }
+    return [pscustomobject]@{
+        listening = [bool]$listening
+        heartbeatFresh = [bool]$heartbeatFresh
+        healthy = [bool]($listening -and $heartbeatFresh)
+    }
+}
+
 function Get-MihariSessionStatus {
     [CmdletBinding()]
     param([string]$OutputRoot)
@@ -333,10 +467,17 @@ function Get-MihariSessionStatus {
     if ($null -eq $sessionMetadata -or [string]$sessionMetadata.sessionId -ne $id) { return $null }
     $alive = Get-MihariSessionProcessAlive -Metadata $sessionMetadata
     Add-Member -InputObject $sessionMetadata -NotePropertyName processAlive -NotePropertyValue $alive -Force
+    $proxyHealth = Get-MihariPersistedListenerHealth -Metadata $sessionMetadata -PortProperty 'actualPort' -HeartbeatProperty 'proxyHeartbeatUtc'
+    $managementHealth = Get-MihariPersistedListenerHealth -Metadata $sessionMetadata -PortProperty 'actualManagementPort' -HeartbeatProperty 'managementHeartbeatUtc'
+    Add-Member -InputObject $sessionMetadata -NotePropertyName proxyHealth -NotePropertyValue $proxyHealth -Force
+    Add-Member -InputObject $sessionMetadata -NotePropertyName managementHealth -NotePropertyValue $managementHealth -Force
     $currentStatus = [string]$sessionMetadata.status
     $finished = $currentStatus -like 'stopped*' -or $currentStatus -in @('start_failed', 'orphaned', 'orphaned_cleaned')
     if (-not $alive -and -not $finished) {
         Add-Member -InputObject $sessionMetadata -NotePropertyName effectiveStatus -NotePropertyValue 'orphaned' -Force
+    }
+    elseif ($alive -and $currentStatus -eq 'running' -and (-not $proxyHealth.healthy -or -not $managementHealth.healthy)) {
+        Add-Member -InputObject $sessionMetadata -NotePropertyName effectiveStatus -NotePropertyValue 'unhealthy' -Force
     }
     else {
         Add-Member -InputObject $sessionMetadata -NotePropertyName effectiveStatus -NotePropertyValue ([string]$sessionMetadata.status) -Force
@@ -489,6 +630,16 @@ function Stop-MihariSession {
         }
     }
     catch { [void]$cleanupErrors.Add('Could not stop the listener cleanly.') }
+
+    try {
+        if ($null -ne $Session.ManagementListener -and (Get-Command Stop-MihariManagementListener -ErrorAction SilentlyContinue)) {
+            Stop-MihariManagementListener -Session $Session
+        }
+        elseif ($null -ne $Session.ManagementListener) {
+            $Session.ManagementListener.Stop()
+        }
+    }
+    catch { [void]$cleanupErrors.Add('Could not stop the management listener cleanly.') }
 
     if ($null -ne $Session.WorkerPool) {
         try { $Session.WorkerPool.Close() }

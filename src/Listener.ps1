@@ -74,7 +74,10 @@ function Stop-MihariListener {
 }
 
 function Start-MihariListener {
-    param([Parameter(Mandatory = $true)]$Session)
+    param(
+        [Parameter(Mandatory = $true)]$Session,
+        [scriptblock]$OnReady
+    )
 
     $port = [int]$Session.Port
     $maxWorkers = [int]$Session.MaxWorkers
@@ -97,13 +100,13 @@ function Start-MihariListener {
     $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $maxWorkers)
     $workers = New-Object System.Collections.ArrayList
     $workerScript = @'
-param($WorkerSession, $WorkerClient, $WorkerSourceRoot)
+param($WorkerSession, $WorkerClient, $WorkerSourceRoot, $AcceptedMode)
 $ErrorActionPreference = 'Stop'
 try {
     foreach ($sourceFile in (Get-ChildItem -LiteralPath $WorkerSourceRoot -Filter '*.ps1' -File | Sort-Object Name)) {
         . $sourceFile.FullName
     }
-    Handle-MihariConnection -Session $WorkerSession -Client $WorkerClient
+    Handle-MihariConnection -Session $WorkerSession -Client $WorkerClient -AcceptedMode $AcceptedMode
 }
 finally {
     $WorkerClient.Close()
@@ -126,9 +129,28 @@ finally {
         else {
             $Session.Listener = $listener
         }
+        $Session.ProxyHeartbeatUtc = [DateTime]::UtcNow.ToString('o')
+        if ($null -ne $OnReady) { & $OnReady $Session }
         [void](Save-MihariSessionMetadata -Session $Session)
 
+        $lastHeartbeatPersist = [DateTime]::MinValue
+
         while (-not (Test-Path -LiteralPath $Session.StopPath)) {
+            $Session.ProxyHeartbeatUtc = [DateTime]::UtcNow.ToString('o')
+            if ($null -ne $Session.ManagementListener -and (Get-Command Invoke-MihariManagementPending -ErrorAction SilentlyContinue)) {
+                Invoke-MihariManagementPending -Session $Session
+            }
+            if (([DateTime]::UtcNow - $lastHeartbeatPersist).TotalSeconds -ge 1) {
+                try { [void](Save-MihariSessionMetadata -Session $Session) }
+                catch {
+                    if ($null -ne $Session.Writer) {
+                        $null = Write-MihariEvent -Session $Session -ConnectionId 'session' -Stage 'session.metadata' -Outcome 'failed' -ElapsedMs 0 -Data @{
+                            exception = $_.Exception; errorCode = 'metadata_write_failed'
+                        }
+                    }
+                }
+                $lastHeartbeatPersist = [DateTime]::UtcNow
+            }
             for ($i = $workers.Count - 1; $i -ge 0; $i--) {
                 if ($workers[$i].AsyncResult.IsCompleted) {
                     $worker = $workers[$i]
@@ -147,6 +169,9 @@ finally {
                     continue
                 }
                 $client = $listener.AcceptTcpClient()
+                [System.Threading.Monitor]::Enter($Session.StateLock)
+                try { $acceptedMode = [string]$Session.Mode }
+                finally { [System.Threading.Monitor]::Exit($Session.StateLock) }
             }
             catch {
                 # Stop-MihariListener may close the listener while accept is
@@ -159,7 +184,7 @@ finally {
             try {
                 $powerShell = [System.Management.Automation.PowerShell]::Create()
                 $powerShell.RunspacePool = $pool
-                $null = $powerShell.AddScript($workerScript).AddArgument($Session).AddArgument($client).AddArgument($sourceRoot)
+                $null = $powerShell.AddScript($workerScript).AddArgument($Session).AddArgument($client).AddArgument($sourceRoot).AddArgument($acceptedMode)
                 $asyncResult = $powerShell.BeginInvoke()
                 $null = $workers.Add([pscustomobject]@{
                     PowerShell = $powerShell

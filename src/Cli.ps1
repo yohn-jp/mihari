@@ -9,7 +9,7 @@ Commands:
   help      Show this help.
   start     Start a foreground diagnostic session.
   browser   Launch Microsoft Edge through the active Mihari proxy.
-  status    Show the latest session and whether its process is running.
+  status    Show the latest session and listener health.
   report    Generate report.json and report.txt from the latest session.
   stop      Request the active foreground session to stop.
   cleanup   Remove stale Mihari-owned session CA trust.
@@ -17,6 +17,7 @@ Commands:
 Start options:
   -Mode Inspect|Tunnel    Inspect terminates TLS 1.2; Tunnel relays CONNECT.
   -Port <port>            Loopback listener port. Default: 8899. Use 0 for any free port.
+  -UiPort <port>          Management UI loopback port. Default: 0 (free port).
   -UpstreamProxy <uri>    Explicit upstream HTTP proxy override.
   -OutputRoot <path>      Session output root.
   -MaxWorkers <count>     Maximum concurrent connection workers. Default: 16.
@@ -41,10 +42,8 @@ start runs in the foreground. Use another PowerShell window for browser, status,
 function Format-MihariStartMessage {
     param([Parameter(Mandatory = $true)]$Session)
 
-    if ([int]$Session.Port -eq 0) {
-        return ('Starting Mihari {0} session {1} on an available loopback port. Run ".\mihari.ps1 status" from another shell after startup.' -f $Session.Mode, $Session.Id)
-    }
-    return ('Starting Mihari {0} session {1} on http://127.0.0.1:{2}. Use another shell for browser/status/stop.' -f $Session.Mode, $Session.Id, $Session.Port)
+    return ('Mihari {0} session {1} is running.{2}Proxy: http://127.0.0.1:{3}{2}UI:    http://127.0.0.1:{4}/' -f
+        $Session.Mode, $Session.Id, [Environment]::NewLine, [int]$Session.ActualPort, [int]$Session.ActualManagementPort)
 }
 
 function Format-MihariFinalStop {
@@ -83,13 +82,23 @@ function Format-MihariStatus {
         $lines.Add(('  PID: {0}' -f [string]$Metadata.processId))
     }
 
-    $port = 0
-    $portValue = $Metadata.actualPort
-    if ($null -eq $portValue -or [string]::IsNullOrWhiteSpace([string]$portValue)) {
-        $portValue = $Metadata.port
+    $proxyEndpoint = [string]$Metadata.proxyEndpoint
+    if ([string]::IsNullOrWhiteSpace($proxyEndpoint)) {
+        $fallbackPort = 0
+        if ([int]::TryParse([string]$Metadata.actualPort, [ref]$fallbackPort) -and $fallbackPort -gt 0) {
+            $proxyEndpoint = 'http://127.0.0.1:' + $fallbackPort
+        }
     }
-    if ([int]::TryParse([string]$portValue, [ref]$port) -and $port -gt 0 -and $port -le 65535) {
-        $lines.Add(('  Proxy: http://127.0.0.1:{0}' -f $port))
+    if (-not [string]::IsNullOrWhiteSpace($proxyEndpoint)) {
+        if ($null -ne $Metadata.proxyHealth) {
+            $proxyState = $(if ($Metadata.proxyHealth.healthy) { 'healthy' } else { 'unhealthy' })
+            $lines.Add(('  Proxy: {0} ({1})' -f $proxyEndpoint, $proxyState))
+        }
+        else { $lines.Add(('  Proxy: {0}' -f $proxyEndpoint)) }
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Metadata.uiEndpoint)) {
+        $managementState = $(if ($Metadata.managementHealth.healthy) { 'healthy' } else { 'unhealthy' })
+        $lines.Add(('  UI: {0} ({1})' -f [string]$Metadata.uiEndpoint, $managementState))
     }
     if (-not [string]::IsNullOrWhiteSpace([string]$Metadata.outputDirectory)) {
         $lines.Add(('  Output: {0}' -f [string]$Metadata.outputDirectory))
