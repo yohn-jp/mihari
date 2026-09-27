@@ -49,7 +49,17 @@ evidence, never as a complete fact.
 
 ## Windows results
 
-Pending integration of the focused probe on the final implementation HEAD.
-Record both runtime versions, exact CI run/job, measured `MEASURE` lines,
-and any failure or unavailable field here. Do not infer throughput or memory
-ceilings from this short controlled soak.
+The focused impact and capture-status probes passed on both runtimes at HEAD
+`eabb85a9f7031deae9c8d4f6172c57cc08334529` in
+[Actions run 36314290993](https://github.com/yohn-jp/mihari/actions/runs/36314290993).
+The run as a whole is not final Phase 2 verification; the independent PowerShell 7
+Edge smoke job failed. Values below are observed samples from the bounded local
+fixture, not throughput or memory ceilings.
+
+| Runtime and job | Full-queue resource sample | Slow non-reading peer |
+| --- | --- | --- |
+| [Windows PowerShell 5.1, job 108605952610](https://github.com/yohn-jp/mihari/actions/runs/36314290993/job/108605952610) | `workers=2 queue=4/4 peak=4 saturation=5 workingSetBytes=218275840 cpuTotalMs=2718.75 evidenceBytes=9657 writerLagMs=0` | 8 MiB source, 500 ms write timeout, 535 ms elapsed, `System.Net.Sockets.SocketException` |
+| [PowerShell 7.6.6, job 108605952568](https://github.com/yohn-jp/mihari/actions/runs/36314290993/job/108605952568) | `workers=2 queue=4/4 peak=4 saturation=5 workingSetBytes=192217088 cpuTotalMs=5500 evidenceBytes=9660 writerLagMs=0` | 8 MiB source, 500 ms write timeout, 523 ms elapsed, `System.Net.Sockets.SocketException` |
+
+Both jobs also passed the persistent `capture_incomplete` API and Overview
+warning test. The final implementation HEAD still needs its own Windows matrix.
