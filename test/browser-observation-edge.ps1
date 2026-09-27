@@ -171,7 +171,7 @@ function Get-MihariBrowserH2TimeoutDiagnostics {
                 source = [string]$event.source; stage = $stage; outcome = [string]$event.outcome; coverage = [string]$event.coverage
                 host = [string]$data.host; port = $data.port; path = [string]$data.path; method = [string]$data.method
                 protocol = [string]$data.protocol; statusCode = $data.statusCode; initiatorType = [string]$data.initiatorType
-                browserError = [string]$data.browserError; errorType = [string]$data.errorType
+                browserError = [string]$data.browserError; errorCode = [string]$data.errorCode; errorType = [string]$data.errorType
                 bytesClientToUpstream = $data.bytesClientToUpstream
                 bytesUpstreamToClient = $data.bytesUpstreamToClient
             }
@@ -329,7 +329,16 @@ try {
     Assert-MihariTest -Condition ($sessionMetadata.mode -eq 'Tunnel' -and $sessionMetadata.profile -eq 'http2-observe') -Message 'The h2 trial must use an immutable HTTP/2 observe Tunnel profile.'
     $originUrl = 'https://localhost:{0}/' -f [int]$fixtureReady.port
     $browserLaunch = Invoke-MihariH2BrowserLaunch -Uri $originUrl
-    Assert-MihariTest -Condition ([bool]$browserLaunch.success -and $browserLaunch.proxyEndpoint -eq ('http://127.0.0.1:{0}' -f [int]$sessionMetadata.actualPort)) -Message 'The live Management browser action must launch the Mihari-owned diagnostic Edge profile through Mihari.'
+    if (-not [bool]$browserLaunch.success -or $browserLaunch.proxyEndpoint -ne ('http://127.0.0.1:{0}' -f [int]$sessionMetadata.actualPort)) {
+        $safeStatus = [string]$browserLaunch.observationStatus
+        $safeCode = [string]$browserLaunch.observationErrorCode
+        if ($safeStatus -notmatch '^[a-z_]{1,80}$') { $safeStatus = 'unknown' }
+        if ($safeCode -notmatch '^[a-z_]{1,80}$') { $safeCode = 'unknown' }
+        $safeSummary = Get-MihariBrowserH2TimeoutDiagnostics -EventsPath ([string]$sessionMetadata.eventsPath) -TransactionsPath $transactionsPath -OriginPort ([int]$fixtureReady.port) -ObservationStatus $safeStatus
+        $summaryJson = ConvertTo-Json -InputObject $safeSummary -Depth 5 -Compress
+        if ($summaryJson.Length -gt 5000) { $summaryJson = $summaryJson.Substring(0, 5000) }
+        throw ('The live Management browser action did not launch the Mihari-owned diagnostic Edge profile through Mihari (observationStatus={0}; observationErrorCode={1}). Safe summary: {2}' -f $safeStatus, $safeCode, $summaryJson)
+    }
     $browserEvent = Wait-MihariBrowserH2Event -EventsPath ([string]$sessionMetadata.eventsPath) `
         -OriginPort ([int]$fixtureReady.port) -TransactionsPath $transactionsPath -ObservationStatus ([string]$browserLaunch.observationStatus)
 
