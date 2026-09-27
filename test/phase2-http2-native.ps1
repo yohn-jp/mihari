@@ -95,6 +95,12 @@ try {
     $frame = (Add-MihariHttp2Input -State $upstream -Bytes $ack -Count $ack.Length).Items[0]
     $null = Invoke-MihariHttp2Frame -Context $ctx -State $upstream -Opposite $client -Frame $frame
     Assert-MihariTest -Condition ($upstream.Hpack.MaxTableSize -eq 65536) -Message 'A bounded 64 KiB HPACK table limit must apply after SETTINGS ACK.'
+    $largerFrame = New-MihariTestH2Frame -Type 4 -Flags 0 -StreamId 0 -Payload ([byte[]]@(0,5,0,255,255,255))
+    $frame = (Add-MihariHttp2Input -State $client -Bytes $largerFrame -Count $largerFrame.Length).Items[0]
+    $null = Invoke-MihariHttp2Frame -Context $ctx -State $client -Opposite $upstream -Frame $frame
+    Assert-MihariTest -Condition ($client.Settings.maxFrameSize -eq 16777215 -and $upstream.MaxFrame -eq 65536) -Message 'A valid large SETTINGS advertisement must be observed while actual frame buffers stay bounded.'
+    $tooLargeFrameHeader = [byte[]]@(1,0,1,0,0,0,0,0,1)
+    Assert-MihariTestH2Rejected -Message 'An actual frame above the local bound must still fail.' -Action { Add-MihariHttp2Input -State $upstream -Bytes $tooLargeFrameHeader -Count $tooLargeFrameHeader.Length }
     $requestEncoder = New-MihariHpackContext -MaxTableSize 4096
     $responseEncoder = New-MihariHpackContext -MaxTableSize 4096
     $requestHeaders = @(
@@ -175,7 +181,7 @@ try {
 finally {
     Close-MihariEventWriter -Writer $writer
     $events = [IO.File]::ReadAllText((Join-Path $temporary 'events.jsonl'))
-    Assert-MihariTest -Condition ($events.Contains('/one?token=REDACTED') -and -not $events.Contains('topsecret')) -Message 'HTTP/2 path evidence must redact query values.'
+    Assert-MihariTest -Condition ($events.Contains('/one?token=[REDACTED]') -and -not $events.Contains('topsecret')) -Message 'HTTP/2 path evidence must redact query values.'
     Assert-MihariTest -Condition ($events.Contains('http2.grpc_status') -and $events.Contains('http2.reset')) -Message 'RPC trailer and reset facts must remain distinct.'
     Assert-MihariTest -Condition ($events.Contains('http2.flow_wait') -and $events.Contains('http2.goaway')) -Message 'Measured flow wait and GOAWAY direction must remain distinct facts.'
     [IO.Directory]::Delete($temporary,$true)
