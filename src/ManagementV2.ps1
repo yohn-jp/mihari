@@ -107,6 +107,7 @@ function Invoke-MihariManagementV2Request {
         elseif (Get-Command Test-MihariHttp2RuntimeCapability -ErrorAction SilentlyContinue) {
             $nativeProbe = Test-MihariHttp2RuntimeCapability
             if (-not $nativeProbe.Available) { $nativeH2 = 'unavailable_managed_alpn' }
+            else { $nativeH2 = 'available_for_trial' }
         }
         return (New-MihariManagementJsonResponse -StatusCode 200 -Value ([pscustomobject][ordered]@{
             schemaVersion = 2

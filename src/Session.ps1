@@ -139,6 +139,9 @@ function Set-MihariSessionMode {
     if ($Mode -eq 'Inspect' -and [string]$Session.Profile -eq 'http2-observe') {
         throw 'The http2-observe profile is Tunnel only. Start a new compatibility trial for Inspect.'
     }
+    if ($Mode -eq 'Tunnel' -and [string]$Session.Profile -eq 'http2-inspect') {
+        throw 'The http2-inspect profile is Inspect only. Start a new trial with an explicit Tunnel profile.'
+    }
     [System.Threading.Monitor]::Enter($Session.StateLock)
     try {
         $previous = [string]$Session.Mode
@@ -306,7 +309,7 @@ function New-MihariSession {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][ValidateSet('Tunnel', 'Inspect')][string]$Mode,
-        [ValidateSet('compatibility', 'http2-observe')][string]$Profile = 'compatibility',
+        [ValidateSet('compatibility', 'http2-observe', 'http2-inspect')][string]$Profile = 'compatibility',
         [ValidateSet('reuse', 'close')][string]$HttpConnectionPolicy = 'reuse',
         [Parameter(Mandatory = $true)][ValidateRange(0, 65535)][int]$Port,
         [ValidateRange(0, 65535)][int]$ManagementPort = 0,
@@ -320,6 +323,13 @@ function New-MihariSession {
     }
     if ($Profile -eq 'http2-observe' -and $Mode -ne 'Tunnel') {
         throw 'The http2-observe profile requires Tunnel mode.'
+    }
+    if ($Profile -eq 'http2-inspect') {
+        if ($Mode -ne 'Inspect') { throw 'The http2-inspect profile requires Inspect mode.' }
+        if (-not (Get-Command Test-MihariHttp2RuntimeCapability -ErrorAction SilentlyContinue) -or
+            -not (Test-MihariHttp2RuntimeCapability).Available) {
+            throw 'Native HTTP/2 Inspect requires the managed ALPN API surface; this runtime reports it unavailable.'
+        }
     }
     $capability = Test-MihariCapability -Mode $Mode
     if (-not $capability.Available) {

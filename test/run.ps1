@@ -79,6 +79,7 @@ try {
                 & (Join-Path $PSScriptRoot 'browser-observation.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-hpack.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-http2-native.ps1')
+                & (Join-Path $PSScriptRoot 'phase2-http2-tls.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-ui-browser.ps1')
             }
         }

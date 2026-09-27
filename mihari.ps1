@@ -4,7 +4,7 @@ param(
     [string] $Command = 'help',
     [ValidateSet('Inspect', 'Tunnel')]
     [string] $Mode = 'Inspect',
-    [ValidateSet('compatibility', 'http2-observe')]
+    [ValidateSet('compatibility', 'http2-observe', 'http2-inspect')]
     [string] $Profile = 'compatibility',
     [ValidateSet('reuse', 'close')]
     [string] $HttpConnectionPolicy = 'reuse',
@@ -19,7 +19,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $sourceRoot = Join-Path $PSScriptRoot 'src'
-foreach ($name in @('Compatibility', 'Certificate', 'Observation', 'Http', 'Hpack', 'Http2', 'Upstream', 'Tls', 'Environment', 'Connection', 'Listener', 'Diagnosis', 'Comparison', 'TrafficProjection', 'Case', 'Dependencies', 'Evidence', 'Cleanup', 'Session', 'BrowserObservation', 'Browser', 'ManagementProjection', 'ManagementUi', 'Management', 'ManagementV2', 'Cli')) {
+foreach ($name in @('Compatibility', 'Certificate', 'Observation', 'Http', 'Hpack', 'Http2', 'Http2Tls', 'Upstream', 'Tls', 'Environment', 'Connection', 'Listener', 'Diagnosis', 'Comparison', 'TrafficProjection', 'Case', 'Dependencies', 'Evidence', 'Cleanup', 'Session', 'BrowserObservation', 'Browser', 'ManagementProjection', 'ManagementUi', 'Management', 'ManagementV2', 'Cli')) {
     . (Join-Path $sourceRoot ($name + '.ps1'))
 }
 
