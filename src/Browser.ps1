@@ -506,7 +506,12 @@ function Start-MihariBrowser {
             -OwnerStartTimeUtc $ownerStartTimeUtc
         if ($null -ne $ownerStartTimeUtc -and $null -ne $observerCommand) {
             if ($liveObserverAvailable) {
-                $observation = Start-MihariBrowserObservation -Session $SessionMetadata -Launch $result -InitialUrl $Url
+                try {
+                    $observation = Start-MihariBrowserObservation -Session $SessionMetadata -Launch $result -InitialUrl $Url
+                }
+                catch {
+                    $observation = $null
+                }
             }
             else {
                 $observation = Start-MihariBrowserObservation -Session $SessionMetadata -Launch $result
@@ -516,6 +521,12 @@ function Start-MihariBrowser {
                 if (-not [string]::IsNullOrWhiteSpace([string]$observation.Reason)) {
                     $result.Reason = [string]$observation.Reason
                 }
+            }
+            if ($liveObserverAvailable -and -not [string]::IsNullOrWhiteSpace($Url) -and
+                ($null -eq $observation -or [string]$observation.Status -eq 'unavailable' -or
+                    -not [string]::IsNullOrWhiteSpace([string]$observation.Reason))) {
+                $result.Success = $false
+                $result.Reason = 'Edge started on about:blank, but Mihari could not arm owned-profile observation. The requested URL was not opened.'
             }
         }
         elseif ($null -eq $ownerStartTimeUtc -and
