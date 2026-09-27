@@ -109,19 +109,23 @@ function New-MihariTlsValidationCapture {
 
 function New-MihariTlsValidationCallback {
     param([Parameter(Mandatory=$true)]$Capture)
+    # GetNewClosure gives the delegate its own module scope. Capture the helper
+    # scriptblock explicitly so it remains callable inside that scope.
+    $factReader = ${function:Get-MihariTlsCertificateFacts}
     $handler = {
         param($sender, $certificate, $chain, $errors)
         $Capture.Invoked = $true
         $Capture.PolicyErrors = $errors
         $Capture.Accepted = ($errors -eq [System.Net.Security.SslPolicyErrors]::None)
         try {
-            $Capture.CertificateFacts = Get-MihariTlsCertificateFacts -Certificate $certificate
+            if ($null -eq $certificate) { $Capture.CertificateFacts = @{} }
+            else { $Capture.CertificateFacts = & $factReader -Certificate $certificate }
             if ($null -ne $chain) {
                 $Capture.ChainProvided = $true
                 $elements = New-Object 'System.Collections.Generic.List[object]'
                 foreach ($element in $chain.ChainElements) {
                     if ($elements.Count -ge 8) { break }
-                    $item = Get-MihariTlsCertificateFacts -Certificate $element.Certificate
+                    $item = & $factReader -Certificate $element.Certificate
                     $elements.Add([pscustomobject]@{
                         subject = $item.certificateSubject
                         issuer = $item.certificateIssuer

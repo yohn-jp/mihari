@@ -16,6 +16,7 @@ $capture = New-MihariTlsValidationCapture
 $callback = New-MihariTlsValidationCallback -Capture $capture
 $accepted = $callback.Invoke($null, $null, $null, [System.Net.Security.SslPolicyErrors]::RemoteCertificateNameMismatch)
 Assert-MihariTest -Condition (-not $accepted) -Message 'A name mismatch must be rejected by the evidence callback.'
+Assert-MihariTest -Condition ([string]::IsNullOrWhiteSpace([string]$capture.EvidenceErrorType)) -Message ('Validation evidence callback failed: ' + [string]$capture.EvidenceErrorType)
 $failed = Get-MihariTlsValidationFacts -Capture $capture
 Assert-MihariTest -Condition ($failed.certificateAccepted -eq $false) -Message 'Callback rejection must be recorded.'
 Assert-MihariTest -Condition ($failed.certificateChainState -eq 'not_performed') -Message 'Missing peer certificate must not become a chain failure.'
