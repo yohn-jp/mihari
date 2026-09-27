@@ -17,6 +17,7 @@ function Invoke-Issue3ManagementRequest {
     )
 
     $request = [System.Net.HttpWebRequest][System.Net.WebRequest]::Create($Endpoint)
+    $request.ServicePoint.Expect100Continue = $false
     $request.Method = $Method
     $request.Proxy = $null
     $request.KeepAlive = $false
