@@ -159,6 +159,43 @@ function Get-MihariIssue3TargetEvents {
     return @()
 }
 
+function Get-MihariIssue3ConnectEvents {
+    param(
+        [Parameter(Mandatory = $true)][string]$EventsPath,
+        [Parameter(Mandatory = $true)][string]$HostName,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [int]$TimeoutSeconds = 20
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        if ([IO.File]::Exists($EventsPath)) {
+            foreach ($line in (Read-MihariTestCompleteLiveLines -Path $EventsPath)) {
+                $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+                if ($event.stage -eq 'proxy.request' -and $event.data.method -eq 'CONNECT' -and
+                    $event.data.host -eq $HostName -and [int]$event.data.port -eq $Port) {
+                    $connectionId = [string]$event.connectionId
+                    $requestId = [string]$event.requestId
+                    $chain = New-Object 'System.Collections.Generic.List[object]'
+                    foreach ($candidateLine in (Read-MihariTestCompleteLiveLines -Path $EventsPath)) {
+                        $candidate = ConvertFrom-Json -InputObject $candidateLine -ErrorAction Stop
+                        if ([string]$candidate.connectionId -eq $connectionId -and
+                            [string]$candidate.requestId -eq $requestId) {
+                            $chain.Add($candidate)
+                        }
+                    }
+                    $tcpSuccess = @($chain | Where-Object { $_.stage -eq 'upstream.tcp' -and $_.outcome -eq 'success' })
+                    $relayEvents = @($chain | Where-Object { $_.stage -eq 'tunnel.relay' })
+                    if ($tcpSuccess.Count -gt 0 -and $relayEvents.Count -gt 0) {
+                        return @($chain.ToArray())
+                    }
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return @()
+}
+
 function Get-MihariIssue3SafeEventSummary {
     param([string]$EventsPath)
     if (-not [IO.File]::Exists($EventsPath)) { return 'event file was not created' }
@@ -224,9 +261,9 @@ try {
     if (-not $launch.success -and [string]$launch.reason -match '(?i)Microsoft Edge was not found') {
         throw ('Microsoft Edge is absent on this Windows runner; Issue #3 requires real browser-originated fixture traffic, so this suite cannot pass by skipping. API response: ' + [string]$launchResponse.Content)
     }
-    Assert-MihariTest -Condition ([bool]$launch.success) -Message ('The UI browser action must launch the real diagnostic Edge process. API response: ' + [string]$launchResponse.Content)
         $browserProfilePath = [string]$launch.profilePath
         if ($null -ne $launch.pid -and [string]$launch.pid -match '^\d+$') { $browserProcessId = [int]$launch.pid }
+    Assert-MihariTest -Condition ([bool]$launch.success) -Message ('The UI browser action must launch the real diagnostic Edge process. API response: ' + [string]$launchResponse.Content)
         Assert-MihariTest -Condition (-not [string]::IsNullOrWhiteSpace($browserProfilePath) -and (Test-Path -LiteralPath $browserProfilePath -PathType Container)) -Message 'The launched Edge process must use a dedicated temporary profile.'
         Assert-MihariTest -Condition ([string]$launch.proxyEndpoint -eq ('http://127.0.0.1:{0}' -f $proxyPort)) -Message 'The management launch result must identify the active Mihari proxy endpoint.'
 
@@ -296,7 +333,65 @@ try {
         Assert-MihariTest -Condition ($edgeCommandLine.IndexOf('--disable-quic', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $edgeCommandLine.IndexOf('--disable-http2', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $edgeCommandLine.IndexOf('--force-webrtc-ip-handling-policy=disable_non_proxied_udp', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $edgeCommandLine.IndexOf('--ssl-version-max=tls1.2', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -Message 'The running Edge command line must stay within Mihari supported QUIC/HTTP2/TLS baseline and disable non-proxied WebRTC UDP.'
         Assert-MihariTest -Condition ($edgeCommandLine -notmatch '(?i)--(ignore-certificate-errors|allow-insecure-localhost)') -Message 'The diagnostic Edge process must not disable certificate validation.'
 
-    Write-Host 'PASS issue3-edge-smoke: UI-launched Microsoft Edge reached the loopback fixture through Mihari; event evidence confirms the route did not point back to the proxy listener.'
+        # Launch a second real Edge profile at a raw local TLS endpoint. The
+        # fixture deliberately has no certificate: successful TLS is not the
+        # purpose here. Receiving ClientHello bytes plus Mihari CONNECT/Tunnel
+        # events proves HTTPS traversed the supported proxy without a bypass.
+        Stop-MihariIssue3EdgeProfile -ProfilePath $browserProfilePath
+        $browserProfilePath = $null
+        $browserProcessId = $null
+        $originListener = New-MihariTestListener
+        $tlsFixturePort = ([System.Net.IPEndPoint]$originListener.LocalEndpoint).Port
+        $tlsFixtureUrl = 'https://127.0.0.1:{0}/issue3-tls-{1}' -f $tlsFixturePort, [guid]::NewGuid().ToString('N')
+        $tlsAccept = $originListener.AcceptTcpClientAsync()
+        $tlsLaunchBody = ConvertTo-Json -InputObject @{ url = $tlsFixtureUrl } -Compress -Depth 3
+        $tlsLaunchResponse = Invoke-MihariIssue3ManagementRequest -Uri ($managementBase + '/api/browser') -Method POST -Body $tlsLaunchBody
+        Assert-MihariTest -Condition ($tlsLaunchResponse.StatusCode -eq 200 -and $tlsLaunchResponse.ContentType -match '(?i)application/json') -Message 'The management browser action must launch Edge at a local HTTPS fixture.'
+        $tlsLaunch = ConvertFrom-Json -InputObject $tlsLaunchResponse.Content -ErrorAction Stop
+        $browserProfilePath = [string]$tlsLaunch.profilePath
+        if ($null -ne $tlsLaunch.pid -and [string]$tlsLaunch.pid -match '^\d+$') { $browserProcessId = [int]$tlsLaunch.pid }
+        Assert-MihariTest -Condition ([bool]$tlsLaunch.success) -Message ('The UI browser action must launch the real diagnostic Edge process for HTTPS. API response: ' + [string]$tlsLaunchResponse.Content)
+        Assert-MihariTest -Condition (-not [string]::IsNullOrWhiteSpace($browserProfilePath) -and (Test-Path -LiteralPath $browserProfilePath -PathType Container)) -Message 'The HTTPS Edge launch must use its own temporary profile.'
+
+        if (-not $tlsAccept.Wait(25000)) {
+            $safeSummary = Get-MihariIssue3SafeEventSummary -EventsPath ([string]$metadata.eventsPath)
+            throw ('Real Edge HTTPS traffic did not reach the local TLS fixture through Mihari CONNECT. Safe session event summary: ' + $safeSummary)
+        }
+        $originClient = $tlsAccept.Result
+        $tlsFixtureStream = $originClient.GetStream()
+        $tlsFixtureStream.ReadTimeout = 15000
+        $clientHelloRecordType = -1
+        try { $clientHelloRecordType = $tlsFixtureStream.ReadByte() }
+        catch { throw 'The HTTPS fixture accepted a connection but received no TLS ClientHello from Edge through the tunnel.' }
+        Assert-MihariTest -Condition ($clientHelloRecordType -eq 22) -Message 'The local HTTPS fixture must receive a TLS handshake record from real Edge through Mihari.'
+        $originClient.Close()
+        $originClient = $null
+        $originListener.Stop()
+        $originListener = $null
+
+        $connectEvents = @(Get-MihariIssue3ConnectEvents -EventsPath ([string]$metadata.eventsPath) -HostName '127.0.0.1' -Port $tlsFixturePort)
+        if ($connectEvents.Count -eq 0) {
+            $safeSummary = Get-MihariIssue3SafeEventSummary -EventsPath ([string]$metadata.eventsPath)
+            throw ('Mihari did not complete the browser HTTPS CONNECT/Tunnel event chain. Safe session event summary: ' + $safeSummary)
+        }
+        $connectRequest = @($connectEvents | Where-Object { $_.stage -eq 'proxy.request' }) | Select-Object -First 1
+        $connectRoute = @($connectEvents | Where-Object { $_.stage -eq 'upstream.resolve' }) | Select-Object -First 1
+        $connectTcp = @($connectEvents | Where-Object { $_.stage -eq 'upstream.tcp' }) | Select-Object -First 1
+        $connectRelay = @($connectEvents | Where-Object { $_.stage -eq 'tunnel.relay' }) | Select-Object -First 1
+        Assert-MihariTest -Condition ($connectRequest.mode -eq 'Tunnel' -and $connectRequest.data.method -eq 'CONNECT' -and [int]$connectRequest.data.port -eq $tlsFixturePort) -Message 'Mihari must observe real Edge HTTPS as a CONNECT accepted in Tunnel mode.'
+        Assert-MihariTest -Condition ($connectRoute.outcome -eq 'success' -and $connectTcp.outcome -eq 'success') -Message 'Mihari must resolve and connect the browser HTTPS tunnel to the local TLS fixture.'
+        Assert-MihariTest -Condition ([long]$connectRelay.data.bytesClientToUpstream -gt 0) -Message 'Mihari must relay Edge TLS handshake bytes unchanged to the local HTTPS fixture.'
+        $clientTlsEvents = @($connectEvents | Where-Object { $_.stage -eq 'client.tls' })
+        Assert-MihariTest -Condition ($clientTlsEvents.Count -eq 0) -Message 'Tunnel mode must not terminate the HTTPS fixture TLS handshake.'
+        foreach ($line in (Read-MihariTestCompleteLiveLines -Path ([string]$metadata.eventsPath))) {
+            $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+            Assert-MihariTest -Condition ([string]$event.data.errorCode -ne 'upstream_route_self_reference') -Message 'No browser flow may resolve Mihari back to its own listener.'
+            if ($event.data.host -eq '127.0.0.1' -and $null -ne $event.data.port) {
+                Assert-MihariTest -Condition ([int]$event.data.port -ne $proxyPort) -Message 'Browser traffic must never select the Mihari proxy listener as its own upstream target.'
+            }
+        }
+
+    Write-Host 'PASS issue3-edge-smoke: UI-launched Microsoft Edge sent HTTP and HTTPS fixture traffic through Mihari; observations confirm no recursive self-routing.'
 }
 finally {
     if ($null -ne $originClient) {
