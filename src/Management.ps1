@@ -427,7 +427,7 @@ function Read-MihariManagementRequest {
     }
 
     $headerText = [System.Text.Encoding]::ASCII.GetString($headerBytes.ToArray())
-    $lines = $headerText.Substring(0, $headerText.Length - 4).Split("`r`n")
+    $lines = $headerText.Substring(0, $headerText.Length - 4) -split "`r`n"
     if ($lines.Count -lt 1 -or $lines[0] -notmatch '^([A-Z]+) ([^ ]+) HTTP/1\.[01]$') {
         throw [System.IO.InvalidDataException]::new('invalid_request_line')
     }
