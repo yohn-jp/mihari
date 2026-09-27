@@ -4,7 +4,8 @@ function New-MihariRouteResult {
         [AllowNull()][string]$HostName,
         [AllowNull()][Nullable[int]]$Port,
         [Parameter(Mandatory = $true)][string]$Source,
-        [Parameter(Mandatory = $true)][string]$Reason
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [AllowNull()][string]$ErrorCode
     )
 
     return [pscustomobject]@{
@@ -13,6 +14,7 @@ function New-MihariRouteResult {
         Port   = $Port
         Source = $Source
         Reason = $Reason
+        ErrorCode = $ErrorCode
     }
 }
 
@@ -96,6 +98,122 @@ function Get-MihariPlatformProxyConfiguration {
     return $result
 }
 
+function New-MihariUpstreamSnapshot {
+    <#
+    Capture the platform resolver Mihari inherited before it launches a
+    diagnostic browser. Browser-local proxy arguments must not be consulted as
+    Mihari's enterprise upstream route later in the session.
+
+    The resolver object is process-local and intentionally is not persisted in
+    session metadata. `Configuration` contains only safe Boolean/error facts.
+    #>
+    $configuration = $null
+    $configurationError = $null
+    try {
+        $configuration = Get-MihariPlatformProxyConfiguration
+    }
+    catch {
+        $configurationError = $_.Exception.GetType().FullName
+        $configuration = [pscustomobject]@{
+            Configured = $true
+            PacConfigured = $false
+            EnvironmentConfigured = $false
+            ErrorType = $configurationError
+        }
+    }
+
+    $platformProxy = $null
+    $proxyError = $null
+    try {
+        $platformProxy = [System.Net.WebRequest]::DefaultWebProxy
+    }
+    catch {
+        $proxyError = $_.Exception.GetType().FullName
+    }
+
+    return [pscustomobject]@{
+        PlatformProxy = $platformProxy
+        Configuration = $configuration
+        CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+        ErrorType = $proxyError
+    }
+}
+
+function Test-MihariLoopbackHost {
+    param([Parameter(Mandatory = $true)][string]$HostName)
+
+    $hostText = $HostName.Trim()
+    if ($hostText.StartsWith('[') -and $hostText.EndsWith(']')) {
+        $hostText = $hostText.Substring(1, $hostText.Length - 2)
+    }
+    $hostText = $hostText.TrimEnd('.').ToLowerInvariant()
+    if ($hostText -eq 'localhost' -or $hostText.EndsWith('.localhost', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    $address = $null
+    if ([System.Net.IPAddress]::TryParse($hostText, [ref]$address)) {
+        if ($address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+            # All of 127/8 is reserved for IPv4 loopback, not only 127.0.0.1.
+            return ($address.GetAddressBytes()[0] -eq 127)
+        }
+        if ($address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+            if ([System.Net.IPAddress]::IsLoopback($address)) { return $true }
+            if ($address.IsIPv4MappedToIPv6) {
+                $mappedAddress = $address.MapToIPv4()
+                return ($mappedAddress.GetAddressBytes()[0] -eq 127)
+            }
+        }
+        return $false
+    }
+
+    # An enterprise proxy alias can resolve to a loopback address. This check
+    # runs only when the route's port matches Mihari's own listener port.
+    try {
+        foreach ($resolvedAddress in [System.Net.Dns]::GetHostAddresses($hostText)) {
+            if ($resolvedAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+                if ($resolvedAddress.GetAddressBytes()[0] -eq 127) { return $true }
+            }
+            elseif ($resolvedAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+                if ([System.Net.IPAddress]::IsLoopback($resolvedAddress)) { return $true }
+                if ($resolvedAddress.IsIPv4MappedToIPv6 -and $resolvedAddress.MapToIPv4().GetAddressBytes()[0] -eq 127) { return $true }
+            }
+        }
+    }
+    catch {
+        # An unresolvable host is handled by the ordinary upstream connection
+        # path. Do not turn DNS errors here into a new route diagnosis.
+        $null = $_
+    }
+    return $false
+}
+
+function Test-MihariSelfReferenceEndpoint {
+    param(
+        [AllowNull()][string]$HostName,
+        [AllowNull()][Nullable[int]]$Port,
+        [int]$MihariProxyPort
+    )
+
+    if ([string]::IsNullOrWhiteSpace($HostName) -or $MihariProxyPort -lt 1 -or $MihariProxyPort -gt 65535) {
+        return $false
+    }
+    if ($null -eq $Port -or [int]$Port -ne $MihariProxyPort) { return $false }
+    return (Test-MihariLoopbackHost -HostName $HostName)
+}
+
+function New-MihariSelfReferenceRoute {
+    param(
+        [AllowNull()][string]$HostName,
+        [AllowNull()][Nullable[int]]$Port,
+        [Parameter(Mandatory = $true)][string]$Source
+    )
+
+    return New-MihariRouteResult -Kind 'Unsupported' -HostName $HostName -Port $Port -Source $Source `
+        -Reason "The $($Source.ToLowerInvariant()) route points to Mihari's own loopback proxy listener." `
+        -ErrorCode 'upstream_route_self_reference'
+}
+
 function ConvertTo-MihariProxyEndpoint {
     param(
         [Parameter(Mandatory = $true)][object]$Value,
@@ -172,11 +290,21 @@ function Resolve-MihariRoute {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][System.Uri]$Uri,
-        [AllowNull()][object]$Override
+        [AllowNull()][object]$Override,
+        [AllowNull()][object]$PlatformSnapshot,
+        [int]$MihariProxyPort = 0
     )
 
     if (-not $Uri.IsAbsoluteUri -or ($Uri.Scheme -ne 'http' -and $Uri.Scheme -ne 'https')) {
         return New-MihariRouteResult -Kind 'Unsupported' -HostName $Uri.DnsSafeHost -Port ([Nullable[int]]$null) -Source 'None' -Reason 'Only absolute HTTP and HTTPS destination URIs can be routed.'
+    }
+
+    # Reject a direct request to the local proxy itself before interpreting a
+    # platform bypass result as an ordinary direct route. This is a defense in
+    # depth check; the session snapshot below remains the primary protection
+    # against browser-local proxy settings becoming Mihari's upstream route.
+    if (Test-MihariSelfReferenceEndpoint -HostName $Uri.DnsSafeHost -Port ([Nullable[int]]$Uri.Port) -MihariProxyPort $MihariProxyPort) {
+        return New-MihariSelfReferenceRoute -HostName $Uri.DnsSafeHost -Port ([Nullable[int]]$Uri.Port) -Source 'Direct'
     }
 
     if ($null -ne $Override -and -not ($Override -is [string] -and [string]::IsNullOrWhiteSpace($Override))) {
@@ -188,20 +316,36 @@ function Resolve-MihariRoute {
             elseif ($Override -isnot [string] -and $Override -isnot [System.Uri] -and $Override -isnot [System.Collections.IDictionary] -and $null -ne $Override.PSObject.Properties['Uri']) {
                 $endpointValue = $Override.Uri
             }
-            return ConvertTo-MihariProxyEndpoint -Value $endpointValue -Source 'Override'
+            $overrideRoute = ConvertTo-MihariProxyEndpoint -Value $endpointValue -Source 'Override'
+            if (Test-MihariSelfReferenceEndpoint -HostName ([string]$overrideRoute.Host) -Port $overrideRoute.Port -MihariProxyPort $MihariProxyPort) {
+                return New-MihariSelfReferenceRoute -HostName ([string]$overrideRoute.Host) -Port $overrideRoute.Port -Source 'Override'
+            }
+            return $overrideRoute
         }
         catch {
             return New-MihariRouteResult -Kind 'Unsupported' -HostName $null -Port ([Nullable[int]]$null) -Source 'Override' -Reason ('The configured proxy override is unsupported (' + $_.Exception.GetType().FullName + ').')
         }
     }
 
-    $configuration = Get-MihariPlatformProxyConfiguration
-    $platformProxy = $null
-    try {
-        $platformProxy = [System.Net.WebRequest]::DefaultWebProxy
+    if ($null -eq $PlatformSnapshot) {
+        # Keep direct/unit callers compatible while sessions pass the snapshot
+        # captured before Edge starts.
+        $PlatformSnapshot = New-MihariUpstreamSnapshot
     }
-    catch {
-        return New-MihariRouteResult -Kind 'Unsupported' -HostName $null -Port ([Nullable[int]]$null) -Source 'Platform' -Reason ('The platform proxy could not be inspected (' + $_.Exception.GetType().FullName + ').')
+
+    if ($null -ne $PlatformSnapshot.PSObject.Properties['ErrorType'] -and
+        -not [string]::IsNullOrWhiteSpace([string]$PlatformSnapshot.ErrorType)) {
+        return New-MihariRouteResult -Kind 'Unsupported' -HostName $null -Port ([Nullable[int]]$null) -Source 'Platform' -Reason ('The platform proxy could not be inspected (' + [string]$PlatformSnapshot.ErrorType + ').')
+    }
+    $configuration = $PlatformSnapshot.Configuration
+    $platformProxy = $PlatformSnapshot.PlatformProxy
+    if ($null -eq $configuration) {
+        $configuration = [pscustomobject]@{
+            Configured = $true
+            PacConfigured = $false
+            EnvironmentConfigured = $false
+            ErrorType = 'SnapshotUnavailable'
+        }
     }
 
     if ($null -eq $platformProxy) {
@@ -239,7 +383,11 @@ function Resolve-MihariRoute {
     }
 
     try {
-        return ConvertTo-MihariProxyEndpoint -Value $proxyUri -Source 'Platform'
+        $platformRoute = ConvertTo-MihariProxyEndpoint -Value $proxyUri -Source 'Platform'
+        if (Test-MihariSelfReferenceEndpoint -HostName ([string]$platformRoute.Host) -Port $platformRoute.Port -MihariProxyPort $MihariProxyPort) {
+            return New-MihariSelfReferenceRoute -HostName ([string]$platformRoute.Host) -Port $platformRoute.Port -Source 'Platform'
+        }
+        return $platformRoute
     }
     catch {
         return New-MihariRouteResult -Kind 'Unsupported' -HostName $null -Port ([Nullable[int]]$null) -Source 'Platform' -Reason ('The platform selected a proxy type Mihari cannot honor (' + $_.Exception.GetType().FullName + ').')
