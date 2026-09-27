@@ -397,7 +397,7 @@ function Handle-MihariConnection {
         if ($expect) {
             $continueReceived = $false
             $preBodyResponses = 0
-            while ($upstream.Client.Client.Poll(1000000, [System.Net.Sockets.SelectMode]::SelectRead)) {
+            while ($upstream.Client.Client.Poll(2000000, [System.Net.Sockets.SelectMode]::SelectRead)) {
                 $response = Read-MihariHttpHead -Stream $upstream.Stream -Kind Response -RequestMethod $request.Method
                 if ($null -eq $response) { throw [System.IO.EndOfStreamException]::new('Upstream closed before the expected HTTP response.') }
                 if ([int]$response.StatusCode -eq 100) {

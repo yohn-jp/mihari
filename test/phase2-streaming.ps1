@@ -63,6 +63,17 @@ try {
     }
     finally { $short.Dispose(); $partial.Dispose() }
 
+    $earlyReplyWire = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 417 Expectation Failed`r`nContent-Length: 0`r`n`r`n")
+    $afterFirstByte = New-Object System.IO.MemoryStream
+    try {
+        $afterFirstByte.Write($earlyReplyWire, 1, $earlyReplyWire.Length - 1)
+        $afterFirstByte.Position = 0
+        $earlyReply = Read-MihariHttpHead -Stream $afterFirstByte -Kind Response -InitialByte $earlyReplyWire[0]
+        Assert-MihariTest -Condition ($earlyReply.StatusCode -eq 417 -and
+            (Get-MihariHttpBodyFraming -Message $earlyReply -Kind Response).Length -eq 0) -Message 'An upstream response detected by its first byte must parse without losing framing.'
+    }
+    finally { $afterFirstByte.Dispose() }
+
     $upgradeWire = [Text.Encoding]::ASCII.GetBytes("GET /chat HTTP/1.1`r`nHost: example.test`r`nConnection: Upgrade`r`nUpgrade: websocket`r`nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==`r`nSec-WebSocket-Version: 13`r`n`r`n")
     $upgradeInput = New-Object System.IO.MemoryStream
     $upgradeInput.Write($upgradeWire, 0, $upgradeWire.Length)

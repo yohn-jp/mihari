@@ -118,6 +118,31 @@ try {
         if ($null -ne $keepProxy) { $keepProxy.Client.Close() }
     }
 
+    $expectAccept = $originListener.AcceptTcpClientAsync()
+    $expectClient = [System.Net.Sockets.TcpClient]::new()
+    $expectOrigin = $null
+    try {
+        $expectClient.Connect('127.0.0.1', $proxyPort)
+        $expectStream = $expectClient.GetStream()
+        $expectStream.ReadTimeout = 10000
+        $expectWire = [Text.Encoding]::ASCII.GetBytes("POST http://127.0.0.1:$originPort/expect HTTP/1.1`r`nHost: 127.0.0.1:$originPort`r`nContent-Length: 4`r`nExpect: 100-continue`r`nConnection: close`r`n`r`n")
+        $expectStream.Write($expectWire, 0, $expectWire.Length)
+        Assert-MihariTest -Condition ($expectAccept.Wait(10000)) -Message 'Expect request headers must reach origin before the client sends a body.'
+        $expectOrigin = $expectAccept.Result
+        $expectOriginStream = $expectOrigin.GetStream()
+        $expectRequest = Read-MihariTestHeaderText -Stream $expectOriginStream
+        Assert-MihariTest -Condition ($expectRequest.StartsWith('POST /expect HTTP/1.1')) -Message 'Expect request target must be forwarded.'
+        $earlyFinal = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 417 Expectation Failed`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
+        $expectOriginStream.Write($earlyFinal, 0, $earlyFinal.Length)
+        $expectReply = Read-MihariTestHeaderText -Stream $expectStream
+        Assert-MihariTest -Condition ($expectReply.StartsWith('HTTP/1.1 417')) -Message 'An early origin 417 must reach the client without a synthetic 100 or uploaded body.'
+        Assert-MihariTest -Condition ($expectOrigin.Client.Available -eq 0) -Message 'An early final response must not trigger body forwarding.'
+    }
+    finally {
+        if ($null -ne $expectOrigin) { $expectOrigin.Close() }
+        $expectClient.Close()
+    }
+
     # The first bytes of a >32 MiB response arrive before the origin finishes.
     $largeLength = [long]33554433
     $largePath = Join-Path $temporary 'large-fixture.bin'
