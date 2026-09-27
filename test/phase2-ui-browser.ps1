@@ -81,6 +81,62 @@ function Invoke-Phase2UiProxyGet {
     finally { $client.Close() }
 }
 
+function Get-Phase2DiagnosticEdgeProcesses {
+    param(
+        [Parameter(Mandatory = $true)][string] $ProfilePath,
+        [Parameter(Mandatory = $true)][string] $ExecutablePath
+    )
+
+    $matches = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($process in @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'msedge.exe'" -ErrorAction Stop)) {
+        $commandLine = [string]$process.CommandLine
+        $argument = [System.Text.RegularExpressions.Regex]::Match($commandLine, '(?i)(?:^|\s)--user-data-dir(?:=|\s+)(?:"([^"]+)"|([^\s]+))')
+        if (-not $argument.Success) { continue }
+        $argumentPath = $argument.Groups[1].Value
+        if (-not $argument.Groups[1].Success) { $argumentPath = $argument.Groups[2].Value.Trim([char]34) }
+        $sameProfile = $false
+        try {
+            $sameProfile = [string]::Equals(
+                [System.IO.Path]::GetFullPath($argumentPath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar),
+                [System.IO.Path]::GetFullPath($ProfilePath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar),
+                [StringComparison]::OrdinalIgnoreCase)
+        }
+        catch { $sameProfile = $false }
+        if (-not $sameProfile) { continue }
+        if (-not [string]::Equals([string]$process.ExecutablePath, [System.IO.Path]::GetFullPath($ExecutablePath), [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'An Edge process refers to the test profile with an unexpected executable identity.'
+        }
+        $matches.Add($process)
+    }
+    return @($matches.ToArray())
+}
+
+function Stop-Phase2DiagnosticEdgeProfileProcesses {
+    param(
+        [Parameter(Mandatory = $true)][string] $ProfilePath,
+        [Parameter(Mandatory = $true)][string] $ExecutablePath
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $processes = @(Get-Phase2DiagnosticEdgeProcesses -ProfilePath $ProfilePath -ExecutablePath $ExecutablePath)
+        foreach ($process in $processes) {
+            $current = @(Get-Phase2DiagnosticEdgeProcesses -ProfilePath $ProfilePath -ExecutablePath $ExecutablePath |
+                Where-Object { [int]$_.ProcessId -eq [int]$process.ProcessId })
+            if ($current.Count -eq 0) { continue }
+            try { Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop }
+            catch {
+                $stillOwned = @(Get-Phase2DiagnosticEdgeProcesses -ProfilePath $ProfilePath -ExecutablePath $ExecutablePath |
+                    Where-Object { [int]$_.ProcessId -eq [int]$process.ProcessId })
+                if ($stillOwned.Count -gt 0) { throw 'Could not close an Edge process using the test-owned diagnostic profile.' }
+            }
+        }
+        if (@(Get-Phase2DiagnosticEdgeProcesses -ProfilePath $ProfilePath -ExecutablePath $ExecutablePath).Count -eq 0) { return }
+        Start-Sleep -Milliseconds 150
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'Edge processes still use the exact test diagnostic profile after the close request.'
+}
+
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('mihari-phase2-ui-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($tempRoot)
 $child = $null
@@ -142,6 +198,26 @@ try {
     $launch = ConvertFrom-Json -InputObject (Read-MihariTestLiveText -Path $launchPath)
     $diagnosticProfile = [string]$launch.profilePath
     Assert-MihariTest -Condition ([bool]$launch.success -and [string]$launch.proxyEndpoint -eq ('http://127.0.0.1:{0}' -f [int]$metadata.actualPort)) -Message 'The diagnostic browser must use the Mihari loopback proxy.'
+    $ownershipId = [string]$launch.profileOwnershipId
+    Assert-MihariTest -Condition ($ownershipId -match '^[0-9a-f]{32}$' -and [IO.File]::Exists((Join-Path $diagnosticProfile 'MihariProfileOwner.json'))) -Message 'The actual Edge launch must persist its exact profile ownership marker.'
+    $runningProfileWarning = Wait-Issue3UiValue -Browser $browser -Expression 'document.getElementById("browser-profile-retention").textContent' -Predicate { param($value) [string]$value -match 'browser-managed cookies and history' -and [string]$value -match 'will not close browser processes' }
+    $cleanupHiddenWhileRunning = Invoke-Issue3UiEvaluate -Browser $browser -Expression ('document.querySelector("[data-cleanup-profile=""{0}""]")===null' -f $ownershipId)
+    Assert-MihariTest -Condition ([string]$runningProfileWarning -match 'Close every Edge process' -and $cleanupHiddenWhileRunning -eq $true) -Message 'The UI warns about retained browser-managed data while refusing cleanup as long as the owned Edge profile is active.'
+    Stop-Phase2DiagnosticEdgeProfileProcesses -ProfilePath $diagnosticProfile -ExecutablePath ([string]$launch.executablePath)
+    Assert-MihariTest -Condition (-not $browser.Process.HasExited) -Message 'Closing the diagnostic profile must leave the separate management Edge process running.'
+    $closedProfileWarning = Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 25 -Expression 'document.getElementById("browser-profile-retention").textContent' -Predicate { param($value) [string]$value -match 'Confirm below to remove it' }
+    $confirmExpression = 'var box=document.querySelector("[data-confirm-profile-cleanup=""{0}""]"); var button=document.querySelector("[data-cleanup-profile=""{0}""]"); !!box&&!!button&&button.disabled===true' -f $ownershipId
+    $cleanupConfirmationReady = Wait-Issue3UiValue -Browser $browser -TimeoutSeconds 25 -Expression $confirmExpression -Predicate { param($value) $value -eq $true }
+    $clickCleanupExpression = 'var id="{0}"; var box=document.querySelector("[data-confirm-profile-cleanup=""{0}""]"); box.checked=true; box.dispatchEvent(new Event("change",{bubbles:true})); var button=document.querySelector("[data-cleanup-profile=""{0}""]"); button.click(); true' -f $ownershipId
+    $null = Invoke-Issue3UiEvaluate -Browser $browser -Expression $clickCleanupExpression
+    $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(20)
+    do {
+        if (-not [IO.Directory]::Exists($diagnosticProfile)) { break }
+        Start-Sleep -Milliseconds 150
+    } while ([DateTime]::UtcNow -lt $cleanupDeadline)
+    Assert-MihariTest -Condition (-not [IO.Directory]::Exists($diagnosticProfile)) -Message 'The explicit real-Edge UI action must delete its closed, positively owned profile.'
+    $remainingProfiles = Get-Issue3UiHttpJson -Uri ($managementUrl + 'api/browser')
+    Assert-MihariTest -Condition (@($remainingProfiles.profiles).Count -eq 0 -and [string]$closedProfileWarning -match 'browser-managed cookies and history' -and $cleanupConfirmationReady -eq $true) -Message 'The browser UI must refresh to the closed-profile warning, require an explicit confirmation click, and report no retained owned profile after cleanup.'
 
     # Exercise real request filters, local saved views, row selection and safe evidence drill-down.
     $pathPrefixJson = ConvertTo-Json -InputObject $pathPrefix -Compress

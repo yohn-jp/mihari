@@ -645,6 +645,46 @@ function Invoke-MihariManagementApiRequest {
         $projection = Get-MihariManagementProjection -Session $Session -MaximumEvents 200
         return (New-MihariManagementJsonResponse -StatusCode 200 -Value ([pscustomobject]@{ findings = @($projection.findings) }))
     }
+    if ($method -eq 'GET' -and $path -eq '/api/browser') {
+        if (-not (Get-Command Get-MihariBrowserProfileStatus -ErrorAction SilentlyContinue)) {
+            return (New-MihariManagementErrorResponse -StatusCode 503 -Code 'browser_profile_status_unavailable' -Message 'Diagnostic browser profile status is unavailable.')
+        }
+        try {
+            $status = Get-MihariBrowserProfileStatus -SessionMetadata $Session
+            return (New-MihariManagementJsonResponse -StatusCode 200 -Value $status)
+        }
+        catch {
+            $errorType = $_.Exception.GetType().FullName
+            return (New-MihariManagementJsonResponse -StatusCode 503 -Value ([pscustomobject]@{
+                errorCode = 'browser_profile_status_failed'; message = 'Mihari could not verify diagnostic browser profile state.'; errorType = $errorType
+            }))
+        }
+    }
+    if ($method -eq 'POST' -and $path -eq '/api/browser/cleanup') {
+        try { $body = Read-MihariManagementJsonBody -Request $Request }
+        catch {
+            if ([string]$_.Exception.Message -eq 'unsupported_media_type') {
+                return (New-MihariManagementErrorResponse -StatusCode 415 -Code 'unsupported_media_type' -Message 'Send a UTF-8 application/json request body.')
+            }
+            return (New-MihariManagementErrorResponse -StatusCode 400 -Code 'invalid_json' -Message 'The request body must confirm cleanup and identify one diagnostic profile.')
+        }
+        if ($null -eq $body.PSObject.Properties['confirmCleanup'] -or $body.confirmCleanup -ne $true) {
+            return (New-MihariManagementErrorResponse -StatusCode 400 -Code 'cleanup_confirmation_required' -Message 'Confirm deletion of this diagnostic Edge profile before cleanup.')
+        }
+        $profileOwnershipId = ''
+        if ($null -ne $body.PSObject.Properties['profileOwnershipId']) { $profileOwnershipId = [string]$body.profileOwnershipId }
+        if ($profileOwnershipId -notmatch '^[0-9a-fA-F]{32}$') {
+            return (New-MihariManagementErrorResponse -StatusCode 400 -Code 'invalid_profile_id' -Message 'The diagnostic profile ID is invalid.')
+        }
+        if (-not (Get-Command Invoke-MihariBrowserProfileCleanup -ErrorAction SilentlyContinue)) {
+            return (New-MihariManagementErrorResponse -StatusCode 503 -Code 'browser_profile_cleanup_unavailable' -Message 'Diagnostic browser profile cleanup is unavailable.')
+        }
+        $cleanup = Invoke-MihariBrowserProfileCleanup -SessionMetadata $Session -ProfileOwnershipId $profileOwnershipId
+        if (-not $cleanup.success) {
+            return (New-MihariManagementJsonResponse -StatusCode 409 -Value $cleanup)
+        }
+        return (New-MihariManagementJsonResponse -StatusCode 200 -Value $cleanup)
+    }
     if ($method -eq 'POST' -and $path -eq '/api/mode') {
         try { $body = Read-MihariManagementJsonBody -Request $Request }
         catch {
@@ -706,6 +746,9 @@ function Invoke-MihariManagementApiRequest {
             requestedTlsPolicy = $launch.RequestedTlsPolicy
             observationStatus = $launch.ObservationStatus
             proxyBehaviorVerification = 'launched_but_unverified'
+            profileOwnershipId = $launch.ProfileOwnershipId
+            profileWarning = $launch.ProfileWarning
+            profileOwnershipWarning = $launch.ProfileOwnershipWarning
             reason = $launch.Reason
         }
         return (New-MihariManagementJsonResponse -StatusCode 200 -Value $result)
