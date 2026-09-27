@@ -228,9 +228,57 @@ function Get-MihariManagementStatusDocument {
         $managementHealth.healthy = $false
         $managementHealth | Add-Member -NotePropertyName errorCode -NotePropertyValue 'management_worker_failed' -Force
     }
+    $captureState = Get-MihariManagementSessionField -Session $Session -Name 'CaptureState'
+    $captureAvailable = ($null -ne $captureState)
+    $captureIncomplete = $false
+    $captureReason = $null
+    $captureAtUtc = $null
+    $captureEvidenceByteLimit = $null
+    $captureQueueCapacity = $null
+    $captureQueuePeak = $null
+    $captureSaturationCount = $null
+    if ($captureAvailable) {
+        $rawIncomplete = Get-MihariManagementSessionField -Session $captureState -Name 'Incomplete'
+        if ($rawIncomplete -is [bool]) { $captureIncomplete = [bool]$rawIncomplete }
+        elseif ([string]$rawIncomplete -match '^(?i:true|false)$') { $captureIncomplete = ([string]$rawIncomplete -ieq 'true') }
+        $rawReason = [string](Get-MihariManagementSessionField -Session $captureState -Name 'Reason')
+        if ($rawReason -in @('evidence_limit_reached', 'event_writer_failed')) { $captureReason = $rawReason }
+        elseif ($captureIncomplete) { $captureReason = 'unknown' }
+        $captureAtUtc = Get-MihariManagementUtcValue -Value (Get-MihariManagementSessionField -Session $captureState -Name 'AtUtc')
+        $parsedCaptureValue = 0L
+        $rawCaptureValue = Get-MihariManagementSessionField -Session $captureState -Name 'EvidenceByteLimit'
+        if ($null -ne $rawCaptureValue -and [long]::TryParse([string]$rawCaptureValue, [ref]$parsedCaptureValue) -and $parsedCaptureValue -ge 0) {
+            $captureEvidenceByteLimit = $parsedCaptureValue
+        }
+        $parsedCaptureValue = 0
+        $rawCaptureValue = Get-MihariManagementSessionField -Session $captureState -Name 'QueueCapacity'
+        if ($null -ne $rawCaptureValue -and [int]::TryParse([string]$rawCaptureValue, [ref]$parsedCaptureValue) -and $parsedCaptureValue -ge 0) {
+            $captureQueueCapacity = $parsedCaptureValue
+        }
+        $parsedCaptureValue = 0
+        $rawCaptureValue = Get-MihariManagementSessionField -Session $captureState -Name 'QueuePeak'
+        if ($null -ne $rawCaptureValue -and [int]::TryParse([string]$rawCaptureValue, [ref]$parsedCaptureValue) -and $parsedCaptureValue -ge 0) {
+            $captureQueuePeak = $parsedCaptureValue
+        }
+        $parsedCaptureValue = 0L
+        $rawCaptureValue = Get-MihariManagementSessionField -Session $captureState -Name 'SaturationCount'
+        if ($null -ne $rawCaptureValue -and [long]::TryParse([string]$rawCaptureValue, [ref]$parsedCaptureValue) -and $parsedCaptureValue -ge 0) {
+            $captureSaturationCount = $parsedCaptureValue
+        }
+    }
+    $captureDocument = [pscustomobject][ordered]@{
+        available = $captureAvailable
+        incomplete = $captureIncomplete
+        reason = $captureReason
+        atUtc = $captureAtUtc
+        evidenceByteLimit = $captureEvidenceByteLimit
+        queueCapacity = $captureQueueCapacity
+        queuePeak = $captureQueuePeak
+        saturationCount = $captureSaturationCount
+    }
     $status = [string]$Session.Status
     $effectiveStatus = $status
-    if ($status -eq 'running' -and (-not $proxyHealth.healthy -or -not $managementHealth.healthy)) {
+    if ($status -eq 'running' -and (-not $proxyHealth.healthy -or -not $managementHealth.healthy -or $captureIncomplete)) {
         $effectiveStatus = 'unhealthy'
     }
 
@@ -280,6 +328,19 @@ function Get-MihariManagementStatusDocument {
     if ($null -ne $Session.ManagementError) {
         $errors += [pscustomobject]@{ code = 'management_listener_error'; errorType = [string]$Session.ManagementError }
     }
+    $warnings = @()
+    if ($captureIncomplete) {
+        $captureWarning = [pscustomobject][ordered]@{
+            code = 'capture_incomplete'
+            severity = 'warning'
+            source = 'mihari'
+            reason = $captureReason
+            atUtc = $captureAtUtc
+            message = 'Evidence capture is incomplete.'
+        }
+        $warnings += $captureWarning
+        $errors += $captureWarning
+    }
     if ($null -ne $Session.CleanupErrors) { $cleanupErrors = @($Session.CleanupErrors) }
     else { $cleanupErrors = @() }
 
@@ -314,6 +375,8 @@ function Get-MihariManagementStatusDocument {
         findingCounts = $findingCounts
         findingCoverage = $findingCoverage
         findingProjectionError = $findingProjectionError
+        capture = $captureDocument
+        warnings = @($warnings)
         errors = @($errors | Select-Object -First 100)
         cleanupErrors = @($cleanupErrors | Select-Object -First 100)
     }
@@ -608,10 +671,13 @@ function Invoke-MihariManagementApiRequest {
         $status = Get-MihariManagementStatusDocument -Session $Session
         if ($path -eq '/api/health') {
             return (New-MihariManagementJsonResponse -StatusCode 200 -Value ([pscustomobject]@{
-                healthy = ($status.proxyHealth.healthy -and $status.managementHealth.healthy)
+                healthy = ($status.proxyHealth.healthy -and $status.managementHealth.healthy -and
+                    -not $status.capture.incomplete)
                 status = $status.effectiveStatus
                 proxyHealth = $status.proxyHealth
                 managementHealth = $status.managementHealth
+                capture = $status.capture
+                warnings = @($status.warnings)
             }))
         }
         return (New-MihariManagementJsonResponse -StatusCode 200 -Value $status)

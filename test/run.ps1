@@ -69,9 +69,11 @@ try {
             'upstream-self-reference' { & (Join-Path $PSScriptRoot 'upstream-self-reference.ps1') }
             'phase2-transport' {
                 & (Join-Path $PSScriptRoot 'phase2-streaming.ps1')
+                & (Join-Path $PSScriptRoot 'phase2-observer-impact.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-tls-environment.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-inspect-streaming.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-live-streaming.ps1')
+                & (Join-Path $PSScriptRoot 'management-capture-status.ps1')
             }
             'phase2-evidence' { & (Join-Path $PSScriptRoot 'phase2-evidence.ps1') }
             'phase2-workbench' {

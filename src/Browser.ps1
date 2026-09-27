@@ -296,24 +296,108 @@ function Get-MihariBrowserProfileArgument {
 }
 
 function Get-MihariBrowserProfileRecords {
-    param([Parameter(Mandatory = $true)][object] $SessionMetadata)
+    param(
+        [Parameter(Mandatory = $true)][object] $SessionMetadata,
+        [string] $ProfileOwnershipId,
+        [switch] $IncludeCoverage
+    )
 
     $outputDirectory = [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'outputDirectory')
-    if ([string]::IsNullOrWhiteSpace($outputDirectory) -or -not [System.IO.Directory]::Exists($outputDirectory)) { return @() }
     $records = New-Object 'System.Collections.Generic.List[object]'
-    foreach ($path in [System.IO.Directory]::GetFiles($outputDirectory, 'browser-profile-*.json', [System.IO.SearchOption]::TopDirectoryOnly)) {
+    $partial = $false
+    $truncated = $false
+    $scanned = 0
+    $maximumRecords = 32
+    $maximumMetadataBytes = 16384
+    if ([string]::IsNullOrWhiteSpace($outputDirectory) -or -not [System.IO.Directory]::Exists($outputDirectory)) {
+        if ($IncludeCoverage) {
+            return [pscustomobject][ordered]@{ records = @(); coverage = 'complete'; truncated = $false; partial = $false; recordsScanned = 0; recordLimit = $maximumRecords; metadataFileByteLimit = $maximumMetadataBytes }
+        }
+        return @()
+    }
+
+    $paths = New-Object 'System.Collections.Generic.List[string]'
+    if (-not [string]::IsNullOrWhiteSpace($ProfileOwnershipId)) {
+        if ($ProfileOwnershipId -match '^[0-9a-fA-F]{32}$') {
+            $exactPath = Get-MihariBrowserProfileRecordPath -OutputDirectory $outputDirectory -ProfileOwnershipId $ProfileOwnershipId
+            if ([System.IO.File]::Exists($exactPath)) { $paths.Add($exactPath) }
+        }
+    }
+    else {
         try {
-            $record = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)) -ErrorAction Stop
+            foreach ($path in [System.IO.Directory]::EnumerateFiles($outputDirectory, 'browser-profile-*.json', [System.IO.SearchOption]::TopDirectoryOnly)) {
+                if ($paths.Count -ge $maximumRecords) {
+                    $truncated = $true
+                    break
+                }
+                $paths.Add($path)
+            }
+        }
+        catch {
+            $partial = $true
+        }
+    }
+
+    $expectedSessionId = [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'id')
+    foreach ($path in $paths) {
+        $scanned++
+        $stream = $null
+        try {
+            $attributes = [System.IO.File]::GetAttributes($path)
+            if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $partial = $true
+                continue
+            }
+            $stream = New-Object System.IO.FileStream -ArgumentList @(
+                $path,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+            )
+            $buffer = New-Object byte[] ($maximumMetadataBytes + 1)
+            $readTotal = 0
+            while ($readTotal -lt $buffer.Length) {
+                $readCount = $stream.Read($buffer, $readTotal, $buffer.Length - $readTotal)
+                if ($readCount -le 0) { break }
+                $readTotal += $readCount
+            }
+            if ($readTotal -gt $maximumMetadataBytes -or $stream.ReadByte() -ne -1) {
+                $partial = $true
+                continue
+            }
+            $json = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $readTotal)
+            $record = ConvertFrom-Json -InputObject $json -ErrorAction Stop
+            $expectedName = 'browser-profile-{0}.json' -f [string]$record.profileOwnershipId
             if ($null -eq $record -or [int]$record.schemaVersion -ne 1 -or
-                -not [string]::Equals([string]$record.sessionId, [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'id'), [StringComparison]::Ordinal) -or
-                [System.IO.Path]::GetFileName($path) -ne ('browser-profile-{0}.json' -f [string]$record.profileOwnershipId)) {
+                -not [string]::Equals([string]$record.sessionId, $expectedSessionId, [StringComparison]::Ordinal) -or
+                -not [string]::Equals([System.IO.Path]::GetFileName($path), $expectedName, [StringComparison]::OrdinalIgnoreCase) -or
+                (-not [string]::IsNullOrWhiteSpace($ProfileOwnershipId) -and
+                    -not [string]::Equals([string]$record.profileOwnershipId, $ProfileOwnershipId, [StringComparison]::OrdinalIgnoreCase))) {
+                $partial = $true
                 continue
             }
             $records.Add($record)
         }
         catch {
-            # An unreadable ownership record is not authority to inspect or delete a profile.
-            continue
+            $partial = $true
+        }
+        finally {
+            if ($null -ne $stream) { $stream.Dispose() }
+        }
+    }
+
+    if ($IncludeCoverage) {
+        $coverage = 'complete'
+        if ($partial) { $coverage = 'partial' }
+        elseif ($truncated) { $coverage = 'truncated' }
+        return [pscustomobject][ordered]@{
+            records = @($records.ToArray())
+            coverage = $coverage
+            truncated = $truncated
+            partial = $partial
+            recordsScanned = $scanned
+            recordLimit = $maximumRecords
+            metadataFileByteLimit = $maximumMetadataBytes
         }
     }
     return @($records.ToArray())
@@ -347,7 +431,10 @@ function Test-MihariBrowserProfileMarker {
 function Get-MihariBrowserProfileState {
     param(
         [Parameter(Mandatory = $true)][object] $SessionMetadata,
-        [Parameter(Mandatory = $true)][object] $Record
+        [Parameter(Mandatory = $true)][object] $Record,
+        [AllowNull()][object[]] $ProcessInventory,
+        [bool] $ProcessInventorySupplied = $false,
+        [bool] $ProcessInventoryAvailable = $true
     )
 
     $sessionId = [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'id')
@@ -377,11 +464,21 @@ function Get-MihariBrowserProfileState {
         return $base
     }
 
-    try { $processes = @(Get-MihariBrowserProcesses) }
-    catch {
-        $base.state = 'process_state_unavailable'
-        $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. Mihari could not verify that Edge is closed, so cleanup is unavailable.'
-        return $base
+    if ($ProcessInventorySupplied) {
+        if (-not $ProcessInventoryAvailable) {
+            $base.state = 'process_state_unavailable'
+            $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. Mihari could not verify that Edge is closed, so cleanup is unavailable.'
+            return $base
+        }
+        $processes = @($ProcessInventory)
+    }
+    else {
+        try { $processes = @(Get-MihariBrowserProcesses) }
+        catch {
+            $base.state = 'process_state_unavailable'
+            $base.warning = 'This diagnostic profile may retain browser-managed cookies and history. Mihari could not verify that Edge is closed, so cleanup is unavailable.'
+            return $base
+        }
     }
     $expectedExecutable = [string]$Record.executablePath
     $matchingProcesses = New-Object 'System.Collections.Generic.List[object]'
@@ -428,11 +525,38 @@ function Get-MihariBrowserProfileStatus {
     param([Parameter(Mandatory = $true)][object] $SessionMetadata)
 
     $profiles = New-Object 'System.Collections.Generic.List[object]'
-    foreach ($record in @(Get-MihariBrowserProfileRecords -SessionMetadata $SessionMetadata)) {
-        $state = Get-MihariBrowserProfileState -SessionMetadata $SessionMetadata -Record $record
+    $inventory = Get-MihariBrowserProfileRecords -SessionMetadata $SessionMetadata -IncludeCoverage
+    $processes = @()
+    $processInventoryAvailable = $true
+    if (@($inventory.records).Count -gt 0) {
+        try { $processes = @(Get-MihariBrowserProcesses) }
+        catch { $processInventoryAvailable = $false }
+    }
+    foreach ($record in @($inventory.records)) {
+        $state = Get-MihariBrowserProfileState -SessionMetadata $SessionMetadata -Record $record `
+            -ProcessInventory $processes -ProcessInventorySupplied $true -ProcessInventoryAvailable $processInventoryAvailable
         if ($state.retained) { $profiles.Add($state) }
     }
-    return [pscustomobject][ordered]@{ profiles = @($profiles.ToArray()) }
+    $warning = $null
+    if ($inventory.truncated -and $inventory.partial) {
+        $warning = 'The bounded diagnostic profile inventory is partial and truncated; additional retained profiles may remain.'
+    }
+    elseif ($inventory.truncated) {
+        $warning = 'The diagnostic profile inventory reached its safety limit; additional retained profiles may remain.'
+    }
+    elseif ($inventory.partial) {
+        $warning = 'Some diagnostic profile records could not be verified; a retained browser profile may remain.'
+    }
+    return [pscustomobject][ordered]@{
+        profiles = @($profiles.ToArray())
+        coverage = [string]$inventory.coverage
+        truncated = [bool]$inventory.truncated
+        partial = [bool]$inventory.partial
+        recordsScanned = [int]$inventory.recordsScanned
+        recordLimit = [int]$inventory.recordLimit
+        metadataFileByteLimit = [int]$inventory.metadataFileByteLimit
+        warning = $warning
+    }
 }
 
 function Invoke-MihariBrowserProfileCleanup {
@@ -444,11 +568,11 @@ function Invoke-MihariBrowserProfileCleanup {
     if ($ProfileOwnershipId -notmatch '^[0-9a-fA-F]{32}$') {
         return [pscustomobject]@{ success = $false; errorCode = 'invalid_profile_id'; message = 'The diagnostic profile ID is invalid.' }
     }
-    $recordPath = Get-MihariBrowserProfileRecordPath -OutputDirectory ([string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'outputDirectory')) -ProfileOwnershipId $ProfileOwnershipId
+    $outputDirectory = [string](Get-MihariBrowserMetadataValue -Metadata $SessionMetadata -Name 'outputDirectory')
+    $recordPath = Get-MihariBrowserProfileRecordPath -OutputDirectory $outputDirectory -ProfileOwnershipId $ProfileOwnershipId
+    $exact = Get-MihariBrowserProfileRecords -SessionMetadata $SessionMetadata -ProfileOwnershipId $ProfileOwnershipId -IncludeCoverage
     $record = $null
-    foreach ($candidate in @(Get-MihariBrowserProfileRecords -SessionMetadata $SessionMetadata)) {
-        if ([string]::Equals([string]$candidate.profileOwnershipId, $ProfileOwnershipId, [StringComparison]::OrdinalIgnoreCase)) { $record = $candidate; break }
-    }
+    if (@($exact.records).Count -eq 1) { $record = $exact.records[0] }
     if ($null -eq $record) {
         return [pscustomobject]@{ success = $false; errorCode = 'profile_not_owned'; message = 'Mihari has no verified ownership record for this profile.' }
     }

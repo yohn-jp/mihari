@@ -63,6 +63,7 @@ $safeSessionId = [System.Text.RegularExpressions.Regex]::Replace($sessionId, '[^
 $profileRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'Mihari'
 $profilePath = Join-Path $profileRoot ('Edge-{0}-{1}' -f $safeSessionId, [Guid]::NewGuid().ToString('N'))
 $unrelatedPath = Join-Path $profileRoot ('Edge-unrelated-{0}' -f [Guid]::NewGuid().ToString('N'))
+$overflowProfilePath = Join-Path $profileRoot ('Edge-{0}-{1}' -f $safeSessionId, [Guid]::NewGuid().ToString('N'))
 $executablePath = Join-Path $temporaryRoot 'msedge.exe'
 $ownershipId = $null
 $cleanupFailure = $null
@@ -124,6 +125,50 @@ try {
     $cleaned = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method POST -Path '/api/browser/cleanup' -Token $session.ControlToken -Body ([pscustomobject]@{ profileOwnershipId = $ownershipId; confirmCleanup = $true }))
     Assert-MihariBrowserProfileTest ($cleaned.StatusCode -eq 200 -and $cleaned.Value.success -and $cleaned.Value.state -eq 'cleaned') 'Confirmed cleanup removes the exact closed Mihari profile.'
     Assert-MihariBrowserProfileTest (-not [System.IO.Directory]::Exists($profilePath) -and [System.IO.Directory]::Exists($unrelatedPath)) 'Cleanup deletes only the selected Mihari profile and preserves unrelated profile data.'
+
+    for ($index = 0; $index -lt 40; $index++) {
+        $inventoryId = $index.ToString('x32')
+        $inventoryProfilePath = Join-Path $profileRoot ('Edge-{0}-{1}' -f $safeSessionId, $inventoryId)
+        $inventoryRecord = [pscustomobject][ordered]@{
+            schemaVersion = 1
+            sessionId = $sessionId
+            profileOwnershipId = $inventoryId
+            profilePath = $inventoryProfilePath
+            executablePath = $executablePath
+            processId = (900000 + $index)
+            ownerStartTimeUtc = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            createdUtc = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            cleanupState = 'retained'
+            cleanupUtc = $null
+        }
+        $inventoryPath = Get-MihariBrowserProfileRecordPath -OutputDirectory $outputDirectory -ProfileOwnershipId $inventoryId
+        [System.IO.File]::WriteAllText($inventoryPath, (ConvertTo-Json -InputObject $inventoryRecord -Depth 4), [System.Text.UTF8Encoding]::new($false))
+    }
+    [void][System.IO.Directory]::CreateDirectory($overflowProfilePath)
+    $overflowLaunch = [pscustomobject]@{
+        Success = $true
+        Pid = 765433
+        Path = $executablePath
+        ProfilePath = $overflowProfilePath
+        OwnerStartTimeUtc = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        ProfileOwnershipId = $null
+    }
+    Assert-MihariBrowserProfileTest (Set-MihariBrowserProfileOwnership -SessionMetadata $session -Result $overflowLaunch) 'A selected profile can have its exact ownership record resolved even when the status inventory is bounded.'
+    $overflowOwnershipId = [string]$overflowLaunch.ProfileOwnershipId
+    $oversizedId = 'e' * 32
+    $oversizedPath = Get-MihariBrowserProfileRecordPath -OutputDirectory $outputDirectory -ProfileOwnershipId $oversizedId
+    $oversizedBytes = New-Object byte[] 16385
+    [System.IO.File]::WriteAllBytes($oversizedPath, $oversizedBytes)
+    $oversizedInventory = Get-MihariBrowserProfileRecords -SessionMetadata $session -ProfileOwnershipId $oversizedId -IncludeCoverage
+    Assert-MihariBrowserProfileTest ($oversizedInventory.partial -and $oversizedInventory.records.Count -eq 0) 'Oversized profile metadata is not read or trusted.'
+    $boundedStatus = Get-MihariBrowserProfileStatus -SessionMetadata $session
+    Assert-MihariBrowserProfileTest ($boundedStatus.truncated -and $boundedStatus.recordsScanned -eq $boundedStatus.recordLimit -and
+        [string]$boundedStatus.warning -match 'reached its safety limit') 'The browser API must report a persistent warning when profile inventory reaches its safety limit.'
+    $overflowCleanup = Invoke-MihariBrowserProfileTestRoute -Session $session -Request (New-MihariBrowserProfileRequest -Method POST -Path '/api/browser/cleanup' -Token $session.ControlToken -Body ([pscustomobject]@{ profileOwnershipId = $overflowOwnershipId; confirmCleanup = $true }))
+    Assert-MihariBrowserProfileTest ($overflowCleanup.StatusCode -eq 200 -and $overflowCleanup.Value.success -and
+        -not [System.IO.Directory]::Exists($overflowProfilePath)) 'Exact-ID cleanup remains available after the status page reports a truncated profile inventory.'
+    $html = Get-MihariManagementUiHtml -ControlToken $session.ControlToken
+    Assert-MihariBrowserProfileTest ($html.Contains('data-profile-inventory-warning')) 'The connected browser UI must display profile inventory coverage warnings.'
     Write-Host 'PASS browser-profile-cleanup: exact ownership marker, process state, protected API, explicit confirmation, and selected-profile-only deletion'
 }
 finally {
@@ -135,8 +180,12 @@ finally {
         try { [System.IO.Directory]::Delete($unrelatedPath, $true) }
         catch { $cleanupFailure = $_; Write-Warning ('Unrelated browser profile fixture cleanup failed: ' + $_.Exception.Message) }
     }
+    if ([System.IO.Directory]::Exists($overflowProfilePath)) {
+        try { [System.IO.Directory]::Delete($overflowProfilePath, $true) }
+        catch { $cleanupFailure = $_; Write-Warning ('Overflow browser profile fixture cleanup failed: ' + $_.Exception.Message) }
+    }
     if ([System.IO.Directory]::Exists($profileRoot)) {
-        $remaining = @(Get-ChildItem -LiteralPath $profileRoot -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -in @([System.IO.Path]::GetFileName($profilePath), [System.IO.Path]::GetFileName($unrelatedPath)) })
+        $remaining = @(Get-ChildItem -LiteralPath $profileRoot -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -in @([System.IO.Path]::GetFileName($profilePath), [System.IO.Path]::GetFileName($unrelatedPath), [System.IO.Path]::GetFileName($overflowProfilePath)) })
         if ($remaining.Count -gt 0) { $cleanupFailure = [System.InvalidOperationException]::new('A browser profile test directory remains.') }
     }
     if ([System.IO.Directory]::Exists($temporaryRoot)) {
