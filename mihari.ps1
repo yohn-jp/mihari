@@ -29,7 +29,7 @@ switch ($Command) {
         try {
             Start-MihariListener -Session $session -OnReady {
                 param($readySession)
-                Start-MihariManagementListener -Session $readySession
+                [void](Start-MihariManagementListener -Session $readySession)
                 [void](Save-MihariSessionMetadata -Session $readySession)
                 Format-MihariStartMessage -Session $readySession
             }
