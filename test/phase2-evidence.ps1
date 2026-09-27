@@ -33,7 +33,7 @@ function New-MihariEvidenceTestZip {
 }
 
 function ConvertTo-MihariEvidenceTestBytes {
-    param([Parameter(Mandatory = $true)][string]$Text)
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
     return ,([System.Text.UTF8Encoding]::new($false).GetBytes($Text))
 }
 
