@@ -2,8 +2,6 @@
 # only PowerShell 5.1 and platform .NET APIs. Bundle hashes detect modification;
 # they do not identify a trusted author or prove how the evidence was acquired.
 
-[void][System.Reflection.Assembly]::Load('System.IO.Compression')
-
 function Get-MihariEvidenceValue {
     param([AllowNull()][object]$InputObject, [Parameter(Mandatory = $true)][string]$Name)
     if ($null -eq $InputObject) { return $null }
@@ -609,6 +607,7 @@ function Export-MihariEvidenceBundle {
         [AllowNull()][object]$ShareProfile, [string]$RuleVersion = 'unknown', [string]$ApplicationRevision = 'unknown'
     )
     $contentParameters = @{}
+    [void][System.Reflection.Assembly]::Load('System.IO.Compression')
     foreach ($key in $PSBoundParameters.Keys) {
         if ($key -ne 'DestinationPath') { $contentParameters[$key] = $PSBoundParameters[$key] }
     }
@@ -675,7 +674,7 @@ function Test-MihariEvidenceRelativePath {
 }
 
 function Test-MihariEvidenceEntryIsSymlink {
-    param([Parameter(Mandatory = $true)][System.IO.Compression.ZipArchiveEntry]$Entry)
+    param([Parameter(Mandatory = $true)][object]$Entry)
     $attributes = [int]$Entry.ExternalAttributes
     $unixMode = ($attributes -shr 16) -band 0xF000
     if ($unixMode -eq 0xA000) { return $true }
@@ -685,7 +684,7 @@ function Test-MihariEvidenceEntryIsSymlink {
 
 function Read-MihariEvidenceZipEntryBytes {
     param(
-        [Parameter(Mandatory = $true)][System.IO.Compression.ZipArchiveEntry]$Entry,
+        [Parameter(Mandatory = $true)][object]$Entry,
         [Parameter(Mandatory = $true)][long]$MaximumBytes,
         [Parameter(Mandatory = $true)][ref]$TotalBytes,
         [Parameter(Mandatory = $true)][long]$MaximumTotalBytes
