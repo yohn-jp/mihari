@@ -253,7 +253,7 @@ function Stop-MihariH2OwnedEdgeProfile {
         Pid = $ProcessId
         ProfilePath = $ProfilePath
         Path = [string]$marker.executablePath
-        OwnerStartTimeUtc = [string]$marker.processStartTimeUtc
+        OwnerStartTimeUtc = $marker.processStartTimeUtc
     }
     if (-not (Test-MihariBrowserOwnedProcess -SessionId $SessionId -Launch $launch)) {
         throw 'Edge profile cleanup refused an unverified process identity.'

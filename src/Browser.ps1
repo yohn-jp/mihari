@@ -453,7 +453,7 @@ function Test-MihariBrowserProfileMarker {
             [string]::Equals([string]$marker.profilePath, [string]$Record.profilePath, [StringComparison]::OrdinalIgnoreCase) -and
             [string]::Equals([string]$marker.executablePath, [string]$Record.executablePath, [StringComparison]::OrdinalIgnoreCase) -and
             [int]$marker.processId -eq [int]$Record.processId -and
-            [string]::Equals([string]$marker.processStartTimeUtc, [string]$Record.ownerStartTimeUtc, [StringComparison]::Ordinal))
+            (Test-MihariBrowserUtcIdentityEqual -Left $marker.processStartTimeUtc -Right $Record.ownerStartTimeUtc))
     }
     catch {
         return $false

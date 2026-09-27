@@ -115,19 +115,25 @@ try {
     $diagnosticMarkerPath = Join-Path $diagnosticProfilePath 'MihariProfileOwner.json'
     $diagnosticMarker = [pscustomobject]@{
         owner = 'Mihari'
-        sessionId = 'another-session'
+        sessionId = 'session-test'
         processId = 4321
         profilePath = $diagnosticProfilePath
         executablePath = 'C:\Program Files\Microsoft\Edge\Application\msedge.exe'
-        processStartTimeUtc = '2026-01-02T03:04:05.0000000Z'
+        processStartTimeUtc = '2026-01-02T03:04:05.0000001Z'
     }
     [System.IO.File]::WriteAllText($diagnosticMarkerPath, (ConvertTo-Json -InputObject $diagnosticMarker -Compress), [System.Text.UTF8Encoding]::new($false))
     $diagnosticLaunch = [pscustomobject]@{
         Pid = 4321
         ProfilePath = $diagnosticProfilePath
         Path = [string]$diagnosticMarker.executablePath
-        OwnerStartTimeUtc = [string]$diagnosticMarker.processStartTimeUtc
+        OwnerStartTimeUtc = '2026-01-02T03:04:05.0000000Z'
+        SourceIdentity = 'edge-diagnostic-test'
+        ClockId = 'edge-diagnostic-clock'
     }
+    $parsedDiagnosticTimestamp = (ConvertFrom-Json -InputObject '{"timestamp":"2026-01-02T03:04:05.0000000Z"}').timestamp
+    Assert-MihariTest -Condition ((Test-MihariBrowserUtcIdentityEqual -Left $parsedDiagnosticTimestamp -Right $diagnosticLaunch.OwnerStartTimeUtc) -and
+        (Test-MihariBrowserUtcIdentityEqual -Left '2026-01-02T04:04:05.0000000+01:00' -Right $diagnosticLaunch.OwnerStartTimeUtc) -and
+        -not (Test-MihariBrowserUtcIdentityEqual -Left $diagnosticMarker.processStartTimeUtc -Right $diagnosticLaunch.OwnerStartTimeUtc)) -Message 'Browser ownership time comparison must normalize JSON-parsed dates to UTC while rejecting a one-tick identity difference.'
     $ownedProcessVerification = Get-MihariBrowserOwnedProcessVerification -SessionId 'session-test' -Launch $diagnosticLaunch
     Assert-MihariTest -Condition (-not $ownedProcessVerification.Verified -and
         $ownedProcessVerification.FailureDetailCode -eq 'profile_marker_mismatch') -Message 'Owned browser verification must classify marker mismatches with a fixed safe detail code.'
