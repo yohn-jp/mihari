@@ -26,7 +26,8 @@ function Send-Phase2UiOriginResponse {
     try {
         $stream = $client.GetStream()
         $request = Read-MihariTestHeaderText -Stream $stream -Context 'Phase 2 UI local origin request'
-        Assert-MihariTest -Condition ($request.StartsWith(('GET {0} HTTP/1.1' -f $ExpectedPath))) -Message 'The browser/proxy request must reach the exact local fixture path.'
+        $requestLine = ($request -split "`r`n", 2)[0]
+        Assert-MihariTest -Condition ($requestLine.StartsWith(('GET {0}?' -f $ExpectedPath)) -and $requestLine.EndsWith(' HTTP/1.1')) -Message 'The browser/proxy request must reach the exact local fixture path with its query present.'
         $bodyBytes = [Text.Encoding]::ASCII.GetBytes($Body)
         $headers = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: text/html; charset=utf-8`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n")
         $stream.Write($headers, 0, $headers.Length)
