@@ -67,6 +67,7 @@ try {
                 & (Join-Path $PSScriptRoot 'phase2-streaming.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-tls-environment.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-inspect-streaming.ps1')
+                & (Join-Path $PSScriptRoot 'phase2-live-streaming.ps1')
             }
             'phase2-evidence' { & (Join-Path $PSScriptRoot 'phase2-evidence.ps1') }
         }
