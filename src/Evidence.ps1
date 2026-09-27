@@ -14,6 +14,40 @@ function Get-MihariEvidenceValue {
     return $null
 }
 
+function Ensure-MihariEvidenceCompression {
+    $archiveTypeName = 'System.IO.Compression.ZipArchive'
+    $archiveType = $archiveTypeName -as [type]
+    if ($null -ne $archiveType) { return $archiveType.Assembly }
+
+    $assemblyIdentity = 'System.IO.Compression'
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        $assemblyIdentity = 'System.IO.Compression, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'
+    }
+    $lastLoadErrorType = $null
+    try { [void][System.Reflection.Assembly]::Load($assemblyIdentity) }
+    catch { $lastLoadErrorType = $_.Exception.GetType().FullName }
+
+    $archiveType = $archiveTypeName -as [type]
+    if ($null -ne $archiveType) { return $archiveType.Assembly }
+
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        $runtimeDirectory = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+        foreach ($assemblyFile in @('System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll')) {
+            $assemblyPath = [System.IO.Path]::Combine($runtimeDirectory, $assemblyFile)
+            if (-not [System.IO.File]::Exists($assemblyPath)) { continue }
+            try { [void][System.Reflection.Assembly]::LoadFrom($assemblyPath) }
+            catch { $lastLoadErrorType = $_.Exception.GetType().FullName }
+            $archiveType = $archiveTypeName -as [type]
+            if ($null -ne $archiveType) { return $archiveType.Assembly }
+        }
+    }
+
+    $runtime = [string]$PSVersionTable.PSVersion
+    $errorType = 'unavailable'
+    if ($null -ne $lastLoadErrorType) { $errorType = [string]$lastLoadErrorType }
+    throw ('The required .NET ZIP APIs are unavailable. Runtime={0}; assembly={1}; loadErrorType={2}.' -f $runtime, $assemblyIdentity, $errorType)
+}
+
 function New-MihariEvidenceShareContext {
     param([AllowNull()][object]$ShareProfile)
     $options = [ordered]@{
@@ -607,7 +641,7 @@ function Export-MihariEvidenceBundle {
         [AllowEmptyCollection()][object[]]$EnvironmentSnapshots = @(), [AllowNull()][object]$CaptureCoverage,
         [AllowNull()][object]$ShareProfile, [string]$RuleVersion = 'unknown', [string]$ApplicationRevision = 'unknown'
     )
-    [void][System.Reflection.Assembly]::Load('System.IO.Compression')
+    [void](Ensure-MihariEvidenceCompression)
     $contentParameters = @{}
     foreach ($key in $PSBoundParameters.Keys) {
         if ($key -ne 'DestinationPath') { $contentParameters[$key] = $PSBoundParameters[$key] }
@@ -831,7 +865,7 @@ function Import-MihariEvidenceBundle {
         [ValidateRange(1, 1000000)][int]$MaximumRecords = 100000,
         [ValidateRange(128, 1048576)][int]$MaximumRecordBytes = 65536
     )
-    [void][System.Reflection.Assembly]::Load('System.IO.Compression')
+    [void](Ensure-MihariEvidenceCompression)
     $archiveFull = [System.IO.Path]::GetFullPath($ArchivePath)
     if (-not [System.IO.File]::Exists($archiveFull)) { throw 'The evidence archive does not exist.' }
     Assert-MihariEvidencePathHasNoReparsePoint -Path $archiveFull

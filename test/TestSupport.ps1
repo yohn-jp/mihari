@@ -8,6 +8,17 @@ function Assert-MihariTest {
     }
 }
 
+function Assert-MihariTestThrows {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock] $Action,
+        [Parameter(Mandatory = $true)][string] $Message
+    )
+    $threw = $false
+    try { & $Action }
+    catch { $threw = $true }
+    Assert-MihariTest -Condition $threw -Message $Message
+}
+
 function Start-MihariTestRootConfirmation {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('Add', 'Remove')][string] $Operation,
