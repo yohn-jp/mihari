@@ -277,7 +277,10 @@ try {
     }
         $browserProfilePath = [string]$launch.profilePath
         if ($null -ne $launch.pid -and [string]$launch.pid -match '^\d+$') { $browserProcessId = [int]$launch.pid }
-    Assert-MihariTest -Condition ([bool]$launch.success) -Message ('The UI browser action must launch the real diagnostic Edge process. API response: ' + [string]$launchResponse.Content)
+    if (-not [bool]$launch.success) {
+        $launchEventSummary = Get-MihariIssue3SafeEventSummary -EventsPath ([string]$metadata.eventsPath)
+        throw ('The UI browser action must launch the real diagnostic Edge process. API response: ' + [string]$launchResponse.Content + '; safe session event summary: ' + $launchEventSummary)
+    }
         Assert-MihariTest -Condition (-not [string]::IsNullOrWhiteSpace($browserProfilePath) -and (Test-Path -LiteralPath $browserProfilePath -PathType Container)) -Message 'The launched Edge process must use a dedicated temporary profile.'
         Assert-MihariTest -Condition ([string]$launch.proxyEndpoint -eq ('http://127.0.0.1:{0}' -f $proxyPort)) -Message 'The management launch result must identify the active Mihari proxy endpoint.'
 
