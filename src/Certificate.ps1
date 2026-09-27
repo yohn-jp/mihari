@@ -3,27 +3,22 @@ function New-MihariEphemeralRsa {
     [CmdletBinding()]
     param([int] $KeySize = 2048)
 
-    $parameters = New-Object System.Security.Cryptography.CngKeyCreationParameters
-    # CngKey.Create with a null key name creates an ephemeral CLR-managed key.
-    $length = [System.Security.Cryptography.CngProperty]::new(
-        'Length',
-        [System.BitConverter]::GetBytes($KeySize),
-        [System.Security.Cryptography.CngPropertyOptions]::None
-    )
-    $parameters.Parameters.Add($length)
-    $key = [System.Security.Cryptography.CngKey]::Create(
-        [System.Security.Cryptography.CngAlgorithm]::Rsa,
-        $null,
-        $parameters
-    )
+    # RSACng generates its own unnamed key. Calling CngKey.Create with a
+    # PowerShell $null string argument can bind as an empty (persistent) name.
+    $rsa = [System.Security.Cryptography.RSACng]::new($KeySize)
     try {
+        $key = $rsa.Key
         if (-not $key.IsEphemeral) {
             throw 'CNG returned a persistent RSA key; Inspect cannot start.'
         }
-        return [System.Security.Cryptography.RSACng]::new($key)
+        if ($rsa.KeySize -ne $KeySize) {
+            throw 'CNG returned an RSA key with an unexpected size.'
+        }
+        return $rsa
     }
-    finally {
-        $key.Dispose()
+    catch {
+        $rsa.Dispose()
+        throw
     }
 }
 
