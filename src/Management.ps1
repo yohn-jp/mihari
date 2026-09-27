@@ -672,6 +672,7 @@ function Invoke-MihariManagementApiRequest {
             requestedHttpVersion = $launch.RequestedHttpVersion
             requestedTlsPolicy = $launch.RequestedTlsPolicy
             observationStatus = $launch.ObservationStatus
+            proxyBehaviorVerification = 'launched_but_unverified'
             reason = $launch.Reason
         }
         return (New-MihariManagementJsonResponse -StatusCode 200 -Value $result)

@@ -75,7 +75,10 @@ try {
             'phase2-workbench' {
                 & (Join-Path $PSScriptRoot 'traffic-projection.ps1')
                 & (Join-Path $PSScriptRoot 'findings-comparison.ps1')
+                & (Join-Path $PSScriptRoot 'cases-dependencies.ps1')
+                & (Join-Path $PSScriptRoot 'phase2-management-cases.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-evidence.ps1')
+                & (Join-Path $PSScriptRoot 'phase2-management-evidence.ps1')
                 & (Join-Path $PSScriptRoot 'browser-observation.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-hpack.ps1')
                 & (Join-Path $PSScriptRoot 'phase2-http2-native.ps1')

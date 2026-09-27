@@ -732,6 +732,13 @@ function Stop-MihariSession {
     catch { [void]$cleanupErrors.Add('Could not stop the owned browser observation cleanly.') }
 
     try {
+        if (Get-Command Stop-MihariManagementV2EvidenceJobs -ErrorAction SilentlyContinue) {
+            Stop-MihariManagementV2EvidenceJobs -Session $Session
+        }
+    }
+    catch { [void]$cleanupErrors.Add('Could not stop evidence jobs cleanly.') }
+
+    try {
         if ($null -ne $Session.ManagementListener -and (Get-Command Stop-MihariManagementListener -ErrorAction SilentlyContinue)) {
             $managementStop = Stop-MihariManagementListener -Session $Session
             if ($null -ne $managementStop -and $null -ne $managementStop.errors) {

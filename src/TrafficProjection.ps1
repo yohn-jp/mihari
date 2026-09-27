@@ -698,9 +698,11 @@ function Update-MihariTrafficProjectionStore {
                 while ($read -lt $count) { $got = $stream.Read($buffer, $read, $count - $read); if ($got -le 0) { break }; $read += $got }
                 if ($read -le 0) { break }
                 $position = 0
+                $incompleteLine = $false
                 while ($position -lt $read -and $processed -lt $MaximumEventsPerPoll) {
                     $newline = [Array]::IndexOf($buffer, [byte]10, $position, $read - $position)
                     if ($newline -lt 0) {
+                        $incompleteLine = $true
                         $partialLength = $read - $position
                         if ($partialLength -gt $Store.MaximumLineBytes) {
                             $Store.DiscardingLine = $true
@@ -743,7 +745,7 @@ function Update-MihariTrafficProjectionStore {
                     $position = $newline + 1
                 }
                 if ($position -lt $read -and $processed -ge $MaximumEventsPerPoll) { break }
-                if ($Store.DiscardingLine -or $position -ge $read) { break }
+                if ($Store.DiscardingLine -or $incompleteLine -or $position -ge $read) { break }
             }
             $pendingOnly = ([long]$Store.PendingOffset -ge 0 -and -not [bool]$Store.DiscardingLine -and
                 [long]$Store.PendingOffset -eq [long]$Store.Offset -and [long]$Store.PendingBytes -eq ([long]$stream.Length - [long]$Store.Offset))

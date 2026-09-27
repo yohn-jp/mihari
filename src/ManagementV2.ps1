@@ -99,6 +99,10 @@ function Invoke-MihariManagementV2Request {
     $path = [string]$Request.Path
     $trafficResponse = Invoke-MihariManagementV2TrafficRequest -Session $Session -Request $Request
     if ($null -ne $trafficResponse) { return $trafficResponse }
+    $caseResponse = Invoke-MihariManagementV2CaseRequest -Session $Session -Request $Request
+    if ($null -ne $caseResponse) { return $caseResponse }
+    $evidenceResponse = Invoke-MihariManagementV2EvidenceRequest -Session $Session -Request $Request
+    if ($null -ne $evidenceResponse) { return $evidenceResponse }
     if ($method -eq 'GET' -and $path -eq '/api/v2/capabilities') {
         $environment = Get-MihariEnvironmentCapabilities
         $inspect = Test-MihariCapability -Mode Inspect
