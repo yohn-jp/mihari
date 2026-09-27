@@ -194,7 +194,7 @@ function Read-MihariHpackInteger {
 
 function Write-MihariHpackInteger {
     param(
-        [Parameter(Mandatory = $true)][System.Collections.Generic.List[byte]]$Output,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[byte]]$Output,
         [Parameter(Mandatory = $true)][long]$Value,
         [Parameter(Mandatory = $true)][ValidateRange(1, 8)][int]$PrefixBits,
         [Parameter(Mandatory = $true)][int]$HighBits
@@ -393,7 +393,7 @@ function Find-MihariHpackNameIndex {
 function Write-MihariHpackHuffmanString {
     param(
         [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][System.Collections.Generic.List[byte]]$Output,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[byte]]$Output,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Bytes
     )
 
@@ -437,7 +437,7 @@ function Write-MihariHpackHuffmanString {
 function Write-MihariHpackString {
     param(
         [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][System.Collections.Generic.List[byte]]$Output,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[byte]]$Output,
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value
     )
 
