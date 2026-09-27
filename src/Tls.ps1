@@ -204,6 +204,18 @@ function Invoke-MihariTlsDuplexRelay {
     }
 }
 
+function Test-MihariTlsReadTimeout {
+    param([Parameter(Mandatory=$true)][System.Exception]$Exception)
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [System.TimeoutException]) { return $true }
+        if ($current -is [System.Net.Sockets.SocketException] -and
+            $current.SocketErrorCode -eq [System.Net.Sockets.SocketError]::TimedOut) { return $true }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
 function Invoke-MihariInspect {
     param(
         [Parameter(Mandatory=$true)]$Session,
@@ -273,8 +285,8 @@ function Invoke-MihariInspect {
             throw [System.IO.InvalidDataException]::new('A WebSocket upgrade cannot carry an HTTP request body.')
         }
         $expect = Get-MihariHeaderText -Headers $request.Headers -Name 'Expect'
-        if ($expect) {
-            throw [System.NotSupportedException]::new('Expect is unavailable on the inspected TLS path.')
+        if ($expect -and $expect -ine '100-continue') {
+            throw [System.NotSupportedException]::new('Only Expect: 100-continue is supported.')
         }
         $hasCredentials = ($request.Headers.Contains('Authorization') -or
             $request.Headers.Contains('Proxy-Authorization') -or $request.Headers.Contains('Cookie'))
@@ -384,17 +396,61 @@ function Invoke-MihariInspect {
         $timer.Restart()
         Write-MihariHttpHead -Stream $upstreamTls -Message $request -RequestTarget $target.UpstreamTarget -CloseConnection:(-not $requestKeepAlive -and -not $webSocket) -UpgradeWebSocket:$webSocket
         $upstreamTls.Flush()
-        $requestTransfer = Copy-MihariHttpBody -Source $clientTls -Destination $upstreamTls -Framing $requestFraming -Session $Session
-        $upstreamTls.Flush()
-        $response = Read-MihariHttpHead -Stream $upstreamTls -Kind Response -RequestMethod $request.Method
+        $earlyFinal = $false
+        $sentContinue = $false
+        $response = $null
+        if ($expect) {
+            for ($earlyCount = 0; $earlyCount -lt 8; $earlyCount++) {
+                $firstByte = -1
+                $probeTimedOut = $false
+                $previousTimeout = $upstreamTls.ReadTimeout
+                try {
+                    $upstreamTls.ReadTimeout = 1000
+                    try { $firstByte = $upstreamTls.ReadByte() }
+                    catch {
+                        if (Test-MihariTlsReadTimeout -Exception $_.Exception) { $probeTimedOut = $true }
+                        else { throw }
+                    }
+                }
+                finally { $upstreamTls.ReadTimeout = $previousTimeout }
+                if ($probeTimedOut) { break }
+                if ($firstByte -lt 0) { throw [System.IO.EndOfStreamException]::new('Upstream closed before an HTTP response to Expect.') }
+                $earlyResponse = Read-MihariHttpHead -Stream $upstreamTls -Kind Response -RequestMethod $request.Method -InitialByte ([byte]$firstByte)
+                if ($null -eq $earlyResponse) { throw [System.IO.EndOfStreamException]::new('Upstream closed during an early HTTP response.') }
+                $earlyStatus = [int]$earlyResponse.StatusCode
+                if ($earlyStatus -eq 101 -or $earlyStatus -ge 200) {
+                    $response = $earlyResponse
+                    $earlyFinal = $true
+                    break
+                }
+                Write-MihariHttpHead -Stream $clientTls -Message $earlyResponse
+                $clientTls.Flush()
+                if ($earlyStatus -eq 100) { $sentContinue = $true; break }
+            }
+            if (-not $earlyFinal -and -not $sentContinue) {
+                if ($earlyCount -ge 8) { throw [System.IO.InvalidDataException]::new('Too many early informational HTTP responses.') }
+                $continueWire = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 100 Continue`r`n`r`n")
+                $clientTls.Write($continueWire, 0, $continueWire.Length)
+                $clientTls.Flush()
+                $sentContinue = $true
+            }
+        }
+        $requestTransfer = [pscustomobject]@{ Bytes = [long]0 }
+        if (-not $earlyFinal) {
+            $requestTransfer = Copy-MihariHttpBody -Source $clientTls -Destination $upstreamTls -Framing $requestFraming -Session $Session
+            $upstreamTls.Flush()
+            $response = Read-MihariHttpHead -Stream $upstreamTls -Kind Response -RequestMethod $request.Method
+        }
         $informationalCount = 0
         while ($null -ne $response -and [int]$response.StatusCode -ge 100 -and [int]$response.StatusCode -lt 200 -and [int]$response.StatusCode -ne 101) {
             $informationalCount++
             if ($informationalCount -gt 8) {
                 throw (New-Object System.IO.InvalidDataException -ArgumentList @('Too many informational HTTP responses from upstream.'))
             }
-            Write-MihariHttpHead -Stream $clientTls -Message $response
-            $clientTls.Flush()
+            if ([int]$response.StatusCode -ne 100 -or -not $sentContinue) {
+                Write-MihariHttpHead -Stream $clientTls -Message $response
+                $clientTls.Flush()
+            }
             $response = Read-MihariHttpHead -Stream $upstreamTls -Kind Response -RequestMethod $request.Method
         }
         if ($null -eq $response) {
@@ -408,7 +464,7 @@ function Invoke-MihariInspect {
         $responseFraming = Get-MihariHttpBodyFraming -Message $response -Kind Response -RequestMethod $request.Method
         $responseKeepAlive = (Test-MihariHttpKeepAlive -Message $response) -and
             $response.Version -eq 'HTTP/1.1' -and $responseFraming.Reusable -and
-            $requestKeepAlive -and -not $acceptedWebSocket
+            $requestKeepAlive -and -not $acceptedWebSocket -and -not $earlyFinal
         $contentType = Get-MihariHeaderText -Headers $response.Headers -Name 'Content-Type'
         $isSse = ($contentType -and $contentType -match '^text/event-stream(?:\s*;|\s*$)')
         if ($acceptedWebSocket -or $isSse) {
